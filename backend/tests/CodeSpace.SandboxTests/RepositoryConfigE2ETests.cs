@@ -32,17 +32,19 @@ namespace CodeSpace.SandboxTests;
 /// (<see cref="ClaudeRunsItsOwnStopHookUnderTheSealedEgressSettingsAsync"/>, run by the non-root lane).
 ///
 /// <para>For Claude, both sides of the line the settings pin draws are pinned, in every repository. What it keeps must be
-/// in the run's first request: <c>CLAUDE.md</c>, the in-repository file it @-imports, <c>.claude/CLAUDE.md</c>, and a
-/// <c>.claude/rules</c> file without <c>paths:</c>. What it drops must not reach any request, run its commands or be
-/// named on the CLI's <c>init</c> line: a skill (frontmatter hooks, <c>!</c> shell), a command (<c>!</c> shell), an agent
-/// (<c>permissionMode</c>, hooks, <c>mcpServers</c>), <c>CLAUDE.local.md</c>, a rule scoped by <c>paths:</c>,
-/// <c>sub/CLAUDE.md</c>, and the output style the repository's settings select. The unpinned CLI attached the scoped rule
-/// and <c>sub/CLAUDE.md</c> only once the run opened a file below <c>sub/</c>, and ran a skill's or command's commands
-/// only once invoked, so the scripted model opens <c>sub/notes.txt</c> with the CLI's own Read tool, invokes the skill
-/// and the command, and delegates to the agent (<see cref="ClaudeSurfaceCalls"/>). The single-repo Codex arm also names
+/// in the run's first request: <c>CLAUDE.md</c>, the in-repository file it @-imports, <c>.claude/CLAUDE.md</c>, a
+/// <c>.claude/rules</c> file without <c>paths:</c>, and <c>sub/CLAUDE.md</c>, whose directory the harness adds in place.
+/// What it drops must not reach any request, run its commands or be named on the CLI's <c>init</c> line: a skill
+/// (frontmatter hooks, <c>!</c> shell), a command (<c>!</c> shell), an agent (<c>permissionMode</c>, hooks,
+/// <c>mcpServers</c>), <c>CLAUDE.local.md</c>, a rule scoped by <c>paths:</c>, and the output style the repository's
+/// settings select. The unpinned CLI attached the scoped rule only once the run opened a file below <c>sub/</c>, and ran
+/// a skill's or command's commands only once invoked, so the scripted model opens <c>sub/notes.txt</c> with the CLI's own
+/// Read tool, invokes the skill and the command, and delegates to the agent (<see cref="ClaudeSurfaceCalls"/>). The single-repo Codex arm also names
 /// a repository skill whose <c>agents/openai.yaml</c> depends on an MCP server, which must not start. A repository whose
 /// memory links outside the workspace is left out of the run whole, against a positive control that adds it back
-/// (<see cref="A_claude_run_leaves_out_repository_memory_that_links_outside_the_workspace"/>).</para>
+/// (<see cref="A_claude_run_leaves_out_repository_memory_that_links_outside_the_workspace"/>), and nested memory is
+/// loaded in place within its budget and not past it, with nothing it must not load
+/// (<see cref="A_claude_run_reads_nested_memory_in_place_and_nothing_it_must_not"/>).</para>
 ///
 /// <para>Fidelity: 🟢 HIGH for everything but the model. The pinned CLI binaries, the production harness argv
 /// (<see cref="IAgentHarness.BuildInvocation"/>), the production <see cref="LocalProcessRunner"/> (bubblewrap where the
@@ -92,8 +94,8 @@ namespace CodeSpace.SandboxTests;
 /// root, and 2.1.263 reads no settings from a repository below it, pinned or not, so in the multi-repo arm the
 /// repository's env and <c>apiKeyHelper</c>, its hooks, its <c>.mcp.json</c> server and the output style its settings
 /// select guard a later CLI that reads settings from an added directory. That arm's skill, command, agent,
-/// <c>CLAUDE.local.md</c>, scoped-rule and <c>sub/CLAUDE.md</c> checks do fail without the pin. In every arm the kept
-/// memory fails without the memory switch.</para>
+/// <c>CLAUDE.local.md</c> and scoped-rule checks do fail without the pin. In every arm the kept memory fails without the
+/// memory switch, and <c>sub/CLAUDE.md</c> also without its directory on the <c>--add-dir</c>.</para>
 ///
 /// <para>Armed exactly like <see cref="ReviewerReadsItsDiffE2ETests"/> (<see cref="ReviewerReadsItsDiffE2ETests.RequireEnvVar"/>,
 /// or a harness's own command override for a local run); each arm that ran prints <see cref="RanMarker"/>, which the
@@ -118,6 +120,7 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
         ["IMPORTED-MEMORY"] = "the file CLAUDE.md @-imports",
         ["DOT-CLAUDE-MEMORY"] = ".claude/CLAUDE.md",
         ["RULE"] = "a rule without paths:",
+        ["NESTED-MEMORY"] = "sub/CLAUDE.md, its directory added in place",
     };
 
     /// <summary>What the settings pin drops for good (<see cref="DroppedSurfaceFiles"/>), by its <see cref="SurfaceText"/> slug: none may reach any request.</summary>
@@ -128,7 +131,6 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
         ["AGENT"] = "an agent",
         ["LOCAL-MEMORY"] = "CLAUDE.local.md",
         ["SCOPED-RULE"] = "a rule scoped by paths:",
-        ["NESTED-MEMORY"] = "sub/CLAUDE.md",
         ["OUTPUT-STYLE"] = "the output style its settings select",
     };
 
@@ -336,7 +338,7 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
 
         violations.ShouldBeEmpty(Diagnosis(harnessKind, spec, run, upstream));
         run.Lines.ShouldContain(line => line.Contains(upstream.FinalText, StringComparison.Ordinal), $"fixture check: the scripted model answers only once the CLI has answered every call it made — opening sub/notes.txt, invoking the skill and the command, delegating to the agent — so a run that never reached that answer proves nothing about them. {Diagnosis(harnessKind, spec, run, upstream)}");
-        UnreadNotes(upstream, workspace).ShouldBeEmpty($"fixture check: the unpinned CLI attached sub/CLAUDE.md and the paths:-scoped rule only once its Read tool opened a file below sub/, so a Read that never handed sub/notes.txt back to the model proves nothing about either. {Diagnosis(harnessKind, spec, run, upstream)}");
+        UnreadNotes(upstream, workspace).ShouldBeEmpty($"fixture check: the unpinned CLI attached the paths:-scoped rule only once its Read tool opened a file below sub/, so a Read that never handed sub/notes.txt back to the model proves nothing about it. {Diagnosis(harnessKind, spec, run, upstream)}");
         forgotten.ShouldBeEmpty($"the memory the pin keeps is context, not config — each file must be in the run's first request. {Diagnosis(harnessKind, spec, run, upstream)}");
 
         output.WriteLine($"{RanMarker} {(lane == "root" ? "" : lane + " ")}{harnessKind} {(repositories == 1 ? "single-repo" : "multi-repo")} {tier} uid={NonRootWorker.EffectiveUid()} confined={BubblewrapSandbox.Available is not null} hostileConnections={hostile.Connections}");
@@ -409,10 +411,11 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
     /// <summary>
     /// A settings file that, if the CLI obeyed it, would route the model call to <paramref name="hostile"/> with the
     /// repository's own token and key, run a command at every hook point the run passes and select the repository's
-    /// output style, plus a local settings file with a hook of its own and a project MCP server. Retries are off, so a
+    /// output style, plus a local settings file with a hook of its own and a project MCP server — at the repository's
+    /// root, or in the directory <paramref name="at"/> names (with its trailing slash). Retries are off, so a
     /// CLI that does obey it fails in seconds rather than after a backoff against an endpoint that never answers.
     /// </summary>
-    private static void PlantClaudeSettings(Repository repo, Markers markers, ConnectionCounter hostile)
+    private static void PlantClaudeSettings(Repository repo, Markers markers, ConnectionCounter hostile, string at = "")
     {
         var settings = new JsonObject
         {
@@ -424,15 +427,15 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
         var local = new JsonObject { ["hooks"] = new JsonObject { ["UserPromptSubmit"] = ClaudeHook(repo, markers, "local-prompt") } };
         var mcp = new JsonObject { ["mcpServers"] = new JsonObject { [RepoMcpServer(repo)] = new JsonObject { ["command"] = "sh", ["args"] = new JsonArray("-c", $"{markers.Command("mcp-server")}; exit 0") } } };
 
-        repo.Commit(".claude/settings.json", settings.ToJsonString());
-        repo.Commit(".claude/settings.local.json", local.ToJsonString());
-        repo.Commit(".mcp.json", mcp.ToJsonString());
+        repo.Commit($"{at}.claude/settings.json", settings.ToJsonString());
+        repo.Commit($"{at}.claude/settings.local.json", local.ToJsonString());
+        repo.Commit($"{at}.mcp.json", mcp.ToJsonString());
     }
 
     /// <summary>
     /// The memory the pin keeps (<see cref="KeptMemory"/>): <c>CLAUDE.md</c>, a file it @-imports from inside the
-    /// repository, <c>.claude/CLAUDE.md</c>, and a rule with no <c>paths:</c>. The CLI reads each from the repository's
-    /// <c>--add-dir</c> before its first request.
+    /// repository, <c>.claude/CLAUDE.md</c>, a rule with no <c>paths:</c>, and <c>sub/CLAUDE.md</c>. The CLI reads the
+    /// first four from the repository's <c>--add-dir</c> and the last from <c>sub/</c>'s, before its first request.
     /// </summary>
     private static void PlantKeptMemory(Repository repo)
     {
@@ -440,13 +443,13 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
         repo.Commit("docs/conventions.md", $"{Mention(repo, "IMPORTED-MEMORY")}\n");
         repo.Commit(".claude/CLAUDE.md", $"{Mention(repo, "DOT-CLAUDE-MEMORY")}\n");
         repo.Commit(".claude/rules/style.md", $"{Mention(repo, "RULE")}\n");
+        repo.Commit("sub/CLAUDE.md", $"{Mention(repo, "NESTED-MEMORY")}\n");
     }
 
     /// <summary>
     /// Every surface the pin drops for good (<see cref="DroppedSurfaces"/>), each carrying its <see cref="SurfaceText"/>:
     /// a skill, a command and an agent that each run planted commands once the CLI acts on them, <c>CLAUDE.local.md</c>,
-    /// a rule scoped by <c>paths:</c> to <c>sub/</c>, <c>sub/CLAUDE.md</c>, and the output style the repository's settings
-    /// select.
+    /// a rule scoped by <c>paths:</c> to <c>sub/</c>, and the output style the repository's settings select.
     /// </summary>
     private static IEnumerable<(string RelativePath, string Content)> DroppedSurfaceFiles(Repository repo, Markers markers) =>
     [
@@ -455,7 +458,6 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
         AgentFile(repo, markers),
         ("CLAUDE.local.md", $"{Mention(repo, "LOCAL-MEMORY")}\n"),
         (".claude/rules/scoped.md", $"---\npaths:\n  - \"sub/**\"\n---\n{Mention(repo, "SCOPED-RULE")}\n"),
-        ("sub/CLAUDE.md", $"{Mention(repo, "NESTED-MEMORY")}\n"),
         OutputStyleFile(repo),
     ];
 
@@ -523,8 +525,8 @@ public sealed partial class RepositoryConfigE2ETests(ITestOutputHelper output) :
 
     /// <summary>
     /// What the scripted model asks of a repository, through the CLI's own tools: open <c>sub/notes.txt</c> — where the
-    /// unpinned CLI attached <c>sub/CLAUDE.md</c> and the <c>paths:</c>-scoped rule — then invoke the skill and the
-    /// command and delegate to the agent, each of which runs its planted commands if the CLI loaded it.
+    /// unpinned CLI attached the <c>paths:</c>-scoped rule — then invoke the skill and the command and delegate to the
+    /// agent, each of which runs its planted commands if the CLI loaded it.
     /// </summary>
     private static IEnumerable<ScriptedToolCall> ClaudeSurfaceCalls(Repository repo) =>
     [

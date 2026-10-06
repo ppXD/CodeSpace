@@ -4,7 +4,7 @@ using CodeSpace.Core.Services.Agents.Workspace;
 
 namespace CodeSpace.Core.Services.Agents.Harnesses.Claude;
 
-/// <summary>One directory's memory walked to everything it reaches (<see cref="Closure"/>): the files it reads, within the bounds, and the paths their imports name.</summary>
+/// <summary>One directory's memory walked to everything it reaches (<see cref="Closure"/>): the files it reads, within the bounds and the build's <see cref="Budget"/>, and the paths their imports name.</summary>
 internal static partial class ClaudeWorkspaceMemory
 {
     /// <summary>A superset of the CLI's import grammar (<c>(?:^|\s)@((?:[^\s\\]|\\ )+)</c>): no whitespace is required before the <c>@</c>.</summary>
@@ -18,15 +18,19 @@ internal static partial class ClaudeWorkspaceMemory
     /// Everything one directory's memory can reach, walked until the first thing that leaves the workspace or cannot be
     /// checked. Fewest hops first, in the order each entry was found, so a file is first reached at its least depth — a
     /// rule a <c>CLAUDE.md</c> also imports is read as the rule it is, with all of its own imports' hops left — and the
-    /// notice names the same escape on every build.
+    /// notice names the same escape on every build. Every path it resolves and every byte it reads is spent from the
+    /// build's <paramref name="budget"/>, which throws once that is spent.
     /// </summary>
-    private sealed class Closure(string workspace, string root)
+    private sealed class Closure(string workspace, string root, Budget budget)
     {
         private readonly PriorityQueue<Entry, (int Hops, int Order)> _pending = new();
         private readonly HashSet<string> _seen = new(StringComparer.Ordinal);
         private readonly HashSet<string> _imports = new(StringComparer.Ordinal);
         private int _found;
         private int _scanned;
+
+        /// <summary>The bytes of every file the memory imports, which the CLI loads beside it — known in full once <see cref="FirstEscape"/> found none.</summary>
+        public long ImportedBytes { get; private set; }
 
         /// <summary>Why the directory must be left out, or null when all of its memory stays inside the workspace.</summary>
         public string? FirstEscape()
@@ -67,7 +71,7 @@ internal static partial class ClaudeWorkspaceMemory
         /// </summary>
         private string? Examine(Entry entry)
         {
-            if (PhysicalPath.File(entry.Path) is not { } physical) return null;
+            if (budget.Resolve(entry.Path) is not { } physical) return null;
 
             var isDirectory = Directory.Exists(physical);
 
@@ -106,7 +110,10 @@ internal static partial class ClaudeWorkspaceMemory
 
             var text = ReadBounded(physical, MaxScannedBytes - _scanned, out var read);
 
+            budget.Read(read);
             _scanned += read;
+
+            if (entry.Hops > 0) ImportedBytes += read;
 
             if (_scanned > MaxScannedBytes) return $"its memory spans more than {MaxScannedBytes} bytes to check";
 
@@ -162,12 +169,13 @@ internal static partial class ClaudeWorkspaceMemory
         }
     }
 
-    private static int ReadFully(Stream stream, byte[] buffer)
+    /// <summary>Fills <paramref name="buffer"/> from <paramref name="offset"/> on, to its end or the stream's; how many bytes that read.</summary>
+    private static int ReadFully(Stream stream, byte[] buffer, int offset = 0)
     {
-        var total = 0;
+        var total = offset;
 
         for (int read; total < buffer.Length && (read = stream.Read(buffer, total, buffer.Length - total)) > 0;) total += read;
 
-        return total;
+        return total - offset;
     }
 }

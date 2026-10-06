@@ -124,6 +124,17 @@ public sealed class NonRootWorkerE2ETests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task A_standard_claude_run_reads_nested_memory_in_place()
+    {
+        // The shipped posture against a nested directory loaded in place: every command the hostile settings beside its
+        // memory plant would leave a marker in the workspace this run may write.
+        if (!NonRootWorker.Require()) return;
+
+        using var arms = new RepositoryConfigE2ETests(output);
+        await arms.ClaudeReadsNestedMemoryInPlaceAsync(AgentAutonomyLevel.Standard, repositories: 1, Lane);
+    }
+
+    [Fact]
     public async Task A_standard_allowlist_claude_run_still_runs_its_own_stop_hook_beside_the_sealed_egress_settings()
     {
         // An acceptance-bearing Allowlist run: its in-loop check rides the config home's settings.json, its egress

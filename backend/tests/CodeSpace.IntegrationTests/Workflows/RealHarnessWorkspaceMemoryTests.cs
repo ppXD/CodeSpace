@@ -16,20 +16,22 @@ using Shouldly;
 namespace CodeSpace.IntegrationTests.Workflows;
 
 /// <summary>
-/// A repository whose <c>CLAUDE.md</c> is a committed symlink, run through the production pipeline: does the CLI get its
-/// workspace added back for memory, and does the run's timeline say why not when it doesn't?
+/// A repository's memory run through the production pipeline: does the CLI get its workspace added back for memory, and
+/// does the run's timeline say why not when it doesn't — for a <c>CLAUDE.md</c> committed as a symlink — and does a
+/// nested directory holding memory ride the same <c>--add-dir</c>, committed or written by an earlier round?
 ///
 /// <para>🟡 Medium-mock (Rule 12): the real DI-wired <see cref="IAgentRunExecutor"/>, the real
 /// <see cref="ClaudeCodeHarness"/>, <c>LocalGitWorkspaceProvider</c> cloning a <c>file://</c> bare remote (the symlink
 /// arrives the way git checks one out), the real <see cref="LocalProcessRunner"/>, the real push, grader and revise loop,
 /// and real Postgres. Only the CLI is a fake: a <c>/bin/sh</c> script armed through
-/// <see cref="ClaudeCodeHarness.CommandEnvVar"/> that reads the argv it was really spawned with and fails the round if
-/// <c>--add-dir</c> is there when it must not be, or missing when it must be. The real CLI following the link is pinned
-/// by <c>RepositoryConfigE2ETests</c>.</para>
+/// <see cref="ClaudeCodeHarness.CommandEnvVar"/> that reads the argv it was really spawned with and fails the round
+/// unless its <c>--add-dir</c> names exactly the directories the round must load memory from. The real CLI following
+/// the link, and loading a nested directory's memory in place, is pinned by <c>RepositoryConfigE2ETests</c>.</para>
 ///
 /// <para>Every run takes a revise round — the first round drafts work its check refuses — because the executor builds a
 /// fresh spec for each round: the notice must be said once while the workspace stays as it was, and said again when the
-/// draft round's agent re-points <c>CLAUDE.md</c>, in either direction.</para>
+/// draft round's agent re-points <c>CLAUDE.md</c>, in either direction; a nested <c>CLAUDE.md</c> the draft round writes
+/// must be added for the revision.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -61,7 +63,7 @@ public sealed class RealHarnessWorkspaceMemoryTests
         using var outside = new OutsideFile();
         using var remote = new BareRemote();
         await remote.SeedAsync(CheckScript, claudeMdTarget: Target(committed, outside));
-        using var cli = new MemoryCheckingFakeCli(draft: Expected(committed), revision: Expected(draftRepoints ?? committed), draftRepoints: draftRepoints is null ? null : Target(draftRepoints, outside));
+        using var cli = new MemoryCheckingFakeCli(draft: Expected(committed), revision: Expected(draftRepoints ?? committed), draftAction: draftRepoints is null ? null : $"ln -sfn '{Target(draftRepoints, outside)}' CLAUDE.md");
 
         var (teamId, userId) = await SeedTeamAsync();
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
@@ -78,11 +80,37 @@ public sealed class RealHarnessWorkspaceMemoryTests
         notices.Select(e => (e.Kind, e.Text)).ShouldBe(said.Select(text => (AgentEventKind.Warning, text)), "a Warning when the run first leaves memory out, and another only when a round's agent changed what is left out");
     }
 
+    [Theory]
+    [InlineData(true, false, ". pkg", ". pkg")]   // a committed pkg/CLAUDE.md is added in place for both rounds
+    [InlineData(false, true, ".", ". lib")]       // the draft round writes lib/CLAUDE.md: the revision is launched with it added
+    public async Task A_nested_claude_md_is_added_in_place_and_one_a_round_writes_is_added_for_the_next(bool committed, bool draftWrites, string draft, string revision)
+    {
+        if (OperatingSystem.IsWindows()) return;   // the fake CLI is a /bin/sh script
+
+        using var remote = new BareRemote();
+        await remote.SeedAsync(CheckScript, claudeMdTarget: "AGENTS.md", files: committed ? new Dictionary<string, string> { ["pkg/CLAUDE.md"] = "Keep the package's API stable.\n" } : null);
+        using var cli = new MemoryCheckingFakeCli(draft, revision, draftAction: draftWrites ? "mkdir -p lib && printf 'Keep the library pure.\\n' > lib/CLAUDE.md" : null);
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var runId = await CreateRunAsync(teamId, userId, repoId, cli.Env());
+
+        await ExecuteRealAsync(runId);
+
+        var (run, result) = await LoadAsync(runId);
+        var notices = (await LoadEventsAsync(runId)).Where(e => e.Text.StartsWith(NoticePrefix, StringComparison.Ordinal)).ToList();
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, $"the fake CLI fails a round whose --add-dir does not name exactly the workspace and its nested memory; error: {run.Error}; launches: {string.Join(", ", cli.Launches())}");
+        cli.Launches().ShouldBe(new[] { draft, revision }, "each round is launched with the nested memory its workspace holds when the round starts");
+        result.ReviseRounds.ShouldBe(1, "fixture check: the drafted round failed its check, so the executor built a second spec for the revision");
+        notices.ShouldBeEmpty("nothing was left out");
+    }
+
     /// <summary>What <c>CLAUDE.md</c> links to for <paramref name="where"/>.</summary>
     private static string Target(string where, OutsideFile outside) => where == Outside ? outside.Path : where;
 
-    /// <summary>What a launch's argv must say about the workspace when <c>CLAUDE.md</c> links to <paramref name="where"/>.</summary>
-    private static string Expected(string where) => where == Outside ? "absent" : "added";
+    /// <summary>What a launch's argv must say about the workspace when <c>CLAUDE.md</c> links to <paramref name="where"/>: no <c>--add-dir</c>, or the workspace alone.</summary>
+    private static string Expected(string where) => where == Outside ? "absent" : ".";
 
     private static AgentTask TaskWith(Guid repositoryId, IReadOnlyDictionary<string, string> env) => new()
     {
@@ -192,7 +220,7 @@ public sealed class RealHarnessWorkspaceMemoryTests
         }
     }
 
-    /// <summary>A bare local remote whose one commit holds the contract's check, an <c>AGENTS.md</c>, and a <c>CLAUDE.md</c> committed as a symlink. GUID-suffixed; best-effort cleanup.</summary>
+    /// <summary>A bare local remote whose one commit holds the contract's check, an <c>AGENTS.md</c>, a <c>CLAUDE.md</c> committed as a symlink, and any other files given. GUID-suffixed; best-effort cleanup.</summary>
     private sealed class BareRemote : IDisposable
     {
         private readonly string _root = Path.Combine(Path.GetTempPath(), "cs-memory-remote-" + Guid.NewGuid().ToString("N"));
@@ -206,7 +234,7 @@ public sealed class RealHarnessWorkspaceMemoryTests
 
         public string Url => new Uri(_bare).AbsoluteUri;
 
-        public async Task SeedAsync(string checkScript, string claudeMdTarget)
+        public async Task SeedAsync(string checkScript, string claudeMdTarget, IReadOnlyDictionary<string, string>? files = null)
         {
             await Git(_root, "init", "--bare", "-b", "main", _bare);
 
@@ -219,6 +247,13 @@ public sealed class RealHarnessWorkspaceMemoryTests
             await File.WriteAllTextAsync(Path.Combine(seed, "check.sh"), checkScript);
             await File.WriteAllTextAsync(Path.Combine(seed, "AGENTS.md"), "Keep the change small.\n");
             File.CreateSymbolicLink(Path.Combine(seed, "CLAUDE.md"), claudeMdTarget);
+
+            foreach (var (relative, content) in files ?? new Dictionary<string, string>())
+            {
+                Directory.CreateDirectory(Path.GetDirectoryName(Path.Combine(seed, relative))!);
+                await File.WriteAllTextAsync(Path.Combine(seed, relative), content);
+            }
+
             await Git(seed, "add", "-A");
             await Git(seed, "commit", "-m", "seed");
             await Git(seed, "push", "origin", "main");
@@ -239,10 +274,11 @@ public sealed class RealHarnessWorkspaceMemoryTests
     }
 
     /// <summary>
-    /// The fake <c>claude</c>: records whether the argv it was spawned with carries <c>--add-dir</c>, exits 9 when that is
-    /// not what the test expects of its round, and otherwise drafts <c>feature.txt</c> — re-pointing <c>CLAUDE.md</c> as
-    /// it does, when told to — or writes the revision, when its goal is the executor's revise instruction, and prints a
-    /// successful stream-json result. Named and staged with the <see cref="FakeAgentCliMarker"/> markers, so a real-CLI
+    /// The fake <c>claude</c>: records the directories the argv it was spawned with names after <c>--add-dir</c> —
+    /// <c>absent</c> for none, else <c>.</c> for the first, the workspace, and each other one relative to it — exits 9
+    /// when that is not what the test expects of its round, and otherwise drafts <c>feature.txt</c> — running the draft
+    /// action as it does, when given one — or writes the revision, when its goal is the executor's revise instruction,
+    /// and prints a successful stream-json result. Named and staged with the <see cref="FakeAgentCliMarker"/> markers, so a real-CLI
     /// gate elsewhere in the process sees it for a fake. Arms the process-wide <see cref="ClaudeCodeHarness.CommandEnvVar"/>;
     /// restores it and deletes its directory on dispose.
     /// </summary>
@@ -253,28 +289,32 @@ public sealed class RealHarnessWorkspaceMemoryTests
         private readonly string _launches;
         private readonly string _draft;
         private readonly string _revision;
-        private readonly string _draftRepoints;
+        private readonly string _draftAction;
 
-        /// <param name="draft">What the draft round's argv must say about the workspace: <c>added</c> or <c>absent</c>.</param>
+        /// <param name="draft">The directories the draft round's argv must add, as the fake records them: <c>absent</c>, <c>.</c> or <c>. pkg</c>.</param>
         /// <param name="revision">The same, for the revision.</param>
-        /// <param name="draftRepoints">What the draft round re-points <c>CLAUDE.md</c> to, or null to leave it as committed.</param>
-        public MemoryCheckingFakeCli(string draft, string revision, string? draftRepoints)
+        /// <param name="draftAction">A shell command the draft round runs in its workspace, or null for none.</param>
+        public MemoryCheckingFakeCli(string draft, string revision, string? draftAction)
         {
-            (_draft, _revision, _draftRepoints) = (draft, revision, draftRepoints ?? "");
+            (_draft, _revision, _draftAction) = (draft, revision, draftAction ?? "");
             Directory.CreateDirectory(_directory);
             _launches = Path.Combine(_directory, "launches.txt");
 
             var script = Path.Combine(_directory, FakeAgentCliMarker.ScriptNamePrefix + "claude.sh");
             File.WriteAllText(script, "#!/bin/sh\n" + FakeAgentCliDialect.ClaudeGoalFunction + $$"""
                 goal=$(claude_goal)
-                memory=absent
-                for arg in "$@"; do [ "$arg" = "--add-dir" ] && memory=added; done
+                memory=absent; first=; listing=0
+                for arg in "$@"; do
+                  case "$arg" in --add-dir) listing=1; continue ;; --*) listing=0 ;; esac
+                  [ "$listing" = 1 ] || continue
+                  if [ -z "$first" ]; then first=$arg; memory=.; else memory="$memory ${arg#"$first"/}"; fi
+                done
                 printf '%s\n' "$memory" >> "$FAKE_LAUNCHES"
                 case "$goal" in {{AgentRunExecutor.ReviseInstructionPrefix}}*) expected=$FAKE_EXPECT_REVISION ;; *) expected=$FAKE_EXPECT_DRAFT ;; esac
-                [ "$memory" = "$expected" ] || { echo "expected the workspace $expected, argv: $*" >&2; exit 9; }
+                [ "$memory" = "$expected" ] || { echo "expected the memory directories '$expected', argv: $*" >&2; exit 9; }
                 case "$goal" in
                   {{AgentRunExecutor.ReviseInstructionPrefix}}*) printf 'revised\n' > feature.txt ;;
-                  *) printf 'draft\n' > feature.txt; [ -z "$FAKE_DRAFT_REPOINTS" ] || ln -sfn "$FAKE_DRAFT_REPOINTS" CLAUDE.md ;;
+                  *) printf 'draft\n' > feature.txt; [ -z "$FAKE_DRAFT_ACTION" ] || eval "$FAKE_DRAFT_ACTION" ;;
                 esac
                 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done"}'
 
@@ -285,7 +325,7 @@ public sealed class RealHarnessWorkspaceMemoryTests
             Environment.SetEnvironmentVariable(ClaudeCodeHarness.CommandEnvVar, script);
         }
 
-        public IReadOnlyDictionary<string, string> Env() => new Dictionary<string, string> { ["FAKE_LAUNCHES"] = _launches, ["FAKE_EXPECT_DRAFT"] = _draft, ["FAKE_EXPECT_REVISION"] = _revision, ["FAKE_DRAFT_REPOINTS"] = _draftRepoints };
+        public IReadOnlyDictionary<string, string> Env() => new Dictionary<string, string> { ["FAKE_LAUNCHES"] = _launches, ["FAKE_EXPECT_DRAFT"] = _draft, ["FAKE_EXPECT_REVISION"] = _revision, ["FAKE_DRAFT_ACTION"] = _draftAction };
 
         /// <summary>What each launch's argv said, in order.</summary>
         public IReadOnlyList<string> Launches() => File.Exists(_launches) ? File.ReadAllLines(_launches) : Array.Empty<string>();
