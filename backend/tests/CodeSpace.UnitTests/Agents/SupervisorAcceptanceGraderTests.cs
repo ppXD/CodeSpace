@@ -404,6 +404,54 @@ public class SupervisorAcceptanceGraderTests
         AgentAcceptanceContract.IsInfraFailure("setup-timed-out", workPresent: false).ShouldBeTrue();
     }
 
+    // ── The grade window: whatever a contract authors, every step of a grade runs under a bounded wall clock ──
+
+    [Theory]
+    [InlineData(45, 45)]                                                                                            // a normal window passes through untouched
+    [InlineData(SupervisorLane.MaxAcceptanceGradeTimeoutSeconds, SupervisorLane.MaxAcceptanceGradeTimeoutSeconds)]   // the ceiling itself is allowed
+    [InlineData(0, SupervisorLane.AcceptanceGradeTimeoutSeconds)]                                                   // 0 armed NO wall clock at all — it grades at the default
+    [InlineData(-1, SupervisorLane.AcceptanceGradeTimeoutSeconds)]                                                  // and so does a negative one
+    [InlineData(int.MaxValue, SupervisorLane.MaxAcceptanceGradeTimeoutSeconds)]                                     // a huge window is capped
+    public async Task Every_grade_step_runs_under_a_bounded_window(int authored, int expected)
+    {
+        var runners = new RecordingRunnerRegistry();
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "tests/" }, SetupCommand = new[] { "npm", "ci" } };
+        await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, authored, Anchor("abc123def4567890"), CancellationToken.None);
+
+        runners.Invocations.Select(i => i.Command).ShouldBe(new[] { "git", "git", "git", "git", "npm" }, "fixture check: the oracle restore's git steps and the setup step all ran");
+        runners.Invocations.ShouldAllBe(i => i.TimeoutSeconds == expected, "the oracle restore and the setup step run under the bounded window");
+        oracle.Context!.Task.TimeoutSeconds.ShouldBe(expected, "and so does the check");
+    }
+
+    [Theory]
+    [InlineData(null, true)]                                                // absent → the default window
+    [InlineData(1, true)]
+    [InlineData(SupervisorLane.MaxAcceptanceGradeTimeoutSeconds, true)]     // the ceiling itself is allowed
+    [InlineData(0, false)]                                                  // the grader would grade it at the default, not unbounded
+    [InlineData(-1, false)]
+    [InlineData(SupervisorLane.MaxAcceptanceGradeTimeoutSeconds + 1, false)]   // the grader would cap it
+    [InlineData(int.MaxValue, false)]
+    public void An_authored_window_the_grader_would_rewrite_is_refused_where_it_is_authored(int? authored, bool valid)
+    {
+        // The grader bounds every step for the lanes that never validate (above). An operator's own contract IS
+        // validated, so a window the grader would rewrite is refused there, naming the ceiling, instead of a long
+        // suite quietly ending as tests-timed-out at a window nobody authored.
+        var invalid = AgentAcceptanceContract.ValidateAuthored(new SupervisorAcceptanceSpec { Command = Command, TimeoutSeconds = authored });
+
+        if (valid)
+        {
+            invalid.ShouldBeNull();
+            return;
+        }
+
+        invalid.ShouldNotBeNull();
+        invalid.ShouldContain("timeoutSeconds");
+        invalid.ShouldContain(SupervisorLane.MaxAcceptanceGradeTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture), customMessage: "the refusal names the ceiling the operator has to stay under");
+    }
+
     [Theory]
     [InlineData("repo 'web': grade-error: judge binary missing", true)]      // executor multi-repo crash wrap (AgentRunExecutor :1310)
     [InlineData("repo 'web': clone-failed: connection refused", true)]       // wrapped grader detail (:1316 / Rehydrate :730)
@@ -981,9 +1029,9 @@ public class SupervisorAcceptanceGraderTests
     {
         // The literal is the wire value on durable receipts — a rename/bump is a re-qualification decision, not
         // an invisible refactor. Bump in the SAME PR as any grading-semantics change.
-        // v7: delayed repository, patch, and captured-world grades preserve the candidate producer's trusted
-        // routing and observed identity for model-backed oracles; legacy missing evidence remains Unknown.
-        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v7");
+        // v8: every grade step runs under a bounded window — a non-positive authored timeout grades at the default
+        // instead of arming no wall clock, and a longer one is capped at SupervisorLane.MaxAcceptanceGradeTimeoutSeconds.
+        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v8");
     }
 
     [Fact]

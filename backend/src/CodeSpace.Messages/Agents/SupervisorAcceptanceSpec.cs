@@ -70,7 +70,11 @@ public sealed record SupervisorAcceptanceSpec
     /// P3.1: wall-clock cap (seconds) for THIS contract's grade, overriding the server's default (a plain compiled-in
     /// constant — see the grading service). Absent ⇒ the default. A real test suite (a cold-cache dependency
     /// install, a large monorepo) can author a longer window here instead of the check racing a one-size-fits-all
-    /// ceiling; a lightweight lint/artifact check can leave this unset.
+    /// ceiling; a lightweight lint/artifact check can leave this unset. Authoring refuses a value outside
+    /// [1, <c>SupervisorLane.MaxAcceptanceGradeTimeoutSeconds</c>] (<c>AgentAcceptanceContract.ValidateAuthored</c>); for a
+    /// lane that never validates, the grader bounds it the same way: a non-positive value grades at the default and a
+    /// longer one is capped. OPERATOR-only —
+    /// a supervisor decision's acceptance never carries it (<see cref="ModelAuthoredAcceptanceConverter"/>).
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public int? TimeoutSeconds { get; init; }
@@ -83,7 +87,9 @@ public sealed record SupervisorAcceptanceSpec
     /// closed as an infrastructure fault (<c>AgentAcceptanceContract.IsInfraFailure</c>'s <c>setup-failed:</c>/
     /// <c>setup-timed-out</c> details), never a statement about the code's correctness. Capped by the same
     /// <see cref="TimeoutSeconds"/> window as the check itself (a separate budget was deliberately not added — the
-    /// contract author who needs a longer window for a cold-cache install already has one lever to pull).
+    /// contract author who needs a longer window for a cold-cache install already has one lever to pull). OPERATOR-only:
+    /// it executes workspace bytes before the check, so a supervisor decision's acceptance never carries it
+    /// (<see cref="ModelAuthoredAcceptanceConverter"/>).
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? SetupCommand { get; init; }

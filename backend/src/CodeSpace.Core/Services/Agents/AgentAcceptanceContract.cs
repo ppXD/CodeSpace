@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
@@ -215,11 +216,19 @@ public static class AgentAcceptanceContract
     /// rubric, a schema check with no schema) would invert the gate's fail-closed philosophy. Null = valid; else the
     /// legible reason. The graders independently re-enforce every rule at grade time fail-closed, so a spec that
     /// bypasses authoring validation (the supervisor lane, a raw API caller) still can never silently pass.
+    ///
+    /// <para>The same holds for the grade window: the grader runs every step under (0,
+    /// <see cref="SupervisorLane.MaxAcceptanceGradeTimeoutSeconds"/>] whatever the contract says, so an authored
+    /// <see cref="SupervisorAcceptanceSpec.TimeoutSeconds"/> outside that range is refused here, where the operator can
+    /// see why, instead of being rewritten at grade time.</para>
     /// </summary>
     public static string? ValidateAuthored(SupervisorAcceptanceSpec spec)
     {
         if (spec.Command.All(string.IsNullOrWhiteSpace))
             return "acceptance requires a non-empty command — the argv for TestsPass, the deliverable paths for every other kind.";
+
+        if (spec.TimeoutSeconds is { } window && (window <= 0 || window > SupervisorLane.MaxAcceptanceGradeTimeoutSeconds))
+            return $"acceptance timeoutSeconds must be between 1 and {SupervisorLane.MaxAcceptanceGradeTimeoutSeconds} (SupervisorLane.MaxAcceptanceGradeTimeoutSeconds, the longest any grade step runs); omit it to grade in the {SupervisorLane.AcceptanceGradeTimeoutSeconds}-second default.";
 
         switch (spec.Kind)
         {

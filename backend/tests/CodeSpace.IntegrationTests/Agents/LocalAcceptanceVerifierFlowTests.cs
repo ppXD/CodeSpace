@@ -100,6 +100,23 @@ public sealed class LocalAcceptanceVerifierFlowTests(PostgresFixture fixture)
         grade.EvidenceArtifactId.ShouldBeNull();
     }
 
+    [Theory]
+    [InlineData(0)]
+    [InlineData(SupervisorLane.MaxAcceptanceGradeTimeoutSeconds + 1)]
+    public async Task A_window_the_grader_would_rewrite_is_a_typed_incomplete_contract_and_runs_nothing(int authored)
+    {
+        using var seed = await SeedAsync(["/bin/sh", "-c", "touch should-not-run"], timeoutSeconds: authored);
+        using var scope = fixture.BeginScope();
+        var verifier = scope.Resolve<LocalAcceptanceVerifier>();
+        using var context = await verifier.PrepareAsync(seed.Preparation, CancellationToken.None);
+        var grade = await verifier.GradeAsync(seed.Request(context), CancellationToken.None);
+        grade.Passed.ShouldBeFalse();
+        grade.Class.ShouldBe(GradeFailureClass.SpecIncomplete);
+        grade.Detail.ShouldContain("timeoutSeconds");
+        grade.Detail.ShouldContain(SupervisorLane.MaxAcceptanceGradeTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
+        File.Exists(Path.Combine(seed.Directory, "should-not-run")).ShouldBeFalse("a contract refused for its window never runs its check");
+    }
+
     [Fact]
     public async Task A_context_cannot_be_reused_for_another_team_owner_or_contract()
     {
@@ -295,12 +312,12 @@ public sealed class LocalAcceptanceVerifierFlowTests(PostgresFixture fixture)
         grade.Detail.ShouldBe(mismatch == "artifact-team" ? "grade-error: declared-deliverable-content-MetadataMissing" : "grade-error: declared-deliverable-receipt-missing");
     }
 
-    private async Task<Seed> SeedAsync(IReadOnlyList<string> argv, IReadOnlyList<string>? oraclePaths = null, IReadOnlyList<string>? protectedPaths = null, BenchmarkGradingKind? kind = null)
+    private async Task<Seed> SeedAsync(IReadOnlyList<string> argv, IReadOnlyList<string>? oraclePaths = null, IReadOnlyList<string>? protectedPaths = null, BenchmarkGradingKind? kind = null, int timeoutSeconds = 30)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture);
         var directory = Path.Combine(Path.GetTempPath(), "cs-local-grade-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(directory);
-        var task = new AgentTask { Goal = "verify exact local work", Harness = "test", WorkspaceDirectory = directory, Autonomy = AgentAutonomyLevel.Trusted, Permissions = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Trusted), Acceptance = new SupervisorAcceptanceSpec { Kind = kind, Command = argv, OraclePaths = oraclePaths, ProtectedPaths = protectedPaths, TimeoutSeconds = 30 } };
+        var task = new AgentTask { Goal = "verify exact local work", Harness = "test", WorkspaceDirectory = directory, Autonomy = AgentAutonomyLevel.Trusted, Permissions = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Trusted), Acceptance = new SupervisorAcceptanceSpec { Kind = kind, Command = argv, OraclePaths = oraclePaths, ProtectedPaths = protectedPaths, TimeoutSeconds = timeoutSeconds } };
         using var scope = fixture.BeginScopeAs(userId, teamId);
         var runs = scope.Resolve<IAgentRunService>();
         var run = await runs.CreateAsync(task, teamId, null, null, cancellationToken: CancellationToken.None);

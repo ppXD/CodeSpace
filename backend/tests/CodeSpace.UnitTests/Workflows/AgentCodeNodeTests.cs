@@ -272,6 +272,29 @@ public class AgentCodeNodeTests
         task.Workspace.Repositories.Single(r => !r.IsPrimary).Access.ShouldBe(WorkspaceAccess.Read, "a related repo with no authored access defaults to read-only context");
     }
 
+    [Theory]
+    [InlineData(7200, false)]   // the grader would cap it at 3600
+    [InlineData(0, false)]      // the grader would grade it at the 300 s default, not without a wall clock
+    [InlineData(900, true)]     // inside the bounds: the operator's window reaches the task as authored
+    public async Task An_acceptance_window_outside_the_grade_bounds_fails_the_node_at_staging(int authored, bool staged)
+    {
+        var config = RequiredConfig();
+        config["acceptance"] = JsonDocument.Parse($$"""{"command":["sh","check.sh"],"timeoutSeconds":{{authored}}}""").RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        if (staged)
+        {
+            result.Status.ShouldBe(NodeStatus.Suspended);
+            JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.Acceptance!.TimeoutSeconds.ShouldBe(authored);
+            return;
+        }
+
+        result.Status.ShouldBe(NodeStatus.Failure, "a window the grader would rewrite fails loud before a billed agent runs");
+        result.Error.ShouldContain("timeoutSeconds");
+        result.Error.ShouldContain(SupervisorLane.MaxAcceptanceGradeTimeoutSeconds.ToString(System.Globalization.CultureInfo.InvariantCulture));
+    }
+
     [Fact]
     public async Task Malformed_repository_input_fails_the_node()
     {
