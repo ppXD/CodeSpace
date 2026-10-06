@@ -163,6 +163,8 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     {
         EnsureWithinInputCap(task.Goal);
 
+        var guides = CodexRepositoryGuides.For(task);
+
         // P3.2: a CONTINUE re-stage rewrites the `exec --json` seed to `exec resume <id> --json` so Codex picks up the
         // prior thread. The subcommand must follow `exec` directly; --model, the `-c` overrides (incl. the sandbox on
         // the resume path — see AppendSandbox), and the stdin `-` positional follow. Null (a fresh run) → the plain seed.
@@ -223,12 +225,14 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
             // Codex's native loader discovers them there (the same Agent-Skills format + SkillProjection as Claude —
             // only the root differs, which is why it's CODEX_HOME's, not CLAUDE_CONFIG_DIR's). On a CONTINUE the prior
             // session's rollout is restored alongside them under sessions/ (see BuildConfigHomeFiles).
-            ConfigHomeFiles = BuildConfigHomeFiles(task),
+            ConfigHomeFiles = BuildConfigHomeFiles(task, guides.Appendix),
             // The agent reaches the network only when its permissions allow it (the sandbox severs egress otherwise).
             AllowNetwork = task.Permissions.Network == AgentNetworkAccess.On,
             // Codex's own sandbox is a nested bubblewrap that cannot start inside ours, so where our runner confines
             // the run it stands that sandbox down and ours bounds every command instead (see SandboxStandDown).
             WhenRunnerConfines = SandboxStandDown(task),
+            // Each repository doc the run's AGENTS.md left out or cut, for the run's timeline.
+            LaunchNotices = guides.Notices,
         };
     }
 
@@ -333,16 +337,19 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     /// <summary>
     /// The config-home files the runner materializes: (1) B1 — <c>AGENTS.md</c> carrying the persona + the always-on
     /// operating contract (Codex's native instruction channel, since <c>exec</c> has no system-prompt flag; codex loads
-    /// <c>$CODEX_HOME/AGENTS.md</c> and merges it with any workspace AGENTS.md — verified against 0.142.2), ALWAYS present;
-    /// (2) the persona's projected skills; PLUS (3) — on a CONTINUE — the prior session's restored rollout at
-    /// <c>sessions/rollout-&lt;sessionId&gt;.jsonl</c> where <c>codex exec resume</c> finds it (codex scans <c>sessions/</c>
-    /// at any depth and matches the id in the <c>rollout-…</c> filename, so a deterministic id-named rollout suffices).
+    /// <c>$CODEX_HOME/AGENTS.md</c> and merges it with any workspace AGENTS.md — verified against 0.142.2), ALWAYS present,
+    /// and after them <paramref name="repositoryDocs"/>, the <c>AGENTS.md</c> of each repository below a multi-repo
+    /// run's cwd, which Codex never reads from there (<see cref="CodexRepositoryGuides"/>; empty for every other run, whose
+    /// file is byte-identical); (2) the persona's projected skills; PLUS (3) — on a CONTINUE — the prior session's
+    /// restored rollout at <c>sessions/rollout-&lt;sessionId&gt;.jsonl</c> where <c>codex exec resume</c> finds it (codex
+    /// scans <c>sessions/</c> at any depth and matches the id in the <c>rollout-…</c> filename, so a deterministic
+    /// id-named rollout suffices).
     /// </summary>
-    private static IReadOnlyList<ConfigHomeFile> BuildConfigHomeFiles(AgentTask task)
+    private static IReadOnlyList<ConfigHomeFile> BuildConfigHomeFiles(AgentTask task, string repositoryDocs)
     {
         var files = new List<ConfigHomeFile>(SkillProjection.ToConfigHomeFiles(task.Skills, SkillsRoot))
         {
-            new() { RelativePath = AgentsFile, Content = AgentOperatingContract.Compose(task.SystemPrompt) },
+            new() { RelativePath = AgentsFile, Content = AgentOperatingContract.Compose(task.SystemPrompt) + repositoryDocs },
         };
 
         // On a CONTINUE, restore the prior rollout so `codex exec resume` re-opens the thread.

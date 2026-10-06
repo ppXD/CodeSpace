@@ -243,7 +243,8 @@ public sealed record AgentTask
     /// The directory of every repository materialised in the workspace, stamped by the executor beside
     /// <see cref="WorkspaceDirectory"/> at launch: a single-repo workspace's one entry is that directory, a multi-repo
     /// workspace's sit below its root. A harness that names directories to its CLI reads it — Claude Code adds each one
-    /// inside the workspace so every repository's memory loads. Empty for a scratch workspace that holds no repository;
+    /// inside the workspace so every repository's memory loads, and Codex, whose cwd at a multi-repo root is no repository,
+    /// is handed the <c>AGENTS.md</c> of each one below it. Empty for a scratch workspace that holds no repository;
     /// null when no workspace was materialised, including a task that names its own <see cref="WorkspaceDirectory"/>.
     /// <c>[JsonIgnore(WhenWritingNull)]</c>.
     /// </summary>
