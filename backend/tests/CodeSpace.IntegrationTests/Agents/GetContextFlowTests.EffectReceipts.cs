@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Mcp;
+using CodeSpace.Core.Services.Sessions;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -137,6 +138,24 @@ public partial class GetContextFlowTests
         output.GetProperty("coverage").GetString().ShouldBe("complete");
         output.GetProperty("text").GetString().ShouldContain("OLDEST_NEEDLE_RESULT");
         ReceiptIds(output).Count().ShouldBe(1);
+    }
+
+    [Theory]
+    [InlineData("result")]
+    [InlineData("error")]
+    public async Task Effect_query_matches_only_the_clipped_text_it_shows(string leaf)
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var runId = await SeedAgentRunAsync(teamId, sessionId);
+        var text = "SHOWN_HEAD_" + new string('r', SessionEffectReceiptReader.ExcerptCharacters) + "_TAILVALUE=k7Q";
+        await SeedEffectReceiptAsync(teamId, runId, "agent.run_command", ToolCallLedgerStatus.Succeeded, leaf == "result" ? text : null, leaf == "error" ? text : null);
+
+        var shown = StructuredOutput(await CallToolAsync(teamId, runId, new { source = "session.effects", query = "shown_head" }));
+        var hidden = StructuredOutput(await CallToolAsync(teamId, runId, new { source = "session.effects", query = "TAILVALUE=k7Q" }));
+
+        shown.GetProperty("found").GetBoolean().ShouldBeTrue();
+        hidden.GetProperty("found").GetBoolean().ShouldBeFalse("the tail past the clip is never shown, so found / not found must not answer for it");
     }
 
     [Theory]

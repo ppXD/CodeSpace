@@ -1,6 +1,8 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.Providers.Resilience;
+using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Chat.Interactions;
@@ -95,6 +97,15 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// Load-bearing: an identical re-call replays exactly this text.
     /// </summary>
     public const string AwaitingTargetError = "A call of this tool on this same target is already awaiting a reviewer's decision in this run, so this one was not put to a reviewer and nothing ran. Wait for that decision by re-issuing that call exactly; re-issuing this one returns this same answer.";
+
+    /// <summary>
+    /// The most characters one tool result carries to the model, after redaction, so one call can fill neither the model's
+    /// context nor a ledger row. A longer one from a read-only tool (a list of every pull request, a whole diff) is cut to
+    /// its start and end and answered as an error that says to ask for less. A longer one from a tool with side effects is
+    /// answered as done, its long text cut and its shape kept, and told not to run again: asking for less would repeat the
+    /// effect. Committed here; changing it is a reviewed edit (pinned by test).
+    /// </summary>
+    public const int MaxToolResultCharacters = 100_000;
 
     /// <summary>The approval card's two button keys. The resolver (<see cref="IToolCallApprovalResolver"/>) only ever acts on these two; both resolve the wait (first-wins) — reject fails the call, approve stamps the decision for the handler to execute.</summary>
     private const string ApproveKey = "approve";
@@ -224,6 +235,8 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// </summary>
     private async Task<JsonRpcResponse> DispatchToolCallAsync(JsonElement id, JsonElement request, CancellationToken cancellationToken)
     {
+        using var providerRequests = ChargeProviderRequestsToRun();
+
         try
         {
             return await HandleToolCallAsync(id, request, cancellationToken).ConfigureAwait(false);
@@ -241,6 +254,9 @@ public sealed class McpRequestHandler : IMcpRequestHandler
             return JsonRpcResponse.Ok(id, ToolResult(isError: true, "The tool timed out or was cancelled internally before it finished; the run is still live, so retry the call."));
         }
     }
+
+    /// <summary>Every provider request the tool call makes — its preview's read, the node's own reads and writes — is charged to this run's share of each connection (<see cref="ExternalCallResilience.TokensPerMinutePerAgentRun"/>), so one run cannot spend a connection the rest of the team shares. A handler serving no run charges no share.</summary>
+    private IDisposable? ChargeProviderRequestsToRun() => _runId == Guid.Empty ? null : AgentRunProviderScope.Enter(_runId);
 
     /// <summary>The one warning for a tool that cancelled itself while the run was live — shared by the dispatch boundary and the governed execution, so both answers read the same in the logs.</summary>
     private void LogToolCancelledItself(OperationCanceledException exception, string? toolName) =>
@@ -933,12 +949,17 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         return JsonSerializer.SerializeToElement(new { kind = "action_buttons", buttons }, AgentJson.Options);
     }
 
-    /// <summary>The redacted decision card body — the question + (optional) why + recommendation. Routed through the run's redactor so an echoed secret in the agent's text never reaches the human surface.</summary>
+    /// <summary>
+    /// The redacted decision card body — the question + (optional) why + recommendation. Routed through the run's redactor so
+    /// an echoed secret in the agent's text never reaches the human surface. Every one of those is the agent's own text, and
+    /// the chat reads a <c>&lt;type:id|label&gt;</c> token in a message body as a reference — a live mention of any member,
+    /// under any label — so the redacted body is posted with every token broken (<see cref="MessageReferenceParser.Unreferenced"/>).
+    /// </summary>
     private string DecisionCardBody(DecisionRequest request) =>
-        _redactor.Redact(
+        MessageReferenceParser.Unreferenced(_redactor.Redact(
             $"Agent run {_runId} needs a decision: **{request.Question}**"
             + (request.BlockingReason is { Length: > 0 } reason ? $"\n\n_Why:_ {reason}" : "")
-            + (request.RecommendedOption is { Length: > 0 } rec ? $"\n\n_Recommended:_ {rec}" : ""));
+            + (request.RecommendedOption is { Length: > 0 } rec ? $"\n\n_Recommended:_ {rec}" : "")));
 
     /// <summary>
     /// Post the REDACTED approval card (<see cref="ApprovalCardBody"/>) into the run's approval conversation; the
@@ -1031,8 +1052,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
                 return await RecordTerminalOrReplayAsync(teamId, ledgerId, ToolCallLedgerStatus.Failed, resultJson: null, errorText, ToolResult(isError: true, errorText), cancellationToken).ConfigureAwait(false);
             }
 
-            var structured = DeclaresSchema(tool.OutputSchema) && result.Output.ValueKind != JsonValueKind.Undefined ? result.Output : (JsonElement?)null;
-            var wire = ToolResult(isError: false, OutputText(result.Output), structured);   // the REDACTED wire result the model receives
+            var wire = SuccessResult(tool, result.Output);   // the REDACTED wire result the model receives
 
             return await RecordTerminalOrReplayAsync(teamId, ledgerId, ToolCallLedgerStatus.Succeeded, resultJson: wire.GetRawText(), error: null, wire, cancellationToken).ConfigureAwait(false);
         }
@@ -1130,11 +1150,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
             if (result.IsError) return ToolResult(isError: true, result.Error ?? "Tool failed.");
 
-            // A tool that DECLARES an outputSchema also returns structuredContent (the typed result) alongside the text
-            // (kept for clients that don't read structured output) — per the MCP structured-output contract.
-            var structured = DeclaresSchema(tool.OutputSchema) && result.Output.ValueKind != JsonValueKind.Undefined ? result.Output : (JsonElement?)null;
-
-            return ToolResult(isError: false, OutputText(result.Output), structured);
+            return SuccessResult(tool, result.Output);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -1192,10 +1208,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
     // The SINGLE choke point for every tool-result text the model receives — success output, tool error, the caught
     // exception message, AND the gate/validation messages all flow through here. Redact at this one point so an
-    // echoed model key (e.g. a run_command that prints an env var) can never reach the model through a tool call.
+    // echoed model key (e.g. a run_command that prints an env var) can never reach the model through a tool call. Bound
+    // here too, after redaction, so a cut can never keep part of a secret.
     private JsonElement ToolResult(bool isError, string text, JsonElement? structuredContent = null)
     {
         text = _redactor.Redact(text);
+
+        if (text.Length > MaxToolResultCharacters) return OversizedToolResult(text);
 
         var result = new Dictionary<string, object>
         {
@@ -1210,6 +1229,69 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     }
 
     private static string OutputText(JsonElement output) => output.ValueKind == JsonValueKind.Undefined ? "{}" : output.GetRawText();
+
+    /// <summary>
+    /// The answer to a call that succeeded. A tool that DECLARES an outputSchema also returns structuredContent (the typed
+    /// result) alongside the text (kept for clients that don't read structured output) — per the MCP structured-output
+    /// contract. A result past <see cref="MaxToolResultCharacters"/> from a read-only tool is cut and answered as an error
+    /// that says to ask for less (<see cref="ToolResult"/>): reading again is free. From a tool with side effects it is
+    /// answered as done instead (<see cref="RanButCutResult"/>): asking again would run them again.
+    /// </summary>
+    private JsonElement SuccessResult(IAgentTool tool, JsonElement output)
+    {
+        var structured = DeclaresSchema(tool.OutputSchema) && output.ValueKind != JsonValueKind.Undefined ? output : (JsonElement?)null;
+
+        if (tool.IsReadOnly || !TooLargeToCarry(output)) return ToolResult(isError: false, OutputText(output), structured);
+
+        return RanButCutResult(RedactStructured(output.ValueKind == JsonValueKind.Undefined ? EmptyObject : output), structured is not null);
+    }
+
+    /// <summary>Whether <paramref name="output"/> is past <see cref="MaxToolResultCharacters"/> once redacted — redacting only an output already past it raw.</summary>
+    private bool TooLargeToCarry(JsonElement output) => OutputText(output) is { Length: > MaxToolResultCharacters } text && _redactor.Redact(text).Length > MaxToolResultCharacters;
+
+    /// <summary>
+    /// A side-effecting call's result too large to carry, already redacted: a success that says the call ran and its side
+    /// effects are done, and that it must not be run again to read more, over its output with every long text in it cut to
+    /// its start and end — still the declared structure, so a client that checks it accepts the answer. An output whose
+    /// bulk is not text cannot be cut to its shape; it is answered as text under the same notice, an error when the tool
+    /// declares a structure it then cannot carry.
+    /// </summary>
+    private static JsonElement RanButCutResult(JsonElement output, bool declaresStructure)
+    {
+        var length = output.GetRawText().Length;
+        var notice = $"This call ran and its side effects are done, but its result was {length} characters, more than the {MaxToolResultCharacters} one result carries, so long text in it keeps only its start and end. Do not run it again to read more: that would repeat its side effects.\n\n";
+
+        if (ToolResultCut.Shrunk(output, MaxToolResultCharacters - notice.Length) is { } shrunk)
+            return CutResult(notice + shrunk.GetRawText(), isError: false, declaresStructure ? shrunk : null);
+
+        return CutResult(notice + OutputCap.Apply(output.GetRawText(), MaxToolResultCharacters - notice.Length).Text, isError: declaresStructure, structured: null);
+    }
+
+    private static JsonElement CutResult(string text, bool isError, JsonElement? structured)
+    {
+        var result = new Dictionary<string, object> { ["content"] = new[] { new { type = "text", text } }, ["isError"] = isError };
+
+        if (structured is { } kept) result["structuredContent"] = kept;
+
+        return JsonSerializer.SerializeToElement(result, AgentJson.Options);
+    }
+
+    /// <summary>
+    /// A result past <see cref="MaxToolResultCharacters"/>, already redacted: its start and end, under a line saying how
+    /// much there was. An error, and without structuredContent: the cut text is not the tool's declared structure, and a
+    /// client refuses a success that declares an outputSchema and carries none.
+    /// </summary>
+    private static JsonElement OversizedToolResult(string text)
+    {
+        var notice = $"This tool's result was {text.Length} characters, more than the {MaxToolResultCharacters} one result carries, so it is cut: only its start and end are shown, and the text below is not valid JSON. Ask for less (a smaller page, a narrower filter) to read it whole.\n\n";
+        var result = new Dictionary<string, object>
+        {
+            ["content"] = new[] { new { type = "text", text = notice + OutputCap.Apply(text, MaxToolResultCharacters).Text } },
+            ["isError"] = true,
+        };
+
+        return JsonSerializer.SerializeToElement(result, AgentJson.Options);
+    }
 
     /// <summary>Redact secrets from a structured result by serializing → redacting → reparsing (Clone so it outlives the temp doc). Identity when the redactor is empty.</summary>
     private JsonElement RedactStructured(JsonElement structured)

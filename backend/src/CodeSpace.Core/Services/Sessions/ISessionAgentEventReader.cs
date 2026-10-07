@@ -7,8 +7,11 @@ using NpgsqlTypes;
 namespace CodeSpace.Core.Services.Sessions;
 
 /// <summary>
-/// Bounded session-wide view of normalized agent events. Every lineage join is re-keyed on the trusted team and only
-/// the clipped text plus structured-data presence/reference crosses the database boundary; raw data_json never does.
+/// Bounded view of one agent run's normalized events within its work thread. Every lineage join is re-keyed on the trusted
+/// team and only the clipped text plus structured-data presence/reference crosses the database boundary; raw data_json
+/// never does. A run's events hold its raw tool output — file contents, command output, response bodies — so they are
+/// read back by that run alone: another run of the thread may have read what this one may not, and is read through its
+/// turn summary instead.
 /// </summary>
 public interface ISessionAgentEventReader
 {
@@ -19,6 +22,10 @@ public sealed record SessionAgentEventRequest
 {
     public required Guid TeamId { get; init; }
     public required Guid SessionId { get; init; }
+
+    /// <summary>The run whose events are read — the caller's own.</summary>
+    public required Guid AgentRunId { get; init; }
+
     public string? Query { get; init; }
     public string? Cursor { get; init; }
     public int Limit { get; init; } = SessionAgentEventReader.DefaultPageSize;
@@ -63,6 +70,7 @@ public sealed class SessionAgentEventReader : ISessionAgentEventReader, IScopedD
         [
             new NpgsqlParameter<Guid>("team_id", request.TeamId),
             new NpgsqlParameter<Guid>("session_id", request.SessionId),
+            new NpgsqlParameter<Guid>("agent_run_id", request.AgentRunId),
             new NpgsqlParameter<bool>("query_provided", hasQuery),
             new NpgsqlParameter<string>("pattern", hasQuery ? $"%{EscapeLikePattern(request.Query!.Trim())}%" : ""),
             NullableParameter("before_sequence", NpgsqlDbType.Bigint, cursor?.Sequence),
@@ -81,8 +89,10 @@ public sealed class SessionAgentEventReader : ISessionAgentEventReader, IScopedD
     }
 
     /// <summary>
-    /// Query refinement runs against full named fields before LIMIT. SELECT clips text inside PostgreSQL and projects
-    /// only whether data_json exists, so an arbitrarily large structured payload never enters application memory.
+    /// Query refinement runs before LIMIT, against exactly what a row shows: the kind, the run id and the clipped text. Matched
+    /// against the whole text, found / not found would spell out what lies past the clip one guess at a time. SELECT clips
+    /// text inside PostgreSQL and projects only whether data_json exists, so an arbitrarily large structured payload never
+    /// enters application memory.
     /// </summary>
     internal const string ListSql = """
         /* session-agent-events:list */
@@ -97,14 +107,14 @@ public sealed class SessionAgentEventReader : ISessionAgentEventReader, IScopedD
             event.occurred_at
         FROM workflow_run AS workflow
         JOIN agent_run AS agent
-          ON agent.workflow_run_id = workflow.id AND agent.team_id = @team_id
+          ON agent.workflow_run_id = workflow.id AND agent.team_id = @team_id AND agent.id = @agent_run_id
         JOIN agent_run_event AS event
           ON event.agent_run_id = agent.id
         WHERE workflow.session_id = @session_id
           AND workflow.team_id = @team_id
           AND (@query_provided = FALSE
             OR event.kind ILIKE @pattern ESCAPE '\'
-            OR event.text ILIKE @pattern ESCAPE '\'
+            OR left(event.text, @excerpt_characters) ILIKE @pattern ESCAPE '\'
             OR event.agent_run_id::text ILIKE @pattern ESCAPE '\')
           AND (@before_sequence IS NULL OR event.sequence < @before_sequence)
         ORDER BY event.sequence DESC

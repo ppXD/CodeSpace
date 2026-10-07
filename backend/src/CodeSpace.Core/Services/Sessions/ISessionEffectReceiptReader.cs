@@ -89,7 +89,9 @@ public sealed class SessionEffectReceiptReader : ISessionEffectReceiptReader, IS
     }
 
     /// <summary>
-    /// Query refinement runs against the full named leaves before LIMIT. SELECT clips those leaves in PostgreSQL;
+    /// Query refinement runs before LIMIT, against exactly what a receipt shows: its named fields and the clipped result and
+    /// error text. Matched against the whole leaves, found / not found would spell out what lies past the clip one guess at
+    /// a time. SELECT clips those leaves in PostgreSQL;
     /// result_jsonb itself is never selected, and only its canonical MCP wire text leaf (content[0].text) is read.
     /// The existing workflow_run(session) and tool_call_ledger(run) indexes bound both joins without a migration.
     /// </summary>
@@ -119,8 +121,8 @@ public sealed class SessionEffectReceiptReader : ISessionEffectReceiptReader, IS
             OR ledger.tool_kind ILIKE @pattern ESCAPE '\'
             OR ledger.input_hash ILIKE @pattern ESCAPE '\'
             OR ledger.status ILIKE @pattern ESCAPE '\'
-            OR COALESCE(ledger.result_jsonb #>> '{{content,0,text}}', '') ILIKE @pattern ESCAPE '\'
-            OR COALESCE(ledger.error, '') ILIKE @pattern ESCAPE '\')
+            OR COALESCE(left(ledger.result_jsonb #>> '{{content,0,text}}', @excerpt_characters), '') ILIKE @pattern ESCAPE '\'
+            OR COALESCE(left(ledger.error, @excerpt_characters), '') ILIKE @pattern ESCAPE '\')
           AND (@before_created_date IS NULL OR (ledger.created_date, ledger.id) < (@before_created_date, @before_id))
         ORDER BY ledger.created_date DESC, ledger.id DESC
         LIMIT @take

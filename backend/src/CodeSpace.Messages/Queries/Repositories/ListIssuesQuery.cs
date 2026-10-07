@@ -19,6 +19,12 @@ public sealed record ListIssuesQuery : IQuery<IReadOnlyList<RemoteIssue>>, IRequ
     /// <summary>Upper bound for safety — both providers cap at 100 server-side.</summary>
     public const int MaxPerPage = 100;
 
+    /// <summary>
+    /// The furthest page a caller may name (with <see cref="MaxPerPage"/>, the newest 100,000 issues), as for
+    /// <see cref="ListPullRequestsQuery.MaxPage"/>. A page past it reads this one: no list is paged this deep.
+    /// </summary>
+    public const int MaxPage = 1000;
+
     public required Guid RepositoryId { get; init; }
 
     /// <summary>Null returns all states. Open → still-open on provider; Closed → closed.</summary>

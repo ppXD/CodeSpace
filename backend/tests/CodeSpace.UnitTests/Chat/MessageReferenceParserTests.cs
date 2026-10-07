@@ -175,4 +175,24 @@ public class MessageReferenceParserTests
     {
         MessageReferenceParser.ToPlainText("ping <user:u1>").ShouldBe("ping @u1");
     }
+
+    // ── Unreferenced: text someone else wrote, posted without becoming a mention ──
+
+    [Theory]
+    [InlineData("<user:550e8400-e29b-41d4-a716-446655440000|Security Team> please approve")]
+    [InlineData("see <pull_request:acme/api#7|the fix> and <workflow:wf-1>")]
+    [InlineData("<<user:u1|nested>>")]
+    public void Unreferenced_text_parses_to_no_reference_and_keeps_every_word(string text)
+    {
+        var plain = MessageReferenceParser.Unreferenced(text);
+
+        MessageReferenceParser.Parse(plain).ShouldBeEmpty();
+        plain.Replace('‹', '<').ShouldBe(text, "only the opening bracket of a token changes");
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("a < b and c: d")]
+    [InlineData("x <User:u1|not a token>")]
+    public void Unreferenced_leaves_text_without_a_token_as_it_is(string text) => MessageReferenceParser.Unreferenced(text).ShouldBe(text);
 }

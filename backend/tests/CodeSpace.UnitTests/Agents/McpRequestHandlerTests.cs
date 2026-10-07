@@ -2,6 +2,8 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.Providers.Resilience;
+using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Mcp;
@@ -1367,6 +1369,132 @@ public class McpRequestHandlerTests
         text!.ShouldContain(SecretRedactor.Placeholder);
     }
 
+    // ── tools/call result size ──────────────────────────────────────────────
+
+    [Fact]
+    public void The_tool_result_ceiling_is_pinned() => McpRequestHandler.MaxToolResultCharacters.ShouldBe(100_000);
+
+    [Fact]
+    public async Task A_result_past_the_ceiling_is_cut_to_its_start_and_end_and_answered_as_an_error()
+    {
+        // One call (every pull request in one list, a whole diff) must neither fill the model's context nor a ledger row.
+        // The cut text is no longer the declared structure, so it is an error without structuredContent: an MCP client
+        // refuses a success that declares an outputSchema and carries no structured result.
+        var output = JsonSerializer.SerializeToElement(new { blob = "HEAD_MARK" + new string('x', McpRequestHandler.MaxToolResultCharacters * 3) + "TAIL_MARK" });
+        var tool = new FakeTool { Kind = "git.list_prs", OutputSchema = Parse("""{"type":"object","properties":{"blob":{"type":"string"}}}"""), OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(output, output.GetRawText().Length)) };
+
+        var result = (await Respond(Handler(tool), Call("git.list_prs", "{}"))).GetProperty("result");
+        var text = result.GetProperty("content")[0].GetProperty("text").GetString()!;
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue("the model is told it did not get the whole result");
+        result.TryGetProperty("structuredContent", out _).ShouldBeFalse("a cut result is not the declared structure");
+        text.Length.ShouldBeLessThan(McpRequestHandler.MaxToolResultCharacters + 1_000);
+        text.ShouldContain("HEAD_MARK");
+        text.ShouldContain("TAIL_MARK");
+        text.ShouldContain($"{output.GetRawText().Length} characters", customMessage: "the model is told how much there was");
+    }
+
+    [Fact]
+    public async Task A_result_within_the_ceiling_is_returned_whole()
+    {
+        var output = JsonSerializer.SerializeToElement(new { blob = new string('x', McpRequestHandler.MaxToolResultCharacters - 100) });
+        var tool = new FakeTool { Kind = "git.list_prs", OutputSchema = Parse("""{"type":"object","properties":{"blob":{"type":"string"}}}"""), OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(output, output.GetRawText().Length)) };
+
+        var result = (await Respond(Handler(tool), Call("git.list_prs", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe(output.GetRawText());
+        result.GetProperty("structuredContent").GetRawText().ShouldBe(output.GetRawText());
+    }
+
+    [Fact]
+    public async Task A_result_is_redacted_before_it_is_cut_so_no_part_of_a_secret_survives()
+    {
+        var output = JsonSerializer.SerializeToElement(new { stdout = new string('x', McpRequestHandler.MaxToolResultCharacters * 2) + Secret });
+        var tool = new FakeTool { Kind = "run_command", OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(output, output.GetRawText().Length)) };
+
+        var text = (await Respond(RedactingHandler(tool), Call("run_command", "{}"))).GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString()!;
+
+        text.ShouldNotContain("SECRET");
+        text.ShouldContain(SecretRedactor.Placeholder);
+    }
+
+    [Fact]
+    public async Task A_governed_call_records_the_cut_result_it_answered()
+    {
+        var ledger = new SpyLedger();
+        var output = JsonSerializer.SerializeToElement(new { blob = new string('x', McpRequestHandler.MaxToolResultCharacters * 2) });
+        var tool = new FakeTool { Kind = "git.open_pr", IsDestructiveOverride = true, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(output, output.GetRawText().Length)) };
+
+        var result = (await Respond(GovernedHandler(ledger, governanceEnabled: true, tool), Call("git.open_pr", "{}"))).GetProperty("result");
+
+        var terminal = ledger.Terminals.ShouldHaveSingleItem();
+        terminal.Status.ShouldBe(ToolCallLedgerStatus.Succeeded, "the tool ran; only its answer was cut");
+        terminal.ResultJson.ShouldBe(result.GetRawText(), "a re-call replays exactly what was answered");
+        terminal.ResultJson!.Length.ShouldBeLessThan(McpRequestHandler.MaxToolResultCharacters + 1_000);
+    }
+
+    private static readonly JsonElement CommandOutputSchema = Parse("""{"type":"object","properties":{"exitCode":{"type":"integer"},"stdout":{"type":"string"},"stderr":{"type":"string"}}}""");
+
+    [Theory]
+    [InlineData(true)]    // governed: recorded in the ledger, and an identical re-call replays this answer
+    [InlineData(false)]   // ungoverned: the same answer, unrecorded
+    public async Task A_side_effecting_calls_result_too_large_to_carry_is_answered_as_done_with_its_output_cut_and_no_advice_to_run_it_again(bool governed)
+    {
+        // The call ran; only its output is too large. Answered as an error that says "ask for less", the model asks again —
+        // with a changed argument, a new ledger key — and the side effect runs a second time.
+        var ledger = new SpyLedger();
+        var output = JsonSerializer.SerializeToElement(new { exitCode = 0, stdout = "HEAD_MARK" + new string('x', McpRequestHandler.MaxToolResultCharacters * 2) + "TAIL_MARK", stderr = "" });
+        var tool = new FakeTool { Kind = "agent.run_command", IsDestructiveOverride = true, OutputSchema = CommandOutputSchema, OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(output, output.GetRawText().Length)) };
+
+        var result = (await Respond(GovernedHandler(ledger, governanceEnabled: governed, tool), Call("agent.run_command", "{}"))).GetProperty("result");
+        var text = result.GetProperty("content")[0].GetProperty("text").GetString()!;
+
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse("the call ran: its side effects are done");
+        text.ShouldStartWith($"This call ran and its side effects are done, but its result was {output.GetRawText().Length} characters");
+        text.ShouldContain("Do not run it again to read more");
+        text.ShouldNotContain("Ask for less");
+        text.Length.ShouldBeLessThan(McpRequestHandler.MaxToolResultCharacters + 1_000);
+
+        var structured = result.GetProperty("structuredContent");
+        structured.GetProperty("exitCode").GetInt32().ShouldBe(0, "the declared structure survives the cut, so a client that checks it accepts the answer");
+        structured.GetProperty("stdout").GetString()!.ShouldStartWith("HEAD_MARK");
+        structured.GetProperty("stdout").GetString()!.ShouldEndWith("TAIL_MARK");
+
+        if (governed) (ledger.Terminals.ShouldHaveSingleItem().Status, ledger.Terminals[0].ResultJson).ShouldBe((ToolCallLedgerStatus.Succeeded, result.GetRawText()), "a re-call replays exactly what was answered");
+    }
+
+    [Fact]
+    public async Task A_side_effecting_result_whose_bulk_is_not_text_still_says_it_ran_and_never_to_ask_again()
+    {
+        // Fifty thousand numbers cannot be cut to their declared shape by shortening text, so the answer is an error — but
+        // one that says the call ran, never one that invites running it again.
+        var output = JsonSerializer.SerializeToElement(new { ids = Enumerable.Range(0, 50_000).ToArray() });
+        var tool = new FakeTool { Kind = "git.open_pr", IsDestructiveOverride = true, OutputSchema = Parse("""{"type":"object","properties":{"ids":{"type":"array"}}}"""), OnCall = (_, _) => Task.FromResult(AgentToolResult.Ok(output, output.GetRawText().Length)) };
+
+        var result = (await Respond(GovernedHandler(new SpyLedger(), governanceEnabled: true, tool), Call("git.open_pr", "{}"))).GetProperty("result");
+        var text = result.GetProperty("content")[0].GetProperty("text").GetString()!;
+
+        text.ShouldStartWith("This call ran and its side effects are done");
+        text.ShouldContain("Do not run it again to read more");
+        text.ShouldNotContain("Ask for less");
+        result.TryGetProperty("structuredContent", out _).ShouldBeFalse();
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue("a success with a declared outputSchema must carry its structure, which this cut cannot keep");
+    }
+
+    [Fact]
+    public async Task Every_provider_request_a_tool_call_makes_is_charged_to_the_calling_run()
+    {
+        var runId = Guid.NewGuid();
+        Guid? seen = null;
+        var tool = new FakeTool { Kind = "git.list_prs", OnCall = (_, _) => { seen = AgentRunProviderScope.Current; return Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)); } };
+
+        await Respond(new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, runId), Call("git.list_prs", "{}"));
+
+        seen.ShouldBe(runId, "the run's share of each connection is charged for what the call reads");
+        AgentRunProviderScope.Current.ShouldBeNull("the scope ends with the call");
+    }
+
     // ── durable approval: cross-tenant guard + exactly-once-after-approve execution claim ──
 
     /// <summary>A stub bot whose ConversationBelongsToTeamAsync answer is configurable — drives the cross-tenant gate without a DB.</summary>
@@ -1604,6 +1732,37 @@ public class McpRequestHandlerTests
         waiters.Arms.ShouldBe(1, "the waiter is still armed FIRST — arming after the read would reopen the window from the other side");
         result.GetProperty("isError").GetBoolean().ShouldBeFalse();
         result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("selectedOptions", customMessage: "the recorded answer is replayed, not a pending ticket");
+    }
+
+    [Fact]
+    public async Task A_decision_card_carries_the_agents_text_without_a_live_mention()
+    {
+        // The question, the reason and the recommendation are the agent's own text, posted to a human's chat. The chat reads
+        // <type:id|label> as a reference — a mention of any member, under any label — so the card breaks every token first.
+        var token = $"<user:{Guid.NewGuid()}|Security Team>";
+        var ledger = new SpyLedger
+        {
+            PendingDecisionCount = () => 0,
+            BeginApprovalResult = () => true,
+            ApprovalState = () => new ToolCallApprovalState { Status = ToolCallLedgerStatus.Succeeded, ResultJson = """{"decisionId":"d","selectedOptions":["a"]}""" },
+        };
+        var bot = new StubBot { ConversationInTeam = true };
+        var handler = new McpRequestHandler(new FakeRegistry(new DecisionRequestTool()), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, Guid.NewGuid(), ledger,
+            fenceEpoch: 1, governanceEnabled: true, approvalConversationId: Guid.NewGuid(), bot, new ArmedButNeverSignalledWaiters(), new StubComponents());
+        var arguments = JsonSerializer.Serialize(new
+        {
+            question = $"{token} must approve the rollout?",
+            blockingReason = $"blocked until {token} signs off",
+            recommendedOption = "ship it, see <pull_request:acme/api#7|the fix>",
+            decisionType = "free_text",
+        });
+
+        await WithinArmRaceBudgetAsync(handler.HandleAsync(Parse(Call(DecisionRequestTool.ToolKind, arguments)), CancellationToken.None), "a decision whose text carries reference tokens");
+
+        var body = bot.PostedBodies.ShouldHaveSingleItem();
+        MessageReferenceParser.Parse(body).ShouldBeEmpty($"the card carries the agent's text, never a live mention:\n{body}");
+        foreach (var shown in new[] { "Security Team", "must approve the rollout?", "signs off", "the fix" })
+            body.ShouldContain(shown, customMessage: $"the human still reads what the agent wrote:\n{body}");
     }
 
     [Fact]

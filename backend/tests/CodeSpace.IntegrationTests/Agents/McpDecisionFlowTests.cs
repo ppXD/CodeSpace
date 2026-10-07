@@ -191,6 +191,38 @@ public class McpDecisionFlowTests
     }
 
     [Fact]
+    public async Task A_decision_card_mentions_no_one_whatever_the_agent_wrote()
+    {
+        // The question, reason and recommendation are the agent's text, and the chat turns a <type:id|label> token in a
+        // message body into a reference row: a live mention of a real member under any label, flagging "mentions you" for
+        // them. The card is posted through that same message core, so every token must be broken before it gets there.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = Guid.NewGuid();
+        var mention = $"<user:{ownerId}|Security Team>";
+
+        using var scope = _fixture.BeginScope();
+        var handler = DecisionHandler(scope, AgentAutonomyLevel.Standard, teamId, runId, channelId);
+
+        var call = Task.Run(() => CallToolAsync(handler, new
+        {
+            question = $"{mention} must approve the rollout?",
+            blockingReason = $"blocked until {mention} signs off",
+            recommendedOption = "ship it, see <pull_request:acme/api#7|the fix>",
+            decisionType = "free_text",
+        }));
+
+        var (_, messageId) = await WaitForPostedCardAsync(teamId, runId);
+
+        (await ReadReferencesAsync(messageId)).ShouldBeEmpty("an agent's text never becomes a reference — no member is mentioned, no chip is drawn");
+        var body = await ReadBodyAsync(messageId);
+        foreach (var shown in new[] { "Security Team", "must approve the rollout?", "signs off", "the fix" })
+            body.ShouldContain(shown, customMessage: $"the human still reads what the agent wrote:\n{body}");
+
+        await RespondAsync(teamId, messageId, DecisionRequestResolver.FreeTextResponseKey, ownerId, comment: "go");
+        await call;
+    }
+
+    [Fact]
     public async Task A_parked_decision_stashes_its_envelope_so_the_queue_can_project_it()
     {
         // D3 prerequisite: the real handler park must persist the DecisionRequest envelope on the ledger row (the
@@ -674,6 +706,18 @@ public class McpDecisionFlowTests
     {
         using var scope = _fixture.BeginScope();
         return (await scope.Resolve<CodeSpaceDbContext>().Message.AsNoTracking().SingleAsync(m => m.Id == messageId)).InteractionJson ?? "";
+    }
+
+    private async Task<IReadOnlyList<MessageReference>> ReadReferencesAsync(Guid messageId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().MessageReference.AsNoTracking().Where(r => r.MessageId == messageId).ToListAsync();
+    }
+
+    private async Task<string> ReadBodyAsync(Guid messageId)
+    {
+        using var scope = _fixture.BeginScope();
+        return (await scope.Resolve<CodeSpaceDbContext>().Message.AsNoTracking().SingleAsync(m => m.Id == messageId)).Body;
     }
 
     private async Task<IReadOnlyList<ToolCallLedger>> ReadRunRowsAsync(Guid teamId, Guid runId)

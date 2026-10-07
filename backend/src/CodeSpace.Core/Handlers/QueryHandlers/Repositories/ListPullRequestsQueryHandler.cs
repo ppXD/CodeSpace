@@ -15,9 +15,8 @@ public sealed class ListPullRequestsQueryHandler : IRequestHandler<ListPullReque
 
     public async Task<IReadOnlyList<RemotePullRequest>> Handle(ListPullRequestsQuery request, CancellationToken cancellationToken)
     {
-        // Defaults / clamps live on the query record itself (Page>=1, PerPage clamped in
-        // the service call). Handler is dispatch-only per Rule 16.
-        var page = request.Page < 1 ? 1 : request.Page;
+        // The ceilings live on the query record itself; the handler holds the caller to them.
+        var page = Math.Clamp(request.Page, 1, ListPullRequestsQuery.MaxPage);
         var perPage = Math.Clamp(request.PerPage, 1, ListPullRequestsQuery.MaxPerPage);
         return await _service.ListAsync(request.RepositoryId, _currentTeam.Id!.Value, request.State, page, perPage, cancellationToken).ConfigureAwait(false);
     }

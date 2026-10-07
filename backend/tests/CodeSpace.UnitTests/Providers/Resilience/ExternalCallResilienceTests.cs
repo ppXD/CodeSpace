@@ -202,6 +202,150 @@ public class ExternalCallResilienceTests
         b.ShouldBe(2);
     }
 
+    [Theory]
+    [InlineData(1, false)]   // 100 calls answered at once took 100 tokens: the next call is served at once
+    [InlineData(3, true)]    // 100 calls that each needed 3 attempts sent 300 requests and took 300 tokens: the bucket is empty
+    public async Task ExecuteAsync_charges_the_limiter_for_every_attempt(int attemptsPerCall, bool nextCallWaits)
+    {
+        // A retry is another request on the provider's quota. Charged once per call, a provider answering 5xx was sent three
+        // requests for every token the bucket gave out.
+        var policy = BuildPolicy();
+        var instance = BuildInstance();
+
+        await Task.WhenAll(Enumerable.Range(0, ExternalCallResilience.TokensPerMinute / 3).Select(_ => policy.ExecuteAsync(instance, "test", FailingTransiently(attemptsPerCall - 1), CancellationToken.None)));
+
+        using var cancel = new CancellationTokenSource();
+        var next = policy.ExecuteAsync(instance, "test", _ => Task.FromResult(0), cancel.Token);
+        await Task.WhenAny(next, Task.Delay(300));
+
+        next.IsCompleted.ShouldBe(!nextCallWaits, nextCallWaits ? "every attempt took a token, so the bucket is empty and the next call waits for the refill" : "a call answered at once takes one token");
+        cancel.Cancel();
+
+        if (nextCallWaits) await Should.ThrowAsync<OperationCanceledException>(next);
+    }
+
+    /// <summary>An operation that fails transiently <paramref name="failures"/> times, then answers.</summary>
+    private static Func<CancellationToken, Task<int>> FailingTransiently(int failures)
+    {
+        var remaining = failures;
+
+        return _ => Interlocked.Decrement(ref remaining) >= 0 ? throw new HttpRequestException("flake") : Task.FromResult(1);
+    }
+
+    [Fact]
+    public async Task A_write_that_landed_is_adopted_even_when_the_limiter_fills_up_before_its_retry()
+    {
+        // The first attempt takes the bucket's last token, the provider applies the write, and while its answer is lost
+        // fifty other callers fill the limiter's queue. Refusing the retry then would skip the probe that finds the write,
+        // and answer "rate limited, retry" for a write that landed — which a caller re-sends as a duplicate.
+        var policy = BuildPolicy();
+        var instance = BuildInstance();
+        await DrainAsync(policy, instance, ExternalCallResilience.TokensPerMinute - 1);
+
+        var landed = false;
+        var sends = 0;
+        using var others = new CancellationTokenSource();
+        var queued = new List<Task>();
+
+        var write = policy.ExecuteNonIdempotentAsync<string>(instance, "merge", _ =>
+        {
+            sends++;
+            if (landed) return Task.FromResult("sent-again");
+
+            landed = true;
+            queued.AddRange(Enumerable.Range(0, ExternalCallResilience.QueueLimit).Select(_ => policy.ExecuteAsync(instance, "other-caller", _ => Task.FromResult(1), others.Token)));
+            throw new HttpRequestException("connection reset after the provider applied the write");
+        }, _ => Task.FromResult<string?>(landed ? "effect-1" : null), CancellationToken.None);
+
+        var completed = await Task.WhenAny(write, Task.Delay(TimeSpan.FromSeconds(10)));
+        others.Cancel();
+        await Task.WhenAll(queued.Select(q => q.ContinueWith(_ => { })));
+
+        completed.ShouldBeSameAs(write, "a retry is never held for the next refill");
+        (await write).ShouldBe("effect-1", "the write landed on the first attempt; its retry must find and adopt it");
+        sends.ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task Only_a_calls_first_attempt_can_be_refused_by_the_limiter()
+    {
+        var policy = BuildPolicy();
+        var instance = BuildInstance();
+        await DrainAsync(policy, instance, ExternalCallResilience.TokensPerMinute);
+        using var others = new CancellationTokenSource();
+        var queued = Enumerable.Range(0, ExternalCallResilience.QueueLimit).Select(_ => policy.ExecuteAsync(instance, "other-caller", _ => Task.FromResult(1), others.Token)).ToList();
+
+        await Should.ThrowAsync<ProviderRateLimitedException>(() => policy.ExecuteAsync(instance, "new-call", _ => Task.FromResult(1), CancellationToken.None));
+
+        others.Cancel();
+        await Task.WhenAll(queued.Select(q => q.ContinueWith(_ => { })));
+    }
+
+    // ── An agent run's share of a connection ──
+    // One agent run may spend only its share of a connection's requests a minute, so the team's other users — the Pulls
+    // tab, other runs — keep the rest of the bucket.
+
+    [Fact]
+    public void TokensPerMinutePerAgentRun_constant_pinned() => ExternalCallResilience.TokensPerMinutePerAgentRun.ShouldBe(100);
+
+    [Fact]
+    public async Task An_agent_run_past_its_share_is_refused_while_the_connections_other_callers_still_get_a_token()
+    {
+        var policy = BuildPolicy();
+        var instance = BuildInstance();
+        var run = Guid.NewGuid();
+
+        using (AgentRunProviderScope.Enter(run))
+        {
+            await DrainAsync(policy, instance, ExternalCallResilience.TokensPerMinutePerAgentRun);
+
+            var refusal = await Should.ThrowAsync<ProviderRateLimitedException>(() => policy.ExecuteAsync(instance, "list", _ => Task.FromResult(1), CancellationToken.None));
+            refusal.Message.ShouldContain($"agent run {run} has used its share of {ExternalCallResilience.TokensPerMinutePerAgentRun} requests a minute");
+        }
+
+        (await policy.ExecuteAsync(instance, "pulls-tab", _ => Task.FromResult(7), CancellationToken.None)).ShouldBe(7, "a call outside any agent run is served from the rest of the bucket");
+
+        using (AgentRunProviderScope.Enter(Guid.NewGuid()))
+            (await policy.ExecuteAsync(instance, "another-run", _ => Task.FromResult(8), CancellationToken.None)).ShouldBe(8, "another run has a share of its own");
+    }
+
+    [Fact]
+    public async Task An_agent_runs_retry_is_never_refused_by_its_share()
+    {
+        // A retry follows a request already sent — possibly a write that landed — so like the bucket, the share refuses only a first attempt.
+        var policy = BuildPolicy();
+        var instance = BuildInstance();
+
+        using var scope = AgentRunProviderScope.Enter(Guid.NewGuid());
+        await DrainAsync(policy, instance, ExternalCallResilience.TokensPerMinutePerAgentRun - 1);
+
+        (await policy.ExecuteAsync(instance, "flaky", FailingTransiently(2), CancellationToken.None)).ShouldBe(1, "the call's first attempt took the share's last request; its two retries went out");
+    }
+
+    [Theory]
+    [InlineData(59, false)]   // within the minute: still spent
+    [InlineData(60, true)]    // a minute on: the share is whole again
+    public void A_runs_share_is_whole_again_a_minute_after_it_began(int secondsLater, bool admitted)
+    {
+        var share = new AgentRunProviderShare(perMinute: 2);
+        var instance = Guid.NewGuid();
+        var run = Guid.NewGuid();
+        var start = new DateTimeOffset(2026, 10, 8, 12, 0, 0, TimeSpan.Zero);
+
+        share.TryCharge(instance, run, start).ShouldBeTrue();
+        share.TryCharge(instance, run, start.AddSeconds(30)).ShouldBeTrue();
+        share.TryCharge(instance, run, start.AddSeconds(31)).ShouldBeFalse();
+
+        share.TryCharge(instance, run, start.AddSeconds(secondsLater)).ShouldBe(admitted);
+        share.TryCharge(Guid.NewGuid(), run, start.AddSeconds(31)).ShouldBeTrue("a share is per connection");
+    }
+
+    /// <summary>Spend <paramref name="calls"/> tokens of <paramref name="instance"/>'s bucket with calls answered at once.</summary>
+    private static async Task DrainAsync(ExternalCallResilience policy, ProviderInstance instance, int calls)
+    {
+        for (var i = 0; i < calls; i++) await policy.ExecuteAsync(instance, "drain", _ => Task.FromResult(1), CancellationToken.None);
+    }
+
     // ── Non-idempotent writes: never re-send a write that may already have landed ──
     // A timeout, a dropped connection or a 5xx can arrive AFTER the provider applied the write. The blind
     // retry above would apply it again; ExecuteNonIdempotentAsync asks the provider before re-sending.

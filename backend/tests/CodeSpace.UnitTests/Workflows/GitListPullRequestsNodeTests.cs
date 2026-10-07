@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Repositories;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -183,6 +184,36 @@ public class GitListPullRequestsNodeTests
 
         stub.Page.ShouldBe(1);
         stub.PerPage.ShouldBe(30);
+    }
+
+    [Theory]
+    [InlineData(1_000_000, 4, ListPullRequestsQuery.MaxPage, 4)]
+    [InlineData(2, int.MaxValue, 2, ListPullRequestsQuery.MaxPerPage)]
+    [InlineData(int.MaxValue, 101, ListPullRequestsQuery.MaxPage, ListPullRequestsQuery.MaxPerPage)]
+    public async Task Clamps_pagination_to_the_ceilings_the_list_query_declares(int page, int perPage, int expectedPage, int expectedPerPage)
+    {
+        // An agent names page and perPage itself. Unclamped, one call asked a provider for its whole pull request list in a
+        // single answer, or walked every page before a far one.
+        var stub = new StubPrService();
+
+        await new GitListPullRequestsNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+            ["page"] = JsonSerializer.SerializeToElement(page),
+            ["perPage"] = JsonSerializer.SerializeToElement(perPage),
+        }), CancellationToken.None);
+
+        stub.Page.ShouldBe(expectedPage);
+        stub.PerPage.ShouldBe(expectedPerPage);
+    }
+
+    [Fact]
+    public void The_input_schema_advertises_the_ceilings_the_node_enforces()
+    {
+        var properties = new GitListPullRequestsNode(new StubPrService()).Manifest.InputSchema.GetProperty("properties");
+
+        properties.GetProperty("page").GetProperty("maximum").GetInt32().ShouldBe(ListPullRequestsQuery.MaxPage);
+        properties.GetProperty("perPage").GetProperty("maximum").GetInt32().ShouldBe(ListPullRequestsQuery.MaxPerPage);
     }
 
     [Fact]
