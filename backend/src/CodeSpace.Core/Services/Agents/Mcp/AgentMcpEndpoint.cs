@@ -17,7 +17,7 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// One run's live MCP endpoint over a PER-RUN Unix-domain socket: it binds + listens on the run's socket path, accepts
 /// connections in a loop, and for each connection validates the per-run <c>CODESPACE_RUN_TOKEN</c> on the FIRST line
 /// before serving — then pumps one <see cref="McpFramingLoop"/> (a fresh <see cref="McpRequestHandler"/> bound to the
-/// run's tool registry + autonomy + permissions + team + secret redactor) over the socket's <see cref="NetworkStream"/>. Every
+/// run's tool registry + autonomy + permissions + bound repositories + team + secret redactor) over the socket's <see cref="NetworkStream"/>. Every
 /// tool-result text the handler returns is run through the run's <see cref="SecretRedactor"/>, so an echoed model key
 /// never reaches the model. The connect descriptor
 /// (socket path + token) is registered with the <see cref="IAgentMcpConnectRegistry"/> under the run id so a consumer
@@ -49,6 +49,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     private readonly Guid? _approvalConversationId;
     private readonly McpCatalogMode _catalogMode;
     private readonly AgentPermissions? _permissions;
+    private readonly IReadOnlyList<WorkspaceRepositorySpec>? _repositories;
     private readonly ILogger _logger;
     private readonly CancellationTokenSource _cts;
     private readonly Socket _listener;
@@ -57,7 +58,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
     private bool _disposed;
 
-    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IServiceScope scope, CancellationToken ct, ILogger logger, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, McpCatalogMode catalogMode = McpCatalogMode.Full, AgentPermissions? permissions = null)
+    public AgentMcpEndpoint(Guid runId, IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid teamId, SecretRedactor redactor, string socketPath, string token, IAgentMcpConnectRegistry connects, IServiceScope scope, CancellationToken ct, ILogger logger, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, McpCatalogMode catalogMode = McpCatalogMode.Full, AgentPermissions? permissions = null, IReadOnlyList<WorkspaceRepositorySpec>? repositories = null)
     {
         _runId = runId;
         _registry = registry;
@@ -73,6 +74,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
         _approvalConversationId = approvalConversationId;
         _catalogMode = catalogMode;
         _permissions = permissions;
+        _repositories = repositories;
         _logger = logger;
         _cts = CancellationTokenSource.CreateLinkedTokenSource(ct);
         _counters = new McpFabricCounters();
@@ -102,11 +104,11 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
     /// with a restricted author tool list still reaches the governed codespace tools the open endpoint serves. Computed
     /// from the SAME registry + autonomy this endpoint serves with (and the SAME server name the handler advertises), so
     /// the allow-list and the endpoint gate agree by construction. A tool the tier is Denied is omitted (never offered a
-    /// name it would be refused). In ReadOnly catalog mode only read-only tools are projected — the SAME slice the
-    /// handler lists + serves, so the allow-list never names a tool this run's mode would refuse.
+    /// name it would be refused). Only the catalog mode's slice is projected (<see cref="McpRequestHandler.Serves(McpCatalogMode, IAgentTool)"/>)
+    /// — the SAME slice the handler lists + serves, so the allow-list never names a tool this run's mode would refuse.
     /// </summary>
     public IReadOnlyList<string> AllowedToolNames() =>
-        McpAllowedTools.QualifiedNames(_registry.All.Where(t => _catalogMode == McpCatalogMode.Full || t.IsReadOnly), _autonomy, McpRequestHandler.ServerName).ToArray();
+        McpAllowedTools.QualifiedNames(_registry.All.Where(t => McpRequestHandler.Serves(_catalogMode, t)), _autonomy, McpRequestHandler.ServerName).ToArray();
 
     /// <summary>P0-B2: an authenticated client served the MCP <c>initialize</c> handshake at least once on this endpoint.</summary>
     public bool HandshakeObserved => _counters.Handshakes > 0;
@@ -189,7 +191,7 @@ public sealed class AgentMcpEndpoint : IAsyncDisposable
 
         var authorityContext = new McpAuthorityContext(_runId, _teamId, connectionScope.ServiceProvider.GetRequiredService<IAgentAuthorityCallGuard>(), _counters);
         var authorizedRegistry = new AuthorityCheckedToolRegistry(_registry, authorityContext);
-        var protocol = new McpRequestHandler(authorizedRegistry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters, _logger, _permissions);
+        var protocol = new McpRequestHandler(authorizedRegistry, _autonomy, _teamId, _redactor, _runId, ledger, _fenceEpoch, _governanceEnabled, _approvalConversationId, bot, waiters, components, _catalogMode, _counters, _logger, _permissions, _repositories);
 
         var handler = new AuthorizedMcpRequestHandler(protocol, authorityContext);
 

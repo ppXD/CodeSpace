@@ -69,6 +69,9 @@ public sealed class AgentRunCommandNode : INodeRuntime
         IsSideEffecting = true,
         // Synchronous + standalone → exposable as an agent tool (a destructive, approval-gated one).
         IsAgentToolEligible = true,
+        // Called by an agent, the repository must be one its run is bound to, and read-only context is checked out only at
+        // its bound or default branch. Not a repository write: the clone carries no push credential.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", RefInputKey = "branch" },
         ConfigSchema = SchemaBuilder.EmptyObject(),
         InputSchema = SchemaBuilder.Parse("""
             {

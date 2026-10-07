@@ -117,6 +117,17 @@ public sealed record NodeManifest
     public ActsAsUserSpec? ActsAsUser { get; init; }
 
     /// <summary>
+    /// Opt-in marker for a node that acts on a repository named by one of its inputs. Declaring it holds the value to the
+    /// calling run's bound repositories when the node runs as an agent tool (<c>NodeAgentTool</c>): a repository the run
+    /// is not bound to reads as "not found" before the node runs, a node that writes the repository reaches only one bound
+    /// writable and also meets the repository's own publish policy, and a ref it checks out of read-only context is held
+    /// to the bound or default branch. Generic, like <see cref="ActsAsUser"/> — a new repository-taking node is covered
+    /// by declaring the spec, without its key being named anywhere else. Null ⇒ the node names no repository. Off the
+    /// agent-tool path it changes nothing: a workflow node resolves its authored repository within its team, as before.
+    /// </summary>
+    public RepositoryInputSpec? RepositoryInput { get; init; }
+
+    /// <summary>
     /// Optional author-facing starter templates for this node type. Each preset is a named, ready-to-use
     /// (Config, Inputs) pair the editor offers as "start from a template" — a friendly surface over the
     /// generic schemas, so an author picks an intent (e.g. "Quorum review") instead of assembling atoms.
@@ -228,6 +239,28 @@ public sealed record ActsAsUserSpec
     /// membership only).
     /// </summary>
     public Type? CapabilityType { get; init; }
+}
+
+/// <summary>Declares the input naming the repository a node acts on — see <see cref="NodeManifest.RepositoryInput"/>.</summary>
+public sealed record RepositoryInputSpec
+{
+    /// <summary>Input key whose value is the id of the repository the node acts on.</summary>
+    public required string InputKey { get; init; }
+
+    /// <summary>
+    /// True when the node writes to that repository through its provider — opens, merges, reviews or comments on a pull
+    /// request — rather than only reading it. Such a write from an agent reaches only a repository its run is bound to
+    /// with write access, and meets the same publish policy an agent's pushed branch does, so a patch-only repository
+    /// refuses it. False for a reader, and for a command that only clones.
+    /// </summary>
+    public bool WritesRepository { get; init; }
+
+    /// <summary>
+    /// Input key whose value is the ref the node checks out of that repository, when it takes one. Called by an agent,
+    /// read-only context is checked out only at its bound or default branch. Null ⇒ the node checks out no ref the
+    /// caller picks.
+    /// </summary>
+    public string? RefInputKey { get; init; }
 }
 
 /// <summary>How an act-as-user node's provider-input value resolves to a provider instance.</summary>

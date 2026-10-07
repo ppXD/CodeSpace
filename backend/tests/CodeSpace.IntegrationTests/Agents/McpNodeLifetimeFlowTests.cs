@@ -86,7 +86,7 @@ public sealed class McpNodeLifetimeFlowTests(PostgresFixture fixture)
         missing.GetProperty("isError").GetBoolean().ShouldBeTrue();
         var foreignText = foreign.GetProperty("content")[0].GetProperty("text").GetString().ShouldNotBeNull();
         var missingText = missing.GetProperty("content")[0].GetProperty("text").GetString().ShouldNotBeNull();
-        foreignText.ShouldContain($"Repository {repositoryId} not found.", customMessage: "the real builtin node must refuse at the tenant lookup before any clone or command");
+        foreignText.ShouldContain($"Repository {repositoryId} not found.", customMessage: "a repository outside the run's binding must be refused before any clone or command");
         foreignText.Replace(repositoryId.ToString(), "id").ShouldBe(missingText.Replace(missingId.ToString(), "id"), "foreign and missing repositories must have indistinguishable failure shapes");
         foreignText.ShouldNotContain("foreign.invalid");
         host.Endpoint.ObservedToolCalls.ShouldBe(2);

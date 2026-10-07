@@ -162,6 +162,40 @@ public class SupervisorRepoClampTests
         result.Single(r => r.RepositoryId == SdkReadOnly).PinnedSha.ShouldBeNull("no launch pin on the bound spec ⇒ none on the clamp output — never the model's invention");
     }
 
+    [Fact]
+    public void A_clamped_subset_takes_each_bound_repos_own_ref_and_discards_a_model_authored_one()
+    {
+        // The ref is what the child clones and what its read-only binding then pins its commands to, so it is the
+        // operator's narrowing, never the supervisor model's: an authored ref, soft fallback or recovery anchor is
+        // discarded for the BOUND spec's own (none ⇒ the default branch).
+        var boundWithRefs = new[]
+        {
+            new WorkspaceRepositorySpec { RepositoryId = ApiWritable, Alias = "api", Access = WorkspaceAccess.Write },
+            new WorkspaceRepositorySpec { RepositoryId = SdkReadOnly, Alias = "sdk", Access = WorkspaceAccess.Read, Ref = "release/1", RefSoftFallback = true, RefRecoverySha = "ccc333ccc333" },
+        };
+
+        var authored = JsonSerializer.SerializeToElement(new object[]
+        {
+            new { repositoryId = ApiWritable, access = "write", @ref = "secret-branch", refSoftFallback = true, refRecoverySha = "deadbeefdead" },
+            new { repositoryId = SdkReadOnly, access = "read", @ref = "secret-branch" },
+            new { repositoryId = Primary, access = "read", @ref = "secret-branch" },
+        });
+
+        var result = SupervisorRepoClamp.IntersectWithBoundRepos(authored, Primary, boundWithRefs);
+
+        var api = result.Single(r => r.RepositoryId == ApiWritable);
+        api.Ref.ShouldBeNull("the operator bound api at its default branch — the model's ref is discarded");
+        api.RefSoftFallback.ShouldBeFalse();
+        api.RefRecoverySha.ShouldBeNull();
+
+        var sdk = result.Single(r => r.RepositoryId == SdkReadOnly);
+        sdk.Ref.ShouldBe("release/1", "read-only context keeps the ref the operator bound");
+        sdk.RefSoftFallback.ShouldBeTrue();
+        sdk.RefRecoverySha.ShouldBe("ccc333ccc333");
+
+        result.Single(r => r.RepositoryId == Primary).Ref.ShouldBeNull("the operator's primary, targeted as context, is cloned at its default branch — never the model's ref");
+    }
+
     // ── Helpers ───
 
     private static IReadOnlyList<WorkspaceRepositorySpec> Clamp(JsonElement authored) =>

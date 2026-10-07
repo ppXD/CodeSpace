@@ -1,10 +1,13 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Commands;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -64,7 +67,37 @@ public class NodeAgentToolTests
         }
     }
 
-    private static NodeAgentTool Tool(INodeRuntime node) => new(node, new TestNodeInvocations(node), NullLogger.Instance);
+    private static NodeAgentTool Tool(INodeRuntime node, IAgentRepositoryPolicy? repositoryPolicy = null) => new(node, new TestNodeInvocations(node), repositoryPolicy ?? new RecordingRepositoryPolicy(refusal: null), NullLogger.Instance);
+
+    /// <summary>A node that declares a repository input (<see cref="NodeManifest.RepositoryInput"/>) and records whether it ran — the shape every repository-taking builtin node has.</summary>
+    private sealed class RepositoryNode : INodeRuntime
+    {
+        public RepositoryNode(bool writes, string? refInputKey = null) => Manifest = new NodeManifest
+        {
+            DisplayName = "repo", Category = "Test", Kind = NodeKind.Regular, Description = "desc", IsSideEffecting = writes,
+            RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = writes, RefInputKey = refInputKey },
+            ConfigSchema = SchemaBuilder.EmptyObject(), InputSchema = SchemaBuilder.EmptyObject(), OutputSchema = SchemaBuilder.EmptyObject(),
+        };
+        public bool Ran { get; private set; }
+        public string TypeKey => "test.repository";
+        public NodeManifest Manifest { get; }
+        public Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken ct)
+        {
+            Ran = true;
+            return Task.FromResult(NodeResult.Ok());
+        }
+    }
+
+    /// <summary>Records every use the tool asked the repository's policy about, and answers with a fixed refusal (null = the policy lets the use through).</summary>
+    private sealed class RecordingRepositoryPolicy(string? refusal) : IAgentRepositoryPolicy
+    {
+        public List<AgentRepositoryUse> Asked { get; } = new();
+        public Task<string?> RefusalAsync(AgentRepositoryUse use, CancellationToken cancellationToken)
+        {
+            Asked.Add(use);
+            return Task.FromResult(refusal);
+        }
+    }
 
     private sealed class TestNodeInvocations(INodeRuntime node) : INodeInvocationExecutor
     {
@@ -222,5 +255,241 @@ public class NodeAgentToolTests
         a.Config.Count.ShouldBe(b.Config.Count);
         a.Config.Count.ShouldBe(0);
         a.Observability.ShouldBeSameAs(b.Observability);   // both NodeObservability.NoOp
+    }
+
+    // ── the calling run's repository binding ───────────────────────────────────
+
+    private static readonly Guid BoundRepository = Guid.NewGuid();
+
+    private static AgentRunPosture BoundTo(params Guid[] repositoryIds) => new()
+    {
+        Autonomy = AgentAutonomyLevel.Unleashed,
+        Permissions = new AgentPermissions(),
+        Repositories = repositoryIds.Select(id => new WorkspaceRepositorySpec { Alias = id.ToString("N"), RepositoryId = id }).ToList(),
+    };
+
+    private static AgentToolCall CallNaming(string repositoryIdJson, AgentRunPosture? caller) =>
+        new() { Input = JsonDocument.Parse($$"""{"repositoryId":{{repositoryIdJson}}}""").RootElement.Clone(), TeamId = Guid.NewGuid(), CallerPosture = caller };
+
+    [Theory]
+    [InlineData("bound", false)]
+    [InlineData("unbound", true)]
+    [InlineData("unbound-braced", true)]   // "{uuid}" parses as a uuid, so a node would act on it — the binding must see it too
+    public async Task A_tool_a_run_calls_reaches_only_a_repository_the_run_is_bound_to(string target, bool refused)
+    {
+        var unbound = Guid.NewGuid();
+        var named = target switch { "bound" => $"\"{BoundRepository}\"", "unbound" => $"\"{unbound}\"", _ => $"\"{{{unbound}}}\"" };
+        var node = new RepositoryNode(writes: false);
+
+        var result = await Tool(node).CallAsync(CallNaming(named, BoundTo(BoundRepository)), CancellationToken.None);
+
+        result.IsError.ShouldBe(refused, $"a {target} repository: {result.Error}");
+        node.Ran.ShouldBe(!refused, "a refused call never reaches the node, so no clone, provider call or command runs");
+        if (refused) result.Error.ShouldBe(AgentRepositoryBinding.NotFound(unbound), "an unbound repository gets exactly the not-found a missing or foreign one gets — no existence oracle");
+    }
+
+    [Theory]
+    [InlineData("\"abc\"")]
+    [InlineData("\"\"")]
+    [InlineData("42")]
+    [InlineData("null")]
+    public async Task A_repository_value_no_node_would_act_on_reaches_the_node_which_refuses_or_ignores_it_as_it_always_did(string repositoryIdJson)
+    {
+        // Every repository-taking node reads its id as a JSON string that parses as a uuid. Anything else it treats as
+        // absent (agent.run_command runs with no checkout) or invalid (the git tools fail) — no repository is reached,
+        // so there is nothing for the binding to hold.
+        var node = new RepositoryNode(writes: false);
+
+        var result = await Tool(node).CallAsync(CallNaming(repositoryIdJson, BoundTo(BoundRepository)), CancellationToken.None);
+
+        result.IsError.ShouldBeFalse(result.Error);
+        node.Ran.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task A_call_with_no_calling_run_reaches_any_repository_as_a_workflow_node_always_did()
+    {
+        // No CallerPosture → not an agent's tool call (a workflow node, a test): the node resolves its repository within
+        // its team exactly as before. The binding is a property of an agent run, never of the node.
+        var node = new RepositoryNode(writes: true);
+        var policy = new RecordingRepositoryPolicy(refusal: "should never be asked");
+
+        var result = await Tool(node, policy).CallAsync(CallNaming($"\"{Guid.NewGuid()}\"", caller: null), CancellationToken.None);
+
+        result.IsError.ShouldBeFalse(result.Error);
+        node.Ran.ShouldBeTrue();
+        policy.Asked.ShouldBeEmpty("off the agent path the repository's publish policy is the publish path's business, not the tool's");
+    }
+
+    [Fact]
+    public async Task A_node_that_declares_no_repository_input_is_not_held_to_the_binding()
+    {
+        var node = new CapturingNode();
+
+        var result = await Tool(node).CallAsync(CallNaming($"\"{Guid.NewGuid()}\"", BoundTo()), CancellationToken.None);
+
+        result.IsError.ShouldBeFalse(result.Error);
+        node.Captured.ShouldNotBeNull("a node with no repository input never names a repository, so the binding has nothing to hold");
+    }
+
+    [Theory]
+    [InlineData(false, "bound", false)]    // a read never meets the publish policy
+    [InlineData(true, "bound", true)]      // a write to a bound repository does
+    [InlineData(true, "unbound", false)]   // an unbound one is refused as not found first — the policy is never asked about it
+    public async Task Only_a_write_to_a_bound_repository_meets_the_repositorys_publish_policy(bool writes, string target, bool asked)
+    {
+        var named = target == "bound" ? BoundRepository : Guid.NewGuid();
+        var policy = new RecordingRepositoryPolicy(refusal: null);
+        var call = CallNaming($"\"{named}\"", BoundTo(BoundRepository));
+
+        await Tool(new RepositoryNode(writes), policy).CallAsync(call, CancellationToken.None);
+
+        policy.Asked.Count.ShouldBe(asked ? 1 : 0);
+        if (asked) (policy.Asked[0].Bound.RepositoryId, policy.Asked[0].TeamId, policy.Asked[0].Writes).ShouldBe((named, call.TeamId!.Value, true), "the policy is asked about the named repository's write within the run's own team");
+    }
+
+    [Fact]
+    public async Task A_write_the_publish_policy_refuses_never_reaches_the_node()
+    {
+        var node = new RepositoryNode(writes: true);
+        var policy = new RecordingRepositoryPolicy(refusal: "Repository x does not take agent pull-request writes: the repository requires patch-only publishing.");
+
+        var result = await Tool(node, policy).CallAsync(CallNaming($"\"{BoundRepository}\"", BoundTo(BoundRepository)), CancellationToken.None);
+
+        result.IsError.ShouldBeTrue();
+        result.Error.ShouldContain("patch-only");
+        node.Ran.ShouldBeFalse("a write the repository's policy refuses never reaches the provider");
+    }
+
+    [Theory]
+    // access                 branch (JSON)          asked   ref the policy judges
+    [InlineData(WorkspaceAccess.Read, "\"secret-branch\"", true, "secret-branch")]
+    [InlineData(WorkspaceAccess.Read, "\"  release/1 \"", true, "release/1")]     // trimmed, as the node reads it
+    [InlineData(WorkspaceAccess.Read, "\"  \"", false, null)]                      // blank is the default branch — nothing to judge
+    [InlineData(WorkspaceAccess.Read, "42", false, null)]                            // not a string: the node checks out its default branch
+    [InlineData(WorkspaceAccess.Write, "\"secret-branch\"", false, null)]          // the run's own repository: any ref
+    public async Task A_ref_named_on_read_only_context_is_put_to_the_repositorys_policy_before_the_call_is_admitted(WorkspaceAccess access, string branchJson, bool asked, string? judgedRef)
+    {
+        var policy = new RecordingRepositoryPolicy(refusal: null);
+        var caller = new AgentRunPosture { Autonomy = AgentAutonomyLevel.Unleashed, Permissions = new AgentPermissions(), Repositories = [new() { Alias = "ctx", RepositoryId = BoundRepository, Access = access }] };
+        var call = new AgentToolCall { Input = JsonDocument.Parse($$"""{"repositoryId":"{{BoundRepository}}","branch":{{branchJson}}}""").RootElement.Clone(), TeamId = Guid.NewGuid(), CallerPosture = caller };
+
+        (await Tool(new RepositoryNode(writes: false, refInputKey: "branch"), policy).RefusalAsync(call, CancellationToken.None)).ShouldBeNull();
+
+        policy.Asked.Count.ShouldBe(asked ? 1 : 0);
+        if (asked) (policy.Asked[0].Ref, policy.Asked[0].Writes, policy.Asked[0].Bound.Access).ShouldBe((judgedRef, false, access));
+    }
+
+    [Fact]
+    public async Task The_admission_check_and_the_call_refuse_the_same_way()
+    {
+        // The MCP layer asks RefusalAsync before it parks a call for approval; CallAsync asks again when it runs. Both
+        // must give the model the same answer, and neither reaches the node.
+        var unbound = Guid.NewGuid();
+        var node = new RepositoryNode(writes: true);
+        var tool = Tool(node);
+        var call = CallNaming($"\"{unbound}\"", BoundTo(BoundRepository));
+
+        var admitted = await tool.RefusalAsync(call, CancellationToken.None);
+        var called = await tool.CallAsync(call, CancellationToken.None);
+
+        admitted.ShouldBe(AgentRepositoryBinding.NotFound(unbound));
+        called.Error.ShouldBe(admitted);
+        node.Ran.ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task A_call_with_no_calling_run_is_admitted_without_a_look_at_the_repository()
+    {
+        var policy = new RecordingRepositoryPolicy(refusal: "should never be asked");
+
+        (await Tool(new RepositoryNode(writes: true), policy).RefusalAsync(CallNaming($"\"{Guid.NewGuid()}\"", caller: null), CancellationToken.None)).ShouldBeNull();
+
+        policy.Asked.ShouldBeEmpty();
+    }
+
+    [Theory]
+    // tool                    access                 refused
+    [InlineData("git.open_pr", WorkspaceAccess.Write, false)]
+    [InlineData("git.open_pr", WorkspaceAccess.Read, true)]
+    [InlineData("git.merge_pr", WorkspaceAccess.Write, false)]
+    [InlineData("git.merge_pr", WorkspaceAccess.Read, true)]
+    [InlineData("git.pr_review", WorkspaceAccess.Write, false)]
+    [InlineData("git.pr_review", WorkspaceAccess.Read, true)]
+    [InlineData("git.post_pr_comment", WorkspaceAccess.Write, false)]
+    [InlineData("git.post_pr_comment", WorkspaceAccess.Read, true)]
+    [InlineData("git.post_pr_comment", (WorkspaceAccess)99, true)]   // an access this code does not know is held like read-only context
+    public async Task A_pull_request_write_reaches_only_a_repository_the_run_is_bound_to_with_write_access(string kind, WorkspaceAccess access, bool refused)
+    {
+        // The production write nodes over a provider that records what reached it. Read-only context is something the run
+        // reads; it is not the run's to open, merge, review or comment on with the repository's connection credential.
+        var provider = new RecordingPullRequestService();
+        var node = PullRequestWriteNode(kind, provider);
+        var policy = new RecordingRepositoryPolicy(refusal: null);
+        var caller = new AgentRunPosture { Autonomy = AgentAutonomyLevel.Unleashed, Permissions = new AgentPermissions(), Repositories = [new() { Alias = "ctx", RepositoryId = BoundRepository, Access = access }] };
+        var call = new AgentToolCall { Input = PullRequestWriteArguments(BoundRepository), TeamId = Guid.NewGuid(), CallerPosture = caller };
+
+        var outcome = await OutcomeAsync(Tool(node, policy), call);
+
+        if (refused)
+        {
+            outcome.ShouldBe(AgentRepositoryBinding.ReadOnlyContextWrite(BoundRepository));
+            provider.Calls.ShouldBeEmpty("a write to read-only context never reaches the provider");
+            policy.Asked.ShouldBeEmpty("refused on the binding's own access, before the repository's publish policy is consulted");
+        }
+        else provider.Calls.ShouldBe([$"{kind}:{BoundRepository}"], "a write to a repository the run is bound to writably reaches the provider");
+    }
+
+    private static INodeRuntime PullRequestWriteNode(string kind, IPullRequestService provider) => kind switch
+    {
+        "git.open_pr" => new GitOpenPullRequestNode(provider),
+        "git.merge_pr" => new GitMergePullRequestNode(provider),
+        "git.pr_review" => new GitPrReviewNode(provider),
+        _ => new GitPostPrCommentNode(provider),
+    };
+
+    /// <summary>The required inputs of every pull-request write at once — each node reads its own keys and ignores the rest.</summary>
+    private static JsonElement PullRequestWriteArguments(Guid repositoryId) => JsonSerializer.SerializeToElement(new
+    {
+        repositoryId = repositoryId.ToString(), number = 7, title = "t", sourceBranch = "feature", targetBranch = "main", body = "b", verdict = "comment",
+    });
+
+    /// <summary>What a call came back with — "reached" when the provider was called, else the tool's error.</summary>
+    private static async Task<string> OutcomeAsync(NodeAgentTool tool, AgentToolCall call)
+    {
+        try
+        {
+            var result = await tool.CallAsync(call, CancellationToken.None);
+            return result.IsError ? result.Error ?? "" : "ok";
+        }
+        catch (ProviderReachedException)
+        {
+            return "reached";
+        }
+    }
+
+    private sealed class ProviderReachedException : Exception;
+
+    /// <summary>Records each pull-request write that reached it, then stops the node — what happens past the provider call is not under test.</summary>
+    private sealed class RecordingPullRequestService : IPullRequestService
+    {
+        public List<string> Calls { get; } = new();
+
+        private Exception Reached(string kind, Guid repositoryId)
+        {
+            Calls.Add($"{kind}:{repositoryId}");
+            return new ProviderReachedException();
+        }
+
+        public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, Guid teamId, PullRequestState? state, int page, int perPage, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemotePullRequest> GetAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<RemotePullRequestCommit>> ListCommitsAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<RemotePullRequestFile>> ListFilesAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemotePullRequestCounts> GetCountsAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken) => throw new NotSupportedException();
+        public Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, Guid teamId, int number, string body, CancellationToken cancellationToken) => throw Reached("git.post_pr_comment", repositoryId);
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken) => throw Reached("git.pr_review", repositoryId);
+        public Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, Guid teamId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken) => throw Reached("git.open_pr", repositoryId);
+        public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, Guid teamId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken) => throw Reached("git.merge_pr", repositoryId);
     }
 }

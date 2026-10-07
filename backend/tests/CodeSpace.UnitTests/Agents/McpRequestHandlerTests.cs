@@ -31,12 +31,22 @@ public class McpRequestHandlerTests
         public bool IsDestructiveOverride { get; init; }
         public bool IsDestructive => IsDestructiveOverride;
         public bool IsReadOnly => !IsDestructiveOverride;
+        public bool AlwaysApprove { get; init; }
+        public bool AlwaysRequiresApproval => AlwaysApprove;
 
         public Func<JsonElement, AgentToolValidation>? OnValidate { get; init; }
         public Func<AgentToolCall, CancellationToken, Task<AgentToolResult>>? OnCall { get; init; }
+        public Func<AgentToolCall, string?>? OnRefusal { get; init; }
         public int CallCount { get; private set; }
+        public List<AgentToolCall> RefusalChecks { get; } = new();
 
         public AgentToolValidation ValidateInput(JsonElement input) => OnValidate?.Invoke(input) ?? AgentToolValidation.Valid;
+
+        public Task<string?> RefusalAsync(AgentToolCall call, CancellationToken cancellationToken)
+        {
+            RefusalChecks.Add(call);
+            return Task.FromResult(OnRefusal?.Invoke(call));
+        }
 
         public Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken cancellationToken)
         {
@@ -533,7 +543,8 @@ public class McpRequestHandlerTests
         AgentRunPosture? seen = null;
         var tool = new FakeTool { Kind = "agent.run_command", IsDestructiveOverride = true, OnCall = (c, _) => { seen = c.CallerPosture; return Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)); } };
         var runId = Guid.NewGuid();
-        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), null, runId, new SpyLedger(), fenceEpoch: 1, governanceEnabled: governed, permissions: permissions);
+        IReadOnlyList<WorkspaceRepositorySpec> repositories = [new() { Alias = "repo", RepositoryId = Guid.NewGuid() }, new() { Alias = "ctx", RepositoryId = Guid.NewGuid(), Access = WorkspaceAccess.Read, Ref = "release/1" }];
+        var handler = new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), null, runId, new SpyLedger(), fenceEpoch: 1, governanceEnabled: governed, permissions: permissions, repositories: repositories);
 
         await Respond(handler, Call("agent.run_command", """{"network":true}"""));
 
@@ -541,6 +552,20 @@ public class McpRequestHandlerTests
         posture.RunId.ShouldBe(runId, "the run the posture belongs to — the unit a run's commands queue by");
         posture.Autonomy.ShouldBe(AgentAutonomyLevel.Unleashed);
         posture.Permissions.ShouldBeSameAs(permissions, "the run's own permissions, not a re-derivation from its tier");
+        posture.Repositories.ShouldBeSameAs(repositories, "the run's bound repositories, as the endpoint stamped them — never read from the model's arguments");
+    }
+
+    [Fact]
+    public async Task ToolsCall_on_a_handler_built_without_a_binding_stamps_a_posture_bound_to_no_repository()
+    {
+        // Fail-closed: a handler that was not told which repositories its run may reach binds none, so a repository-taking
+        // tool refuses every id rather than reaching the whole team.
+        AgentRunPosture? seen = null;
+        var tool = new FakeTool { Kind = "echo", OnCall = (c, _) => { seen = c.CallerPosture; return Task.FromResult(AgentToolResult.Ok(Parse("{}"), 2)); } };
+
+        await Respond(Handler(AgentAutonomyLevel.Unleashed, tool), Call("echo", """{"repositoryId":"00000000-0000-0000-0000-000000000001"}"""));
+
+        seen.ShouldNotBeNull().Repositories.ShouldBeEmpty();
     }
 
     [Fact]
@@ -1359,6 +1384,56 @@ public class McpRequestHandlerTests
     private static McpRequestHandler ApprovalHandlerAt(AgentAutonomyLevel autonomy, SpyLedger ledger, StubBot bot, params IAgentTool[] tools) =>
         new(new FakeRegistry(tools), autonomy, Guid.NewGuid(), null, Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true,
             approvalConversationId: Guid.NewGuid(), bot, new StubWaiters(), new StubComponents());
+
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Standard, "git.open_pr")]
+    [InlineData(AgentAutonomyLevel.Trusted, "git.open_pr")]
+    [InlineData(AgentAutonomyLevel.Unleashed, "git.merge_pr")]   // always-approve: parked even at Unleashed
+    [InlineData(AgentAutonomyLevel.Unleashed, "git.open_pr")]    // gate-Allow: refused before the ledger claims it
+    public async Task A_call_the_tool_refuses_is_answered_before_it_is_parked_for_approval_or_claimed(AgentAutonomyLevel level, string kind)
+    {
+        // A repository outside the run's binding (or a write to read-only context, or a patch-only repository) is refused
+        // whatever a human decides — so no card may ask one to approve it, and no ledger row is minted for it.
+        var ledger = new SpyLedger();
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = kind, IsDestructiveOverride = true, AlwaysApprove = kind == "git.merge_pr", OnRefusal = _ => "Repository x not found." };
+        var handler = ApprovalHandlerAt(level, ledger, bot, tool);
+
+        var result = (await Respond(handler, Call(kind, """{"repositoryId":"x"}"""))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe("Repository x not found.");
+        bot.PostCount.ShouldBe(0, "no approval card is posted for a call that could only be refused");
+        ledger.Claims.ShouldBeEmpty("no ledger row is parked or claimed for it");
+        tool.CallCount.ShouldBe(0);
+        tool.RefusalChecks.ShouldHaveSingleItem().CallerPosture.ShouldNotBeNull("the check sees the calling run's posture — its binding");
+    }
+
+    [Fact]
+    public async Task A_gate_denial_answers_first_so_a_tier_that_may_not_call_a_tool_learns_nothing_about_its_arguments()
+    {
+        var tool = new FakeTool { Kind = "git.open_pr", IsDestructiveOverride = true, OnRefusal = _ => "Repository x not found." };
+
+        var result = (await Respond(Handler(AgentAutonomyLevel.Confined, tool), Call("git.open_pr", """{"repositoryId":"x"}"""))).GetProperty("result");
+
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldContain("not permitted");
+        tool.RefusalChecks.ShouldBeEmpty("authorize before judging the input, as validation already is");
+    }
+
+    [Fact]
+    public async Task A_call_the_tool_admits_proceeds_to_the_approval_park_as_before()
+    {
+        // The park's own DB write faults, so the call degrades to a retryable error right after it is claimed — enough to
+        // prove the admitted call reached the approval path without blocking on a human.
+        var ledger = new SpyLedger { OnBeginApprovalThrow = () => new InvalidOperationException("transient") };
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.open_pr", IsDestructiveOverride = true };
+
+        await Respond(ApprovalHandler(ledger, bot, tool), Call("git.open_pr", "{}"));
+
+        tool.RefusalChecks.ShouldHaveSingleItem("the check runs once before the park");
+        ledger.Claims.ShouldHaveSingleItem("an admitted call is claimed and parked for approval exactly as before");
+    }
 
     [Theory]
     [InlineData(AgentAutonomyLevel.Standard)]

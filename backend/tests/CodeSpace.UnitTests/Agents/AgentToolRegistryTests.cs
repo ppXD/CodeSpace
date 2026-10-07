@@ -48,7 +48,13 @@ public class AgentToolRegistryTests
     private static AgentToolRegistry BuildWith(IEnumerable<INodeRuntime> nodes, IEnumerable<IAgentTool> firstParty)
     {
         var runtimes = nodes.ToArray();
-        return new AgentToolRegistry(runtimes, firstParty, new TestNodeInvocations(runtimes), NullLoggerFactory.Instance);
+        return new AgentToolRegistry(runtimes, firstParty, new TestNodeInvocations(runtimes), new NoRepositoryPolicy(), NullLoggerFactory.Instance);
+    }
+
+    /// <summary>A repository policy that lets every use through — these tests pin the catalog, not the binding.</summary>
+    private sealed class NoRepositoryPolicy : IAgentRepositoryPolicy
+    {
+        public Task<string?> RefusalAsync(AgentRepositoryUse use, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
     }
 
     private sealed class TestNodeInvocations(IReadOnlyList<INodeRuntime> nodes) : INodeInvocationExecutor
@@ -230,7 +236,7 @@ public class AgentToolRegistryTests
         // CONNECTION credential), making the "not a wider attack surface" claim true.
         var pr = new CapturingPullRequestService();
         var node = ActAsUserNode(kind, pr);
-        var tool = new NodeAgentTool(node, new TestNodeInvocations(new[] { node }), NullLogger.Instance);
+        var tool = new NodeAgentTool(node, new TestNodeInvocations(new[] { node }), new NoRepositoryPolicy(), NullLogger.Instance);
 
         var teamId = Guid.NewGuid();
         var victim = Guid.NewGuid();   // a teammate the model tries to impersonate
@@ -246,6 +252,28 @@ public class AgentToolRegistryTests
 
         result.IsError.ShouldBeFalse($"{kind} should reach the service (fake succeeds) once actAsUserId is stripped");
         pr.LastActorUserId.ShouldBeNull($"{kind} via the tool path must NOT honour a model-supplied actAsUserId — it acts as the connection credential, never as {victim}");
+    }
+
+    [Theory]
+    [InlineData(typeof(AgentRunCommandNode), false)]
+    [InlineData(typeof(GitFetchPrDiffNode), false)]
+    [InlineData(typeof(GitFetchPrChecksNode), false)]
+    [InlineData(typeof(GitListPullRequestsNode), false)]
+    [InlineData(typeof(GitOpenPullRequestNode), true)]
+    [InlineData(typeof(GitMergePullRequestNode), true)]
+    [InlineData(typeof(GitPrReviewNode), true)]
+    [InlineData(typeof(GitPostPrCommentNode), true)]
+    public void Every_repository_taking_tool_node_declares_its_repository_input_and_whether_it_writes_the_repository(Type nodeType, bool writes)
+    {
+        // The declaration is what holds a tool call to its run's bound repositories: a node that names a repository but
+        // forgets it would reach any repository of the team again. Only the pull-request writes meet the repository's
+        // publish policy — a command clones and runs locally, and its clone carries no push credential.
+        var node = (INodeRuntime)Activator.CreateInstance(nodeType, nodeType.GetConstructors().Single().GetParameters().Select(_ => (object?)null).ToArray())!;
+
+        var input = node.Manifest.RepositoryInput.ShouldNotBeNull($"{node.TypeKey} names a repository, so it must declare which input");
+        input.InputKey.ShouldBe("repositoryId");
+        input.WritesRepository.ShouldBe(writes, $"{node.TypeKey} {(writes ? "writes" : "does not write")} the repository through its provider");
+        node.Manifest.InputSchema.GetProperty("properties").TryGetProperty(input.InputKey, out _).ShouldBeTrue("the declared key must be an input the node's schema offers the model");
     }
 
     /// <summary>Captures the actorUserId the node forwards; everything else returns a minimal success shape. Only

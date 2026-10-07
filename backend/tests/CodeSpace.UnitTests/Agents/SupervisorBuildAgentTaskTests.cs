@@ -300,6 +300,23 @@ public class SupervisorBuildAgentTaskTests
     }
 
     [Fact]
+    public void A_dispatch_cannot_widen_the_ref_its_childs_read_only_binding_pins_commands_to()
+    {
+        // The spawn's targetRepos is model-authored and its schema has no ref, but the server does not enforce the
+        // schema's additionalProperties. The child's workspace — and so the binding its agent.run_command is pinned to —
+        // must carry the operator's ref for read-only context, never one the supervisor model named.
+        var primary = Guid.NewGuid(); var api = Guid.NewGuid(); var sdk = Guid.NewGuid();   // sdk is bound READ-only, at its default branch
+        var spec = new SupervisorAgentDispatch { SubtaskId = SubtaskId, TargetRepos = JsonDocument.Parse($$"""[{"repositoryId":"{{sdk}}","access":"read","ref":"secret-branch"}]""").RootElement };
+
+        var task = BuildWithSpec(BoundContext(primary, api, sdk), spec);
+
+        var caller = new AgentRunPosture { Autonomy = AgentAutonomyLevel.Unleashed, Permissions = new AgentPermissions(), Repositories = task.Workspace!.Repositories };
+        var binding = AgentRepositoryBinding.Find(caller, sdk).ShouldNotBeNull();
+        binding.Ref.ShouldBeNull("the operator bound sdk at its default branch");
+        AgentRepositoryBinding.AllowsRef(binding, "secret-branch", "main").ShouldBeFalse("the child's commands stay pinned to what the operator bound");
+    }
+
+    [Fact]
     public void A_dispatch_primary_override_within_bound_becomes_the_agents_primary()
     {
         var primary = Guid.NewGuid(); var api = Guid.NewGuid(); var sdk = Guid.NewGuid();

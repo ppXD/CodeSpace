@@ -50,6 +50,8 @@ public sealed class GitOpenPullRequestNode : INodeRuntime
         // tool-invoked open acts as the repo CONNECTION credential, never a specific user. The ledger's
         // agent_run_id provides traceability.
         IsAgentToolEligible = true,
+        // Called by an agent, only a repository its run is bound to — and a write, so a patch-only repository refuses it.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true },
         // Acts AS the actor's own identity (Model B), same generic gating as git.pr_review: when this node
         // sits downstream of an interactive wait feeding actAsUserId, the engine gates the responder's
         // linked identity — no chat/engine changes for future act-as-user nodes.

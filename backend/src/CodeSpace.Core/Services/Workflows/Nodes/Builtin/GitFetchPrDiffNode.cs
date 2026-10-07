@@ -34,6 +34,8 @@ public sealed class GitFetchPrDiffNode : INodeRuntime
         Description = "Fetches the unified diff for a pull/merge request.",
         // Synchronous + read-only → exposable as an agent tool (a non-destructive one).
         IsAgentToolEligible = true,
+        // Called by an agent, only a repository its run is bound to.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId" },
         // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
         // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
         ConfigSchema = SchemaBuilder.Parse("""

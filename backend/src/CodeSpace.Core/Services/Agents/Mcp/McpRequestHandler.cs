@@ -32,7 +32,8 @@ namespace CodeSpace.Core.Services.Agents.Mcp;
 /// which <c>NodeAgentTool</c> writes to the synthetic scope's <c>sys.team_id</c> so a repo-touching tool resolves
 /// the run's tenant (a foreign repository id still fail-closes; a null team → no team → fail-closed). The run's sandbox
 /// posture rides every call the same way (<see cref="AgentToolCall.CallerPosture"/>), so a tool that starts a sandbox of
-/// its own (<c>agent.run_command</c>) runs it no wider than the run. EVERY
+/// its own (<c>agent.run_command</c>) runs it no wider than the run, and a repository-taking tool reaches only the
+/// repositories the run is bound to. EVERY
 /// tool-result text the model receives — success output, tool error, AND the caught-exception message — is run
 /// through the run's <see cref="SecretRedactor"/> at the single <see cref="ToolResult"/> choke point, so an echoed
 /// model key can never reach the model through a tool call.</para>
@@ -106,18 +107,21 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     // Which slice of the catalog this connection serves. The endpoint opens for every run; ReadOnly (the default for a
     // run that did NOT opt into the side-effecting fabric) serves only read-only tools — they are the only ones listed,
     // allow-listed, and callable. Full (the existing opt-in) serves the whole registry, byte-identical to before.
+    // NonDestructive (an opted-in run whose write scope is read-only) serves every tool that does not write, so the run
+    // still reads and can still ask a human (decision.request).
     private readonly McpCatalogMode _catalogMode;
     // The posture of the run this connection serves, stamped onto every tool call so a tool that starts a sandbox of
-    // its own runs it no wider than the run. The run's own permissions when the endpoint passed them; a handler built
-    // without them (tests) serves its tier's derived permissions.
+    // its own runs it no wider than the run, and a repository-taking tool reaches only the run's bound repositories. The
+    // run's own permissions when the endpoint passed them; a handler built without them (tests) serves its tier's
+    // derived permissions. A handler built without a binding binds no repository (fail-closed).
     private readonly AgentRunPosture _posture;
     private readonly ILogger _logger;
 
-    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null, McpCatalogMode catalogMode = McpCatalogMode.Full, McpFabricCounters? counters = null, ILogger? logger = null, AgentPermissions? permissions = null)
+    public McpRequestHandler(IAgentToolRegistry registry, AgentAutonomyLevel autonomy, Guid? teamId = null, SecretRedactor? redactor = null, Guid runId = default, IToolCallLedgerService? ledger = null, long fenceEpoch = 0, bool governanceEnabled = false, Guid? approvalConversationId = null, IChatBotService? bot = null, IToolApprovalWaiterRegistry? waiters = null, IInteractionComponentRegistry? components = null, McpCatalogMode catalogMode = McpCatalogMode.Full, McpFabricCounters? counters = null, ILogger? logger = null, AgentPermissions? permissions = null, IReadOnlyList<WorkspaceRepositorySpec>? repositories = null)
     {
         _registry = registry;
         _autonomy = autonomy;
-        _posture = new AgentRunPosture { RunId = runId, Autonomy = autonomy, Permissions = permissions ?? AgentAutonomyPolicy.Derive(autonomy) };
+        _posture = new AgentRunPosture { RunId = runId, Autonomy = autonomy, Permissions = permissions ?? AgentAutonomyPolicy.Derive(autonomy), Repositories = repositories ?? [] };
         _counters = counters;
         _teamId = teamId;
         _redactor = redactor ?? SecretRedactor.None;
@@ -133,8 +137,21 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         _logger = logger ?? NullLogger.Instance;
     }
 
-    /// <summary>True when this run's catalog mode serves <paramref name="tool"/>: Full serves the whole registry; ReadOnly serves only read-only tools. The ONE predicate every catalog surface (tools/list, tools/call resolve, the allow-list) consults so they agree by construction.</summary>
-    private bool Serves(IAgentTool tool) => _catalogMode == McpCatalogMode.Full || tool.IsReadOnly;
+    /// <summary>True when this run's catalog mode serves <paramref name="tool"/> (see <see cref="Serves(McpCatalogMode, IAgentTool)"/>).</summary>
+    private bool Serves(IAgentTool tool) => Serves(_catalogMode, tool);
+
+    /// <summary>
+    /// True when <paramref name="mode"/> serves <paramref name="tool"/>: Full serves the whole registry; NonDestructive
+    /// every tool that does not write (the read-only tools and an ask, which is not destructive); ReadOnly, and a mode
+    /// this code does not know, only read-only tools. The ONE predicate every catalog surface (tools/list, tools/call
+    /// resolve, the endpoint's allow-list) consults so they agree by construction.
+    /// </summary>
+    internal static bool Serves(McpCatalogMode mode, IAgentTool tool) => mode switch
+    {
+        McpCatalogMode.Full => true,
+        McpCatalogMode.NonDestructive => !tool.IsDestructive,
+        _ => tool.IsReadOnly,
+    };
 
     /// <summary>The effective bounded-block window (seconds): the env override when positive + parseable, else <see cref="DefaultApprovalBoundSeconds"/> (Rule 8 — read only here).</summary>
     public static int ApprovalBoundSeconds()
@@ -231,9 +248,9 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         if (tool == null) return JsonRpcResponse.Fail(id, Error(JsonRpcError.InvalidParams, $"Unknown tool '{name}'."));
 
-        // A side-effecting tool is not part of a ReadOnly run's catalog (it is absent from tools/list too) — refuse it
-        // at call time so a stale/guessed name can't reach the gate or a side effect. Fail-closed, before the gate.
-        if (!Serves(tool)) return JsonRpcResponse.Ok(id, ToolResult(isError: true, $"Tool '{name}' is not available: this run serves only read-only tools. The side-effecting tool fabric is opt-in."));
+        // A tool outside the run's catalog slice (it is absent from tools/list too) is refused at call time so a stale or
+        // guessed name can't reach the gate or a side effect. Fail-closed, before the gate.
+        if (!Serves(tool)) return JsonRpcResponse.Ok(id, ToolResult(isError: true, NotServedMessage(name)));
 
         // decision.request is an ASK, not a gated side effect — intercept it BEFORE the autonomy gate (a Confined tier
         // must never DENY a question) and drive the durable decision flow on the SAME tool-ledger spine the approval
@@ -273,6 +290,12 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         var validation = tool.ValidateInput(arguments);
 
         if (!validation.IsValid) return JsonRpcResponse.Ok(id, ToolResult(isError: true, validation.Error ?? "Invalid tool input."));
+
+        // A call the tool will refuse whatever a human decides (a repository outside the run's binding, a write to
+        // read-only context or to a patch-only repository) is answered now — before it is parked for approval or claimed
+        // in the ledger, so no card asks a human to approve a call that could only be refused. The tool still enforces
+        // it when it runs.
+        if (await tool.RefusalAsync(CallFor(arguments), cancellationToken).ConfigureAwait(false) is { } refusal) return JsonRpcResponse.Ok(id, ToolResult(isError: true, refusal));
 
         // RequireApproval + a servable approval surface → park the call: record AwaitingApproval, post the card, and
         // BLOCK until a human decides (or the bound elapses → pending-ticket). The side effect runs through the SAME
@@ -1086,6 +1109,11 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     private static JsonElement Serialize(JsonRpcResponse response) => JsonSerializer.SerializeToElement(response, AgentJson.Options);
 
     private static JsonRpcError Error(int code, string message) => new() { Code = code, Message = message };
+
+    /// <summary>The refusal for a tool outside the run's catalog slice, naming why it is withheld.</summary>
+    private string NotServedMessage(string tool) => _catalogMode == McpCatalogMode.NonDestructive
+        ? $"Tool '{tool}' is not available: this run is read-only, so it is served no tool that writes."
+        : $"Tool '{tool}' is not available: this run serves only read-only tools. The side-effecting tool fabric is opt-in.";
 
     private static string GateMessage(AgentToolGateDecision decision, string tool) => decision == AgentToolGateDecision.RequireApproval
         ? $"Tool '{tool}' requires human approval, which this run's autonomy level cannot grant on its own."

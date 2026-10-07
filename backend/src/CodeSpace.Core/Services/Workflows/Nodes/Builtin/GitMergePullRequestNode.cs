@@ -50,6 +50,8 @@ public sealed class GitMergePullRequestNode : INodeRuntime
         // tool-invoked merge acts as the repo CONNECTION credential, never a specific user. The ledger's
         // agent_run_id provides traceability.
         IsAgentToolEligible = true,
+        // Called by an agent, only a repository its run is bound to — and a write, so a patch-only repository refuses it.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true },
         AlwaysRequiresApproval = true,
         ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IPullRequestWriteCapability) },
         // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo

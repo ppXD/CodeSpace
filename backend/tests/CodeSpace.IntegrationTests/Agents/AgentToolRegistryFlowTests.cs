@@ -2,6 +2,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Tools;
+using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -117,6 +118,30 @@ public class AgentToolRegistryFlowTests
         AgentToolGate.Decide(AgentAutonomyLevel.Unleashed, tool.RequiresApproval, tool.AlwaysRequiresApproval)
             .ShouldBe(AgentToolGateDecision.RequireApproval, "git.merge_pr at Unleashed escalates to RequireApproval — never Allow");
     }
+
+    [Fact]
+    public void Every_tool_eligible_node_that_offers_a_repository_input_declares_it_so_a_run_is_held_to_its_bound_repositories()
+    {
+        // Forward-looking guard over the REAL node set (plugins included): the run-binding is enforced generically off
+        // NodeManifest.RepositoryInput, so an eligible node that offers the model a repository selector but does not
+        // declare it would reach any repository of the team again. Detected from the schema itself, not a hand-list.
+        using var scope = _fixture.BeginScope();
+
+        var offenders = scope.Resolve<IEnumerable<INodeRuntime>>()
+            .Where(node => node.Manifest.IsAgentToolEligible)
+            .SelectMany(node => RepositorySelectorKeys(node.Manifest.InputSchema).Select(key => (node.TypeKey, Key: key, Declared: node.Manifest.RepositoryInput?.InputKey)))
+            .Where(offer => offer.Declared != offer.Key)
+            .Select(offer => $"{offer.TypeKey}.{offer.Key} (declared: {offer.Declared ?? "none"})")
+            .ToList();
+
+        offenders.ShouldBeEmpty("every repository selector a tool offers must be its declared RepositoryInput");
+        scope.Resolve<IEnumerable<INodeRuntime>>().Count(node => node.Manifest.IsAgentToolEligible && node.Manifest.RepositoryInput is not null).ShouldBeGreaterThanOrEqualTo(8, "fixture check: the eight builtin repository tools are in the graph this guard walks");
+    }
+
+    private static IEnumerable<string> RepositorySelectorKeys(JsonElement inputSchema) =>
+        inputSchema.TryGetProperty("properties", out var properties)
+            ? properties.EnumerateObject().Where(p => p.Value.TryGetProperty("x-selector", out var selector) && selector.GetString() == "repository").Select(p => p.Name)
+            : [];
 
     // Forward-looking guard: every currently-eligible repo-resolving tool MUST refuse a repositoryId when the
     // call carries no team (no sys.team_id). If a future eligible node forgets the NodeScopeReader.TryReadTeamId

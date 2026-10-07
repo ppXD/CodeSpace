@@ -50,6 +50,8 @@ public sealed class GitPrReviewNode : INodeRuntime
         // tool-invoked review acts as the repo CONNECTION credential, never a specific user (so a model can't
         // forge an APPROVE review as a teammate). The ledger's agent_run_id provides traceability.
         IsAgentToolEligible = true,
+        // Called by an agent, only a repository its run is bound to — and a write, so a patch-only repository refuses it.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true },
         // Acts AS the actor's own identity (Model B). Declaring this lets the engine generically gate
         // the responder's linked identity when this node sits downstream of an interactive wait whose
         // responder feeds actAsUserId — no chat/engine changes needed for future act-as-user nodes.
