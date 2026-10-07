@@ -23,12 +23,12 @@ namespace CodeSpace.Core.Services.Agents.Workspace.Integrators;
 /// resets the clone to base (no half-merge survives), pushes nothing, and returns a <see cref="IntegrationResult"/>
 /// naming what could not be applied — the original K agent branches/patches remain intact for human review.</para>
 ///
-/// <para><b>Secret hygiene</b> is co-located with the provider: the clone embeds the token in the URL for the clone
-/// command only and every surfaced git output is redacted (<see cref="LocalGitWorkspaceProvider.Redact"/>), and the
-/// transient clone is always removed in a <c>finally</c>. The clone keeps its tokened origin, so the commands whose git
-/// transport reaches it — the clone and the push — run as <see cref="TokenedGitCommand"/>s. The base checkout, the
-/// apply and the reset reach it only for LFS objects, which git-lfs authenticates from the URL without asking or telling
-/// a credential helper; a full clone leaves them no git object to fetch through it.</para>
+/// <para><b>Secret hygiene</b> is co-located with the provider: the clone names the remote without its credential, so
+/// origin never holds the token; every command that reaches origin runs as a <see cref="TokenedGitCommand"/>, carrying it
+/// in its environment — the clone and the push through git's transport, and the base checkout, the apply and the reset
+/// through git-lfs, which asks the credential helpers for the LFS objects they download (a full clone leaves them no git
+/// object to fetch). Every surfaced git output is redacted (<see cref="LocalGitWorkspaceProvider.Redact"/>), and the
+/// transient clone is always removed in a <c>finally</c>.</para>
 /// </summary>
 public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDependency
 {
@@ -182,11 +182,11 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
             var ordered = await InAncestryOrderAsync(directory, resolved, cancellationToken).ConfigureAwait(false);
 
-            var applyBlock = await ApplyAllAsync(directory, ordered, request.Token, cancellationToken).ConfigureAwait(false);
+            var applyBlock = await ApplyAllAsync(directory, ordered, request, cancellationToken).ConfigureAwait(false);
 
             if (applyBlock is not null)
             {
-                await ResetToBaseAsync(directory, request.BaseSha, cancellationToken).ConfigureAwait(false);
+                await ResetToBaseAsync(directory, request, cancellationToken).ConfigureAwait(false);
                 return Aborted(resolved, applyBlock);
             }
 
@@ -210,7 +210,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         // A FULL clone (no --depth): a 3-way apply needs the base history the agents' shallow clones lacked, and a
         // full clone guarantees the recorded base SHA is present. (A --filter=blob:none partial clone is a deferred
         // optimisation — it needs remote allow-filter support a bare file:// remote can't give a test.)
-        var url = RemoteUrl(request);
+        var url = Remote(request).Url;
 
         Directory.CreateDirectory(directory);
         var result = await RunTokenedGitAsync(request, new[] { "clone", url, directory }, directory, cancellationToken).ConfigureAwait(false);
@@ -222,7 +222,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
     /// <summary>Check out the EXACT shared base (detached) so every <c>apply --3way</c> resolves the pre-image against the commit the agents saw. False when the SHA is not in history (a bad base).</summary>
     private async Task<bool> CheckoutBaseAsync(string directory, IntegrationRequest request, CancellationToken cancellationToken)
     {
-        var result = await RunGitAsync(new[] { "-C", directory, "checkout", "--detach", request.BaseSha }, directory, cancellationToken).ConfigureAwait(false);
+        var result = await RunTokenedGitAsync(request, new[] { "-C", directory, "checkout", "--detach", request.BaseSha }, directory, cancellationToken).ConfigureAwait(false);
 
         return result.Status == SandboxStatus.Success;
     }
@@ -291,7 +291,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
     }
 
     /// <summary>Apply each clean (preflight-passed) contribution in order. Returns a set-level abort reason on the FIRST textual conflict (marking the rest not-attempted), else null when all applied.</summary>
-    private async Task<string?> ApplyAllAsync(string directory, IReadOnlyList<ResolvedContribution> resolved, string? token, CancellationToken cancellationToken)
+    private async Task<string?> ApplyAllAsync(string directory, IReadOnlyList<ResolvedContribution> resolved, IntegrationRequest request, CancellationToken cancellationToken)
     {
         for (var i = 0; i < resolved.Count; i++)
         {
@@ -299,13 +299,13 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
 
             if (string.IsNullOrWhiteSpace(r.Patch)) continue; // a true no-op (base matched, empty diff) — nothing to apply
 
-            var (applied, stderr) = await TryApplyAsync(directory, r, cancellationToken).ConfigureAwait(false);
+            var (applied, stderr) = await TryApplyAsync(directory, r, request, cancellationToken).ConfigureAwait(false);
 
             if (applied) continue;
 
             var conflictedFiles = await ReadConflictedFilesAsync(directory, r, cancellationToken).ConfigureAwait(false);
 
-            r.Conflict(ConflictReason(stderr, directory, token), conflictedFiles);
+            r.Conflict(ConflictReason(stderr, directory, request.Token), conflictedFiles);
 
             for (var j = i + 1; j < resolved.Count; j++) resolved[j].Skip("not integrated — an earlier contribution conflicted");
 
@@ -315,7 +315,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         return null;
     }
 
-    private async Task<(bool Success, string Stderr)> TryApplyAsync(string directory, ResolvedContribution r, CancellationToken cancellationToken)
+    private async Task<(bool Success, string Stderr)> TryApplyAsync(string directory, ResolvedContribution r, IntegrationRequest request, CancellationToken cancellationToken)
     {
         var patchFile = Path.Combine(directory, ".codespace-integrate.patch");
         await File.WriteAllTextAsync(patchFile, r.Patch, cancellationToken).ConfigureAwait(false);
@@ -326,7 +326,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
             // this contribution's own base (the normal case once an upstream contribution has already been applied
             // under it) does git reconstruct the pre-image blobs and 3-way merge. A failure here is a GENUINE textual
             // conflict — which the caller must keep surfacing as Conflicted, since the resolve arc acts on it.
-            var result = await RunGitAsync(new[] { "-C", directory, "apply", "--index", "--3way", patchFile }, directory, cancellationToken).ConfigureAwait(false);
+            var result = await RunTokenedGitAsync(request, new[] { "-C", directory, "apply", "--index", "--3way", patchFile }, directory, cancellationToken).ConfigureAwait(false);
             return (result.Status == SandboxStatus.Success, result.Stderr);
         }
         finally
@@ -460,17 +460,17 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         throw new WorkspaceException($"git push failed (exit {result.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(result.Stderr), request.Token)}");
     }
 
-    private async Task ResetToBaseAsync(string directory, string baseSha, CancellationToken cancellationToken)
+    private async Task ResetToBaseAsync(string directory, IntegrationRequest request, CancellationToken cancellationToken)
     {
         // Restore the clone to a pristine base tree so NO half-merged / conflict-marked state survives the abort.
-        await RunGitAsync(new[] { "-C", directory, "reset", "--hard", baseSha }, directory, cancellationToken).ConfigureAwait(false);
+        await RunTokenedGitAsync(request, new[] { "-C", directory, "reset", "--hard", request.BaseSha }, directory, cancellationToken).ConfigureAwait(false);
         await RunGitAsync(new[] { "-C", directory, "clean", "-fd" }, directory, cancellationToken).ConfigureAwait(false);
     }
 
     // ── Small git helpers ────────────────────────────────────────────────────────────
 
-    /// <summary>The remote the integration clone reaches: the authed URL the clone names, which origin keeps to the end.</summary>
-    private static string RemoteUrl(IntegrationRequest request) => LocalGitWorkspaceProvider.BuildAuthenticatedUrl(request.RepositoryUrl, request.TokenUsername, request.Token);
+    /// <summary>The remote the integration clone reaches: named by the clone and held by origin without its credential, which the commands that reach it carry.</summary>
+    private static TokenedGitCommand.Remote Remote(IntegrationRequest request) => TokenedGitCommand.RemoteFor(request.RepositoryUrl, request.TokenUsername, request.Token);
 
     private async Task<bool> HasStagedChangesAsync(string directory, CancellationToken cancellationToken)
     {
@@ -493,9 +493,9 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
     private Task<SandboxResult> RunGitAsync(IReadOnlyList<string> args, string? workingDirectory, CancellationToken cancellationToken) =>
         RunSpecAsync(GitSpec(args, workingDirectory), cancellationToken);
 
-    /// <summary>Run a command whose git transport reaches the integration clone's tokened origin — the clone, the push — as a <see cref="TokenedGitCommand"/>.</summary>
+    /// <summary>Run a command that reaches the integration clone's origin — the clone and the push through git's transport, the checkout, the apply and the reset through git-lfs — as a <see cref="TokenedGitCommand"/>.</summary>
     private Task<SandboxResult> RunTokenedGitAsync(IntegrationRequest request, IReadOnlyList<string> args, string directory, CancellationToken cancellationToken) =>
-        RunSpecAsync(TokenedGitCommand.Spec(RemoteUrl(request), GitSpec(args, directory)), cancellationToken);
+        RunSpecAsync(TokenedGitCommand.Spec(Remote(request), GitSpec(args, directory)), cancellationToken);
 
     private static SandboxSpec GitSpec(IReadOnlyList<string> args, string? workingDirectory) =>
         new() { Command = "git", Args = args, WorkingDirectory = workingDirectory, TimeoutSeconds = GitTimeoutSeconds, AllowNetwork = true };

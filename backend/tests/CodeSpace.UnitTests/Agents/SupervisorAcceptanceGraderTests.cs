@@ -195,19 +195,34 @@ public class SupervisorAcceptanceGraderTests
     [Theory]
     [InlineData(true)]
     [InlineData(false)]
-    public async Task Only_a_tokened_base_clone_runs_as_a_tokened_command(bool tokened)
+    public async Task The_commands_that_reach_the_remote_run_as_tokened_commands(bool tokened)
     {
-        // The clone is the one command that names the authed URL; the token strip follows it at once, so the detached
-        // checkout and everything after it reach no tokened remote. An untokened clone keeps the operator's helpers.
+        // The clone reaches the remote through git's transport; the detached base checkout and the apply reach it through
+        // git-lfs, which downloads the LFS objects they write from origin and asks the credential helpers for them. Each names
+        // the remote without its credential and carries the token in its environment. The strip, a belt, reaches nothing, and
+        // no command after the apply — the oracle restore, the model-authored setup and check — carries the credential. An
+        // untokened clone keeps the operator's helpers.
         var runners = new ScriptedApplyRunnerRegistry(applySucceeds: true);
         var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "https://example.test/r.git", Token = tokened ? "test-token" : null }), new FakeGrader(Pass), runners: runners);
 
-        await grader.GradeBaseAsync(Guid.NewGuid(), Guid.NewGuid(), "deadbeef", Spec(), 30, CancellationToken.None);
+        await grader.GradePatchAsync(Guid.NewGuid(), Guid.NewGuid(), "deadbeef", "diff --git a/x b/x", null, Spec(), 30, CancellationToken.None);
 
-        var clone = runners.Invocations.Single(i => i.Args.Contains("clone"));
-        TokenedGitSpecs.RunsTokened(clone, "https://example.test").ShouldBe(tokened, string.Join(' ', clone.Args));
-        runners.Invocations.ShouldContain(i => i.Args.Contains("checkout"), "fixture check: the base checkout ran after the clone");
-        runners.Invocations.Where(i => !i.Args.Contains("clone")).ShouldAllBe(i => !TokenedGitSpecs.RunsTokened(i, "https://example.test"));
+        var reachTheRemote = new[] { "clone", "checkout", "apply" };
+        runners.Invocations.Select(GitSubcommand).ShouldBe(tokened ? new[] { "clone", "remote", "checkout", "apply" } : reachTheRemote, "fixture check: the clone, the strip when tokened, the base checkout and the apply ran, in that order");
+
+        foreach (var invocation in runners.Invocations)
+            TokenedGitSpecs.RunsTokened(invocation, "https://example.test/r.git").ShouldBe(tokened && reachTheRemote.Contains(GitSubcommand(invocation)), string.Join(' ', invocation.Args));
+
+        runners.Invocations.Single(i => i.Args.Contains("clone")).Args.ShouldContain("https://example.test/r.git", "the remote is named without its credential");
+        runners.Invocations.ShouldAllBe(i => !TokenedGitSpecs.ArgvCarriesACredential(i, "test-token"));
+    }
+
+    /// <summary>The git subcommand, past any leading <c>-c key=value</c> and <c>-C dir</c>.</summary>
+    private static string GitSubcommand(SandboxSpec spec)
+    {
+        var i = 0;
+        while (i + 1 < spec.Args.Count && spec.Args[i] is "-c" or "-C") i += 2;
+        return i < spec.Args.Count ? spec.Args[i] : "";
     }
 
     // ── S2: GradePatchAsync — the branch-less twin (a fresh clone at the BASE SHA + apply, no push) ────

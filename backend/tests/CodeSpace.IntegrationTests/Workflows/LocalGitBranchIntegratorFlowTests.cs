@@ -586,8 +586,6 @@ public sealed class LocalGitBranchIntegratorFlowTests
         using var ctx = new IntegratorTestContext();
         var baseSha = await ctx.SeedBaseAsync(new() { ["f.txt"] = "shared\n" });
 
-        var before = CountIntegrationClones();
-
         var clean = await ctx.MakeContributionAsync("agent-a", baseSha, d => File.WriteAllText(Path.Combine(d, "f.txt"), "clean\n"));
         await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, clean), CancellationToken.None);
 
@@ -595,7 +593,7 @@ public sealed class LocalGitBranchIntegratorFlowTests
         var conflictB = await ctx.MakeContributionAsync("agent-b", baseSha, d => File.WriteAllText(Path.Combine(d, "f.txt"), "y\n"));
         await ctx.NewIntegrator().IntegrateAsync(ctx.Request(baseSha, conflictA, conflictB), CancellationToken.None);
 
-        CountIntegrationClones().ShouldBe(before, "no integrate-* clone lingers after a clean OR a conflict run");
+        CountIntegrationClones(ctx).ShouldBe(0, "no integrate-* clone lingers after a clean OR a conflict run");
     }
 
     // ── Empty request → Empty ────────────────────────────────────────────────────────
@@ -616,10 +614,17 @@ public sealed class LocalGitBranchIntegratorFlowTests
 
     // ── Helpers ──────────────────────────────────────────────────────────────────────
 
-    private static int CountIntegrationClones() =>
+    /// <summary>The integrate-* clones of <paramref name="ctx"/>'s remote under the worker-wide root — only this test's own: other tests integrate under the same root in parallel, so a count of every clone races theirs.</summary>
+    private static int CountIntegrationClones(IntegratorTestContext ctx) =>
         Directory.Exists(LocalGitWorkspaceProvider.WorkspacesRoot)
-            ? Directory.EnumerateDirectories(LocalGitWorkspaceProvider.WorkspacesRoot, "integrate-*").Count()
+            ? Directory.EnumerateDirectories(LocalGitWorkspaceProvider.WorkspacesRoot, "integrate-*").Count(clone => ClonesRemote(clone, ctx.RemoteUrl))
             : 0;
+
+    private static bool ClonesRemote(string clone, string remoteUrl)
+    {
+        try { return File.ReadAllText(Path.Combine(clone, ".git", "config")).Contains(remoteUrl, StringComparison.Ordinal); }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException) { return false; }
+    }
 
     private static async Task<bool> GitReadyAsync()
     {
@@ -665,7 +670,7 @@ public sealed class LocalGitBranchIntegratorFlowTests
             _bare = Path.Combine(_root, "remote.git");
         }
 
-        private string RemoteUrl => new Uri(_bare).AbsoluteUri;
+        public string RemoteUrl => new Uri(_bare).AbsoluteUri;
 
         public IBranchIntegrator NewIntegrator(IArtifactOffloader? offloader = null) =>
             new LocalGitBranchIntegrator(new SandboxRunnerRegistry(new ISandboxRunner[] { new LocalProcessRunner() }), offloader ?? new FakeOffloader(), NullLogger<LocalGitBranchIntegrator>.Instance);

@@ -48,15 +48,20 @@ public class PackCloneFetcherArgsTests
     }
 
     [Theory]
-    [InlineData("https://someone:ghp_pasted_token@github.com/owner/repo", true)]   // a pasted URL with a personal token in it
-    [InlineData("https://ghp_pasted_token@github.com/owner/repo", true)]           // the token alone as the user: git hands it to the helpers it asks for a password
-    [InlineData("https://github.com/owner/repo", false)]
-    public void Only_a_clone_url_carrying_a_token_runs_as_a_tokened_command(string url, bool tokened)
+    [InlineData("https://someone:ghp_pasted_token@github.com/owner/repo", "someone", "ghp_pasted_token")]   // a pasted URL with a personal token in it
+    [InlineData("https://ghp_pasted_token@github.com/owner/repo", "ghp_pasted_token", "")]                   // the token alone as the user, sent with an empty password as curl sent it
+    [InlineData("https://github.com/owner/repo", null, null)]
+    public void Only_a_clone_url_carrying_a_token_runs_as_a_tokened_command_and_no_argv_carries_it(string url, string? username, string? password)
     {
+        // The pasted credential leaves the URL: the clone names the remote without it — so git never writes it into the
+        // checkout's origin — and carries it in its environment for a helper scoped to the remote, so no operator helper
+        // stores it and no trace2 target records it.
         var spec = PackCloneFetcher.BuildCloneSpec(url, reference: null, dir: "/tmp/dest");
 
-        TokenedGitSpecs.RunsTokened(spec, "https://github.com").ShouldBe(tokened, "a helper would store the pasted token on success, and trace2 would record it");
-        spec.Args.Skip(tokened ? 2 : 0).ShouldBe(PackCloneFetcher.BuildCloneArgs(url, reference: null, dir: "/tmp/dest"), "the hardened clone argv, redirect guard included, either way");
+        TokenedGitSpecs.RunsTokened(spec, "https://github.com/owner/repo").ShouldBe(username is not null);
+        if (username is not null) TokenedGitSpecs.CarriesTheCredential(spec, username, password!).ShouldBeTrue();
+        spec.Args.ShouldBe(PackCloneFetcher.BuildCloneArgs("https://github.com/owner/repo", reference: null, dir: "/tmp/dest"), "the hardened clone argv, redirect guard included, naming the remote without its userinfo either way");
+        TokenedGitSpecs.ArgvCarriesACredential(spec, "ghp_pasted_token").ShouldBeFalse();
         spec.WorkingDirectory.ShouldBe("/tmp/dest");
         spec.AllowNetwork.ShouldBeTrue();
     }

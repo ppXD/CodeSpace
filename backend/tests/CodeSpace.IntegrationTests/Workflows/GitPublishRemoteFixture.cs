@@ -30,6 +30,14 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     private readonly List<Task> _requests = new();
     private readonly object _gate = new();
     private Task? _accept;
+    private HttpListener? _harvester;
+    private readonly List<Task> _harvests = new();
+    private readonly List<string> _harvestedAuthorizations = new();
+    private Task? _harvest;
+    private string _harvesterAuthority = "";
+    private int _harvesterRequests;
+    private int _lfsBatchRequests;
+    private int _lfsBatchRefusedCredentials;
 
     public string Root { get; } = Directory.CreateTempSubdirectory("cs-pub-remote-").FullName;
     public string Remote => Path.Combine(Root, "remote.git");
@@ -44,6 +52,12 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     /// <summary>Count of authenticated <c>git-receive-pack</c> requests — a push that validated the real credential.</summary>
     public int AuthenticatedPushRequests { get; private set; }
 
+    /// <summary>Requests to the LFS batch endpoint, authorized or refused — how many times git-lfs asked.</summary>
+    public int LfsBatchRequests => Volatile.Read(ref _lfsBatchRequests);
+
+    /// <summary>LFS batch requests that offered a credential this remote refused — how many times a refused credential was put forward.</summary>
+    public int LfsBatchRefusedCredentials => Volatile.Read(ref _lfsBatchRefusedCredentials);
+
     /// <summary>OIDs the remote received over the LFS upload endpoint.</summary>
     public List<string> UploadedLfsOids { get; } = new();
 
@@ -52,6 +66,24 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
 
     /// <summary>True if any request to the remote carried the agent-injected <see cref="HostileHeader"/>.</summary>
     public bool SawHostileHeader { get; private set; }
+
+    /// <summary>A pause before each git response, so a clone runs long enough for a test to watch its files while it does.</summary>
+    public TimeSpan ResponseDelay { get; set; }
+
+    /// <summary>
+    /// When set, git's ref advertisement (a GET of <c>…/info/refs</c>) is answered, before any authentication, with a 302 to
+    /// the same path and query on the harvester (<see cref="StartHarvester"/>): a remote that redirects to another authority.
+    /// </summary>
+    public bool RedirectsToHarvester { get; set; }
+
+    /// <summary>Requests the harvester served — non-zero once git followed the redirect to it.</summary>
+    public int HarvesterRequests => Volatile.Read(ref _harvesterRequests);
+
+    /// <summary>Every Authorization header the harvester was sent.</summary>
+    public IReadOnlyList<string> HarvestedAuthorizations { get { lock (_gate) return _harvestedAuthorizations.ToList(); } }
+
+    /// <summary>The Authorization header that carries <see cref="FakeToken"/>, as git sends it.</summary>
+    public static string TokenAuthorization => "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"x-access-token:{FakeToken}"));
 
     public async Task StartAsync()
     {
@@ -76,23 +108,42 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
 
         await PublishSeedAsync();
 
+        (_listener, var port) = ListenOnAFreePort();
+        Url = $"http://127.0.0.1:{port}/remote.git";
+
+        _accept = AcceptAsync(_listener, _requests, ServeAsync);
+    }
+
+    /// <summary>
+    /// Start the harvester: another loopback authority (a port of its own) that serves this remote's ref advertisement
+    /// anonymously — so git, redirected there by <see cref="RedirectsToHarvester"/>, adopts it as the remote's new base — and
+    /// answers every other request with a 401 asking for Basic credentials, recording each Authorization it is sent.
+    /// </summary>
+    public void StartHarvester()
+    {
+        (_harvester, var port) = ListenOnAFreePort();
+        _harvesterAuthority = $"http://127.0.0.1:{port}";
+
+        _harvest = AcceptAsync(_harvester, _harvests, ServeHarvesterAsync);
+    }
+
+    /// <summary>A started listener on a loopback port nothing else holds.</summary>
+    private static (HttpListener Listener, int Port) ListenOnAFreePort()
+    {
         for (var attempt = 0; ; attempt++)
         {
             using var probe = new TcpListener(IPAddress.Loopback, 0);
             probe.Start();
             var port = ((IPEndPoint)probe.LocalEndpoint).Port;
             probe.Stop();
-            Url = $"http://127.0.0.1:{port}/remote.git";
 
             // A failed Start closes the listener for good (Prefixes then throws ObjectDisposedException), so each attempt
             // at a fresh port needs a fresh listener.
-            if (attempt > 0) _listener = new HttpListener();
-            _listener.Prefixes.Add($"http://127.0.0.1:{port}/");
-            try { _listener.Start(); break; }
+            var listener = new HttpListener();
+            listener.Prefixes.Add($"http://127.0.0.1:{port}/");
+            try { listener.Start(); return (listener, port); }
             catch (HttpListenerException) when (attempt < 4) { }
         }
-
-        _accept = AcceptAsync();
     }
 
     /// <summary>Commit <paramref name="files"/> (repo-relative path → content) on top of main and publish it — content a test clones back through the remote, such as a pack's agents and skills.</summary>
@@ -184,14 +235,14 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
         await GitAsync(Seed, new[] { "push", "--force", Remote, "main" });
     }
 
-    private async Task AcceptAsync()
+    private async Task AcceptAsync(HttpListener listener, List<Task> requests, Func<HttpListenerContext, Task> serve)
     {
         try
         {
             while (!_stopping.IsCancellationRequested)
             {
-                var context = await _listener.GetContextAsync().WaitAsync(_stopping.Token);
-                _requests.Add(ServeAsync(context));
+                var context = await listener.GetContextAsync().WaitAsync(_stopping.Token);
+                requests.Add(serve(context));
             }
         }
         catch (OperationCanceledException) when (_stopping.IsCancellationRequested) { }
@@ -209,14 +260,43 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
 
             if (path.EndsWith("/info/lfs/objects/batch", StringComparison.Ordinal)) { await ServeLfsBatchAsync(context); return; }
             if (path.Contains("/lfs-object/", StringComparison.Ordinal)) { await ServeLfsObjectAsync(context, path); return; }
+            if (RedirectsToHarvester && IsRefAdvertisement(context, path)) { RedirectToHarvester(context, path); return; }
+
+            if (ResponseDelay > TimeSpan.Zero) await Task.Delay(ResponseDelay, _stopping.Token);
 
             await ServeGitAsync(context, path);
         }
         finally { context.Response.Close(); }
     }
 
-    private static bool AuthOk(HttpListenerContext context) =>
-        string.Equals(context.Request.Headers["Authorization"], "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"x-access-token:{FakeToken}")), StringComparison.Ordinal);
+    /// <summary>The harvester: the ref advertisement served anonymously, anything else a 401 that asks for Basic credentials — each Authorization it is sent recorded first.</summary>
+    private async Task ServeHarvesterAsync(HttpListenerContext context)
+    {
+        try
+        {
+            Interlocked.Increment(ref _harvesterRequests);
+            if (context.Request.Headers["Authorization"] is { } authorization) lock (_gate) _harvestedAuthorizations.Add(authorization);
+
+            var path = context.Request.Url!.AbsolutePath;
+
+            if (IsRefAdvertisement(context, path)) { await ServeGitAsync(context, path, anonymous: true); return; }
+
+            await context.Request.InputStream.CopyToAsync(Stream.Null, _stopping.Token);
+            Unauthorized(context);
+        }
+        finally { context.Response.Close(); }
+    }
+
+    private static bool IsRefAdvertisement(HttpListenerContext context, string path) => context.Request.HttpMethod == "GET" && path.EndsWith("/info/refs", StringComparison.Ordinal);
+
+    /// <summary>A 302 to the same path and query on the harvester's authority — the shape git needs to adopt it as the remote's new base.</summary>
+    private void RedirectToHarvester(HttpListenerContext context, string path)
+    {
+        context.Response.StatusCode = 302;
+        context.Response.RedirectLocation = _harvesterAuthority + path + context.Request.Url!.Query;
+    }
+
+    private static bool AuthOk(HttpListenerContext context) => string.Equals(context.Request.Headers["Authorization"], TokenAuthorization, StringComparison.Ordinal);
 
     private void Unauthorized(HttpListenerContext context)
     {
@@ -226,6 +306,10 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
 
     private async Task ServeLfsBatchAsync(HttpListenerContext context)
     {
+        Interlocked.Increment(ref _lfsBatchRequests);
+
+        if (!AuthOk(context) && context.Request.Headers["Authorization"] is not null) Interlocked.Increment(ref _lfsBatchRefusedCredentials);
+
         if (!AuthOk(context)) { Unauthorized(context); return; }
 
         using var reader = new StreamReader(context.Request.InputStream);
@@ -278,11 +362,11 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
         await context.Response.OutputStream.WriteAsync(bytes);
     }
 
-    private async Task ServeGitAsync(HttpListenerContext context, string path)
+    private async Task ServeGitAsync(HttpListenerContext context, string path, bool anonymous = false)
     {
         var isPush = path.EndsWith("/git-receive-pack", StringComparison.Ordinal) || context.Request.QueryString["service"] == "git-receive-pack";
 
-        if (isPush || AuthenticateReads)
+        if (!anonymous && (isPush || AuthenticateReads))
         {
             if (!AuthOk(context)) { Unauthorized(context); return; }
             if (isPush) lock (_gate) AuthenticatedPushRequests++;
@@ -363,10 +447,12 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     {
         _stopping.Cancel();
         _listener.Close();
+        _harvester?.Close();
         try
         {
             if (_accept is not null) await _accept;
-            await Task.WhenAll(_requests);
+            if (_harvest is not null) await _harvest;
+            await Task.WhenAll(_requests.Concat(_harvests));
         }
         finally { _stopping.Dispose(); try { Directory.Delete(Root, recursive: true); } catch { /* best-effort */ } }
     }

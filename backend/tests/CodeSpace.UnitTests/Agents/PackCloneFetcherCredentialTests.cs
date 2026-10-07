@@ -12,9 +12,10 @@ namespace CodeSpace.UnitTests.Agents;
 /// A pasted pack URL can carry a credential in its userinfo: as the password (<c>x-access-token:&lt;token&gt;@</c>,
 /// <c>oauth2:&lt;token&gt;@</c>) or as the user (<c>&lt;token&gt;@</c>, <c>&lt;token&gt;:x-oauth-basic@</c>). Pins that a clone
 /// failure names the URL without it and redacts it from git's stderr in every spelling git echoes it in, while a user named
-/// beside a password leaves git's reason readable; that the clone runs in an owner-only directory and its origin is pointed
-/// at the URL without the credential once cloned (and the clone refused when neither rewrite nor removal works); and that a
-/// URL with no credential, an ssh URL's <c>git@</c> included, is left as written. <c>PackCloneCredentialFlowTests</c> proves
+/// beside a password leaves git's reason readable; that the clone names the remote without the credential, in an
+/// owner-only directory, and still points origin at that URL once cloned as a belt (the clone refused when neither rewrite
+/// nor removal works); and that a URL with no credential, an ssh URL's <c>git@</c> included, is left as written.
+/// <c>PackCloneCredentialFlowTests</c> proves
 /// the same against real git and a remote that demands the token.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -78,10 +79,10 @@ public sealed class PackCloneFetcherCredentialTests
     }
 
     [Fact]
-    public async Task The_clone_directory_is_owner_only_before_git_writes_the_pasted_url_into_it()
+    public async Task The_clone_directory_is_owner_only_before_git_runs_in_it()
     {
-        // git writes the tokened origin into .git/config before the transfer starts, and the strip runs only after it, so
-        // for the whole clone the token is on disk under the worker's temp dir.
+        // A belt: the clone names the remote without the pasted credential, so git writes none into .git/config, but the
+        // checkout is still the import's private copy until it is walked.
         if (OperatingSystem.IsWindows()) return;
 
         var runner = new ScriptedRunner();
@@ -115,15 +116,17 @@ public sealed class PackCloneFetcherCredentialTests
 
     [Theory]
     [InlineData(Tokened)]
-    [InlineData("https://fake-pasted-token-0123456789@github.com/owner/repo.git")]   // a token pasted as the user lands in .git/config just the same
-    public async Task A_pasted_credential_is_stripped_from_origin_once_cloned(string url)
+    [InlineData("https://fake-pasted-token-0123456789@github.com/owner/repo.git")]   // a token pasted as the user alone
+    public async Task A_pasted_credential_never_reaches_origin_and_the_strip_stays_as_a_belt(string url)
     {
         var runner = new ScriptedRunner();
 
         using var checkout = await Fetcher(runner).FetchAsync(url, null, CancellationToken.None);
 
         runner.Specs.Count.ShouldBe(2, "the clone, then one rewrite of origin");
-        runner.Specs[1].Args.ShouldBe(new[] { "-C", checkout.Directory, "remote", "set-url", "origin", "https://github.com/owner/repo.git" });
+        runner.Specs[0].Args.ShouldContain("https://github.com/owner/repo.git", "the clone names the remote without the pasted credential, so origin never holds it");
+        runner.Specs[0].Args.ShouldNotContain(a => a.Contains(Marker), "no argv carries the pasted credential");
+        runner.Specs[1].Args.ShouldBe(new[] { "-C", checkout.Directory, "remote", "set-url", "origin", "https://github.com/owner/repo.git" }, "the strip sets origin to the URL it already holds");
     }
 
     [Theory]

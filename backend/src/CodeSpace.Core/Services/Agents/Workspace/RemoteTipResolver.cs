@@ -8,9 +8,9 @@ namespace CodeSpace.Core.Services.Agents.Workspace;
 
 /// <summary>
 /// <see cref="IRemoteTipResolver"/> over <c>git ls-remote</c>, run through the local <see cref="ISandboxRunner"/>
-/// exactly like <see cref="Providers.LocalGitWorkspaceProvider"/>'s own git calls (same auth-URL embedding, same
-/// token redaction on surfaced errors, same process/timeout handling, and a tokened probe runs as a
-/// <see cref="TokenedGitCommand"/>). Branch first, tag second (preferring the
+/// exactly like <see cref="Providers.LocalGitWorkspaceProvider"/>'s own git calls (same token redaction on surfaced
+/// errors, same process/timeout handling, and a tokened probe runs as a <see cref="TokenedGitCommand"/>, naming the remote
+/// without its credential and carrying the token in its environment). Branch first, tag second (preferring the
 /// peeled <c>^{}</c> commit over the annotated tag object — the pin is a COMMIT), HEAD when no ref is named.
 /// Returned lines are matched by EXACT full ref name (ls-remote patterns are tail-matched globs — a pattern hit is
 /// necessary but not sufficient), so a glob-shaped or shadowing ref can never pin the wrong commit.
@@ -26,18 +26,18 @@ public sealed class RemoteTipResolver : IRemoteTipResolver, ISingletonDependency
 
     public async Task<string?> ResolveTipShaAsync(WorkspaceRequest request, bool refRequired, CancellationToken cancellationToken)
     {
-        var url = LocalGitWorkspaceProvider.BuildAuthenticatedUrl(request.RepositoryUrl, request.TokenUsername, request.Token);
+        var remote = TokenedGitCommand.RemoteFor(request.RepositoryUrl, request.TokenUsername, request.Token);
 
-        if (string.IsNullOrWhiteSpace(request.Ref)) return await ResolveHeadAsync(url, request, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrWhiteSpace(request.Ref)) return await ResolveHeadAsync(remote, request, cancellationToken).ConfigureAwait(false);
 
-        if (await ResolveRefAsync(url, request.Ref!, request, cancellationToken).ConfigureAwait(false) is { } sha) return sha;
+        if (await ResolveRefAsync(remote, request.Ref!, request, cancellationToken).ConfigureAwait(false) is { } sha) return sha;
 
         // The request's own SOFT semantics (a session-inherited prior branch that a merged PR may have pruned):
         // fall to the default branch, mirroring the clone's ResolveCheckoutRefAsync. A HARD ref (DefaultRef null)
         // that is gone fails LOUD — the clone would fail identically later; the pin just surfaces it at launch.
         if (!string.IsNullOrWhiteSpace(request.DefaultRef) && !string.Equals(request.Ref, request.DefaultRef, StringComparison.Ordinal))
         {
-            if (await ResolveRefAsync(url, request.DefaultRef!, request, cancellationToken).ConfigureAwait(false) is { } fallback) return fallback;
+            if (await ResolveRefAsync(remote, request.DefaultRef!, request, cancellationToken).ConfigureAwait(false) is { } fallback) return fallback;
 
             if (refRequired) throw MissingRef(request.DefaultRef!, request);
 
@@ -53,37 +53,37 @@ public sealed class RemoteTipResolver : IRemoteTipResolver, ISingletonDependency
     }
 
     /// <summary>The remote's HEAD commit — null for an EMPTY remote (ls-remote succeeds with no output: nothing exists to pin).</summary>
-    private async Task<string?> ResolveHeadAsync(string url, WorkspaceRequest request, CancellationToken cancellationToken)
+    private async Task<string?> ResolveHeadAsync(TokenedGitCommand.Remote remote, WorkspaceRequest request, CancellationToken cancellationToken)
     {
-        var lines = await LsRemoteAsync(url, new[] { "HEAD" }, request, cancellationToken).ConfigureAwait(false);
+        var lines = await LsRemoteAsync(remote, new[] { "HEAD" }, request, cancellationToken).ConfigureAwait(false);
 
         return lines.Where(l => l.Ref == "HEAD").Select(l => l.Sha).FirstOrDefault();
     }
 
     /// <summary>The tip commit of a NAMED ref: its branch, else its tag (peeled <c>^{{}}</c> commit preferred over the annotated tag object). Null when the remote has no such ref. Lines are matched by EXACT full ref name, never by the pattern's tail-glob.</summary>
-    private async Task<string?> ResolveRefAsync(string url, string @ref, WorkspaceRequest request, CancellationToken cancellationToken)
+    private async Task<string?> ResolveRefAsync(TokenedGitCommand.Remote remote, string @ref, WorkspaceRequest request, CancellationToken cancellationToken)
     {
-        var branch = await LsRemoteAsync(url, new[] { $"refs/heads/{@ref}" }, request, cancellationToken).ConfigureAwait(false);
+        var branch = await LsRemoteAsync(remote, new[] { $"refs/heads/{@ref}" }, request, cancellationToken).ConfigureAwait(false);
 
         if (branch.FirstOrDefault(l => l.Ref == $"refs/heads/{@ref}") is { Sha.Length: > 0 } hit) return hit.Sha;
 
-        var tags = await LsRemoteAsync(url, new[] { $"refs/tags/{@ref}", $"refs/tags/{@ref}^{{}}" }, request, cancellationToken).ConfigureAwait(false);
+        var tags = await LsRemoteAsync(remote, new[] { $"refs/tags/{@ref}", $"refs/tags/{@ref}^{{}}" }, request, cancellationToken).ConfigureAwait(false);
 
         return tags.Where(t => t.Ref == $"refs/tags/{@ref}^{{}}").Select(t => t.Sha).FirstOrDefault()
             ?? tags.Where(t => t.Ref == $"refs/tags/{@ref}").Select(t => t.Sha).FirstOrDefault();
     }
 
     /// <summary>One <c>git ls-remote</c> round-trip parsed to (sha, ref) lines. A non-zero exit throws LOUD with the token redacted and the URL stripped of any userinfo — an unreachable remote at launch is the SAME failure the clone would surface later, just earlier and honest.</summary>
-    private async Task<IReadOnlyList<(string Sha, string Ref)>> LsRemoteAsync(string url, IReadOnlyList<string> patterns, WorkspaceRequest request, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<(string Sha, string Ref)>> LsRemoteAsync(TokenedGitCommand.Remote remote, IReadOnlyList<string> patterns, WorkspaceRequest request, CancellationToken cancellationToken)
     {
-        var args = new List<string> { "ls-remote", url };
+        var args = new List<string> { "ls-remote", remote.Url };
         args.AddRange(patterns);
 
         SandboxResult result;
         try
         {
             result = await _runners.Resolve(SandboxKinds.Local)
-                .RunAsync(TokenedGitCommand.Spec(url, new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = LsRemoteTimeoutSeconds, AllowNetwork = true }), cancellationToken).ConfigureAwait(false);
+                .RunAsync(TokenedGitCommand.Spec(remote, new SandboxSpec { Command = "git", Args = args, TimeoutSeconds = LsRemoteTimeoutSeconds, AllowNetwork = true }), cancellationToken).ConfigureAwait(false);
         }
         catch (Win32Exception ex)
         {

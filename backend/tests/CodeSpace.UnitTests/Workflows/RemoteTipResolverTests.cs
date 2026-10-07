@@ -181,8 +181,9 @@ public sealed class RemoteTipResolverTests
     [InlineData(false)]
     public async Task The_launch_probe_runs_as_a_tokened_command_only_when_it_carries_a_token(bool tokened)
     {
-        // The probe names the authed URL, so a tokened probe must leave nothing for an operator's store helper or trace2
-        // target to keep; an untokened one keeps both, and the helpers may be how it authenticates.
+        // The probe names the remote without its credential and carries the token in its environment, so a tokened probe
+        // must leave nothing for an operator's store helper or trace2 target to keep; an untokened one keeps both, and the
+        // helpers may be how it authenticates.
         var tip = new string('c', 40);
         var runner = new LsRemoteRunner($"{tip}\trefs/heads/main\n");
         var request = new WorkspaceRequest { RepositoryUrl = "https://example.test/repo.git", Token = tokened ? "test-token" : null, Ref = "main" };
@@ -191,7 +192,9 @@ public sealed class RemoteTipResolverTests
 
         sha.ShouldBe(tip);
         var probe = runner.Specs.ShouldHaveSingleItem();
-        TokenedGitSpecs.RunsTokened(probe, "https://example.test").ShouldBe(tokened, string.Join(' ', probe.Args));
+        TokenedGitSpecs.RunsTokened(probe, "https://example.test/repo.git").ShouldBe(tokened, string.Join(' ', probe.Args));
+        probe.Args.ShouldBe(new[] { "ls-remote", "https://example.test/repo.git", "refs/heads/main" }, "the remote is named without its credential");
+        if (tokened) TokenedGitSpecs.CarriesTheCredential(probe, "x-access-token", "test-token").ShouldBeTrue();
     }
 
     // ─── harness (the LocalGitWorkspaceProviderTests pattern) ───────────────────────
