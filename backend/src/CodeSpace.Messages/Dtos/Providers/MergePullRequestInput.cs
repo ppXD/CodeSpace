@@ -29,8 +29,27 @@ public sealed record MergePullRequestInput
     /// <summary>Optional merge-commit message body. Provider default when null.</summary>
     public string? CommitMessage { get; init; }
 
-    /// <summary>Delete the source branch after a successful merge. Default false.</summary>
+    /// <summary>Delete the source branch after a successful merge — only from the pull request's own repository, never a same-named branch of the base for a fork's pull request. Default false.</summary>
     public bool DeleteSourceBranch { get; init; }
+}
+
+/// <summary>What became of a merged pull request's source branch. Provider-neutral.</summary>
+public enum SourceBranchDeletion
+{
+    /// <summary>No delete was attempted: the merge did not ask for one, or nothing merged.</summary>
+    NotRequested,
+
+    /// <summary>The branch is gone from the pull request's own repository — this merge deleted it, or it was already gone when asked.</summary>
+    Deleted,
+
+    /// <summary>Handed to the provider, which removes the branch from the request's own source project after the merge when the merging identity may (GitLab).</summary>
+    Requested,
+
+    /// <summary>Kept: the head branch lives in another repository (a fork). The base repository's ref of the same name is a different branch, so nothing is deleted.</summary>
+    SkippedFork,
+
+    /// <summary>The delete was refused, could not be made, or was cancelled before it was confirmed. The merge still stands; the detail says why.</summary>
+    Failed
 }
 
 /// <summary>Outcome of a merge: whether it merged, and (when available) the resulting commit sha + a provider message.</summary>
@@ -39,4 +58,10 @@ public sealed record RemotePullRequestMergeResult
     public required bool Merged { get; init; }
     public string? Sha { get; init; }
     public string? Message { get; init; }
+
+    /// <summary>What became of the source branch. <see cref="SourceBranchDeletion.NotRequested"/> unless the merge asked for it to go.</summary>
+    public SourceBranchDeletion SourceBranchDeletion { get; init; }
+
+    /// <summary>The same in words: which branch, where, and why it was kept or not deleted. Null when no delete was asked for.</summary>
+    public string? SourceBranchDetail { get; init; }
 }

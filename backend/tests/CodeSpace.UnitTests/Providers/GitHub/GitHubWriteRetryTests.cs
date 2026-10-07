@@ -142,6 +142,7 @@ public sealed class GitHubWriteRetryTests : IDisposable
         result.Sha.ShouldBe(ForgeMergeablePullRequest.MergeSha);
         _github.Sent("PUT", "/repos/acme/api/pulls/7/merge").ShouldBe(expectedMerges);
         pull.BranchDeletes.ShouldBe(1, "the caller asked for the source branch to go; finding the merge already done must not skip that");
+        result.SourceBranchDeletion.ShouldBe(SourceBranchDeletion.Deleted);
     }
 
     [Fact]
@@ -436,11 +437,13 @@ public sealed class GitHubWriteRetryTests : IDisposable
             merged = _merged,
             merged_at = _merged ? "2026-09-24T08:00:00Z" : null,   // Octokit derives PullRequest.Merged from merged_at
             merge_commit_sha = _merged ? MergeSha : null,
-            head = new { @ref = "feature/retry", sha = "0a1b2c3d" },
-            @base = new { @ref = "main", sha = "4e5f6a7b" },
+            head = new { @ref = "feature/retry", sha = "0a1b2c3d", repo = AcmeApi },   // GitHub names each end's repository; a same-repository head is the base's
+            @base = new { @ref = "main", sha = "4e5f6a7b", repo = AcmeApi },
             user = new { login = "codespace-bot" },
             html_url = "https://github.test/acme/api/pull/7"
         }));
+
+        private static readonly object AcmeApi = new { id = 4242, name = "api", full_name = "acme/api", owner = new { login = "acme" } };
 
         public StubReply DeleteBranch(RecordedRequest _)
         {
