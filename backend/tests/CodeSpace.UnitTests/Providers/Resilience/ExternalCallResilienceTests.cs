@@ -54,6 +54,18 @@ public class ExternalCallResilienceTests
     [Fact]
     public void IsTransient_TaskCanceledException_is_transient() => ExternalCallResilience.IsTransient(new TaskCanceledException("timeout")).ShouldBeTrue();
 
+    // NGitLab speaks HttpWebRequest, so its network blips are not HttpRequestException: a connection it never got an
+    // answer on is a WebException without a response, and an answer cut short mid-body is an HttpIOException.
+
+    [Theory]
+    [InlineData(WebExceptionStatus.ConnectFailure)]
+    [InlineData(WebExceptionStatus.Timeout)]
+    [InlineData(WebExceptionStatus.ConnectionClosed)]
+    public void IsTransient_WebException_without_a_response_is_transient(WebExceptionStatus status) => ExternalCallResilience.IsTransient(new WebException("no answer", status)).ShouldBeTrue();
+
+    [Fact]
+    public void IsTransient_HttpIOException_is_transient() => ExternalCallResilience.IsTransient(new HttpIOException(HttpRequestError.ResponseEnded, "The response ended prematurely.")).ShouldBeTrue();
+
     [Theory]
     [InlineData(500)]
     [InlineData(502)]

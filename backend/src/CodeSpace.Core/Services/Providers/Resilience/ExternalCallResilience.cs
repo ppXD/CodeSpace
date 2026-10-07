@@ -148,10 +148,15 @@ public sealed class ExternalCallResilience : IExternalCallResilience, ISingleton
     /// 4xx (auth, not-found) do not — retrying just wastes quota. SDK exception types
     /// (Octokit.ApiException, NGitLab.GitLabException) all expose a StatusCode property
     /// so duck-typed reflection covers every provider without per-SDK exception mapping.
+    /// A network blip looks different per transport: an HttpClient SDK (Octokit) throws
+    /// HttpRequestException, while NGitLab speaks HttpWebRequest — a connection it never got
+    /// an answer on is a WebException without a response, and an answer cut short mid-body is
+    /// an HttpIOException.
     /// </summary>
     public static bool IsTransient(Exception exception)
     {
-        if (exception is HttpRequestException) return true;
+        if (exception is HttpRequestException or HttpIOException) return true;
+        if (exception is WebException { Response: null }) return true;
         if (exception is TaskCanceledException) return true;
 
         var status = ExtractStatusCode(exception);

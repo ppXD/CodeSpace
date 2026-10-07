@@ -5,7 +5,7 @@ namespace CodeSpace.Core.Services.Providers.Resilience;
 /// <summary>
 /// Wraps every external SDK call (Octokit, NGitLab, future Bitbucket SDK) with two layers:
 /// per-ProviderInstance token-bucket rate limiting and exponential-backoff retry on transient
-/// failures (HttpRequestException, TaskCanceledException, 5xx HTTP status).
+/// failures (HttpRequestException, NGitLab's WebException / HttpIOException, TaskCanceledException, 5xx HTTP status).
 /// Provider classes call this for every method that hits the wire. Streaming methods
 /// (IAsyncEnumerable) are intentionally NOT wrapped here — caller handles per-page retry.
 /// A write that must not land twice (a create, a merge) goes through

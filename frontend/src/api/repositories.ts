@@ -125,9 +125,9 @@ export const repositoriesApi = {
     fetchJson<RemotePullRequestFile[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/pull-requests/${number}/files`),
 
   // CI / checks for the PR's HEAD commit. Normalised across GitHub Actions check_runs
-  // and GitLab pipeline jobs. Empty list when the provider has no checks configured
-  // or the token lacks the required scope — the backend swallows the error and
-  // returns empty rather than failing the whole PR detail view.
+  // and GitLab pipeline jobs. Empty list only when the provider reports no checks; a
+  // read the provider refuses (scope, rate limit, outage) is an error — workflows gate
+  // merges on this list. The PR detail view hides the checks card either way.
   listPullRequestChecks: (repositoryId: string, number: number) =>
     fetchJson<RemotePullRequestCheck[]>(`/api/repositories/${encodeURIComponent(repositoryId)}/pull-requests/${number}/checks`),
 

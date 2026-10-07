@@ -17,7 +17,9 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// <c>state == "success"</c>) into an If/else so a workflow only merges / proceeds once CI is green.
 /// Read-only (not side-effecting). A PR with NO checks reports <c>state = "success"</c> /
 /// <c>allPassed = true</c> (vacuously — nothing is pending or failing), mirroring how providers treat a
-/// PR with no required checks as mergeable.
+/// PR with no required checks as mergeable. "No checks" is only ever the provider's own answer: a checks
+/// list the provider could not read (rate limit, outage, refused token, dropped connection) throws out of
+/// the read and fails this node, so the gate never branches on a vacuous <c>allPassed</c>.
 /// </summary>
 public sealed class GitFetchPrChecksNode : INodeRuntime
 {

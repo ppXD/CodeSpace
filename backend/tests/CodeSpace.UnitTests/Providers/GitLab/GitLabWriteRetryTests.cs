@@ -19,10 +19,10 @@ namespace CodeSpace.UnitTests.Providers.GitLab;
 
 /// <summary>
 /// The real <see cref="GitLabRepositoryProvider"/> — NGitLab, the wire, the resilience wrapper — against a loopback
-/// GitLab that applies each write before it answers. A gateway 502 after GitLab committed must not make the retry
-/// apply the write again. (NGitLab surfaces a dropped connection as a WebException, which the wrapper never
-/// retries, so the 5xx is the ambiguous failure that reaches a retry here. The two hook creates are the exception:
-/// they post raw HTTP, where a dropped connection or a timeout is the retried failure and a 5xx answer is not.)
+/// GitLab that applies each write before it answers. A gateway 502 or a dropped connection after GitLab committed must
+/// not make the retry apply the write again. (NGitLab surfaces a dropped connection as an HttpIOException, or a
+/// WebException when no answer arrived; the wrapper retries both, as it retries an HttpClient SDK's
+/// HttpRequestException. The two hook creates post raw HTTP, where a 5xx answer is a refusal, not a retry.)
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class GitLabWriteRetryTests : IDisposable
@@ -33,6 +33,7 @@ public sealed class GitLabWriteRetryTests : IDisposable
 
     [Theory]
     [InlineData(WriteScenario.LandsThenGatewayError, 1)]
+    [InlineData(WriteScenario.LandsThenConnectionDrops, 1)]
     [InlineData(WriteScenario.RefusedBeforeLanding, 2)]
     [InlineData(WriteScenario.RefusedThenLandsThenGatewayError, 2)]
     public async Task PostComment_lands_exactly_once(WriteScenario scenario, int expectedCreates)
@@ -51,6 +52,7 @@ public sealed class GitLabWriteRetryTests : IDisposable
 
     [Theory]
     [InlineData(WriteScenario.LandsThenGatewayError, 1)]
+    [InlineData(WriteScenario.LandsThenConnectionDrops, 1)]
     [InlineData(WriteScenario.RefusedBeforeLanding, 2)]
     [InlineData(WriteScenario.RefusedThenLandsThenGatewayError, 2)]
     public async Task CommentIssue_lands_exactly_once(WriteScenario scenario, int expectedCreates)
@@ -69,6 +71,7 @@ public sealed class GitLabWriteRetryTests : IDisposable
 
     [Theory]
     [InlineData(WriteScenario.LandsThenGatewayError, 1)]
+    [InlineData(WriteScenario.LandsThenConnectionDrops, 1)]
     [InlineData(WriteScenario.RefusedBeforeLanding, 2)]
     [InlineData(WriteScenario.RefusedThenLandsThenGatewayError, 2)]
     public async Task CreateIssue_lands_exactly_once(WriteScenario scenario, int expectedCreates)
@@ -87,6 +90,7 @@ public sealed class GitLabWriteRetryTests : IDisposable
 
     [Theory]
     [InlineData(WriteScenario.LandsThenGatewayError, 1)]
+    [InlineData(WriteScenario.LandsThenConnectionDrops, 1)]
     [InlineData(WriteScenario.RefusedBeforeLanding, 2)]
     [InlineData(WriteScenario.RefusedThenLandsThenGatewayError, 2)]
     public async Task OpenPullRequest_lands_exactly_once(WriteScenario scenario, int expectedCreates)
@@ -107,6 +111,7 @@ public sealed class GitLabWriteRetryTests : IDisposable
 
     [Theory]
     [InlineData(WriteScenario.LandsThenGatewayError, 1)]
+    [InlineData(WriteScenario.LandsThenConnectionDrops, 1)]
     [InlineData(WriteScenario.RefusedBeforeLanding, 2)]
     [InlineData(WriteScenario.RefusedThenLandsThenGatewayError, 2)]
     public async Task Merge_merges_exactly_once(WriteScenario scenario, int expectedMerges)
@@ -123,6 +128,7 @@ public sealed class GitLabWriteRetryTests : IDisposable
 
     [Theory]
     [InlineData(WriteScenario.LandsThenGatewayError, 1)]
+    [InlineData(WriteScenario.LandsThenConnectionDrops, 1)]
     [InlineData(WriteScenario.RefusedBeforeLanding, 2)]
     [InlineData(WriteScenario.RefusedThenLandsThenGatewayError, 2)]
     public async Task SubmitReview_approves_exactly_once(WriteScenario scenario, int expectedApproves)
@@ -214,15 +220,15 @@ public sealed class GitLabWriteRetryTests : IDisposable
 
     [Theory]
     [InlineData(ProjectHooks, false, 2)]
-    [InlineData(ProjectHooks, true, 1)]
+    [InlineData(ProjectHooks, true, 2)]
     [InlineData(GroupHooks, false, 1)]
     [InlineData(GroupHooks, true, 2)]
     public async Task A_probe_that_cannot_read_the_hooks_never_sends_the_create_again(string hooksPath, bool probeConnectionDrops, int expectedProbes)
     {
         // The create landed and its answer was lost; then the probe cannot read the hooks either. The failed probe is
-        // asked again only where the wrapper counts its failure as transient — NGitLab's 5xx on the project list, a
-        // dropped connection (or a timeout) on the raw group list. NGitLab loses a connection as a WebException, and
-        // the group list reads a 5xx as a refusal; both fail the call at once. Never a second create.
+        // asked again only where the wrapper counts its failure as transient — a 5xx or a dropped connection on NGitLab's
+        // project list, a dropped connection (or a timeout) on the raw group list. The group list reads a 5xx as a
+        // refusal, which fails the call at once. Never a second create.
         var hooks = new ForgeCollection(WriteScenario.LandsThenConnectionDrops, HookJson);
         _gitlab.Answer("POST", hooksPath, hooks.Create).Answer("GET", hooksPath, _ => probeConnectionDrops ? StubReply.DropConnection : new StubReply(502, """{"message":"502 Bad Gateway"}"""));
 
