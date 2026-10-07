@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Chat;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Chat.Interactions;
@@ -235,11 +236,16 @@ public sealed partial class RealSupervisorActionExecutor
         },
     }, AgentJson.Options);
 
-    /// <summary>The card body shown to the human — names that the supervisor is asking, plus the question.</summary>
-    private static string QuestionBody(string question) =>
+    /// <summary>
+    /// The card body shown to the human — names that the supervisor is asking, plus the question. The question is the
+    /// supervisor model's own text, written from a prompt that carries its children's summaries, and the chat reads a
+    /// <c>&lt;type:id|label&gt;</c> token in a body as a live mention of any member under any label — so every token in it is
+    /// broken (<see cref="MessageReferenceParser.Unreferenced"/>), as on an agent's decision card.
+    /// </summary>
+    internal static string QuestionBody(string question) =>
         string.IsNullOrWhiteSpace(question)
             ? "The supervisor is asking for your input."
-            : $"The supervisor is asking: {question}";
+            : MessageReferenceParser.Unreferenced($"The supervisor is asking: {question}");
 
     /// <summary>The recorded ask_human outcome: the question, the wait token (a replay re-derives the park + token without re-posting), and the answer (null until the human replies + the fold writes it).</summary>
     private static string AskOutcome(string question, string token, string? answer) =>

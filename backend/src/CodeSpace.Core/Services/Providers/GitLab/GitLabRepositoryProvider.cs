@@ -84,7 +84,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             // you call this directly with a 1–2 char term you'll get an empty page — that's
             // GitLab, not us.
             //
-            // Same Skip+Take trade-off as the MR list — NGitLab doesn't expose a `?page=` knob
+            // Skip+Take trade-off — NGitLab doesn't expose a `?page=` knob
             // on ProjectQuery, so paging to page N still walks pages 1..N internally. Fine for
             // "Load more once or twice", a known limitation for jump-to-last navigation.
             var query = new ProjectQuery
@@ -151,80 +151,107 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     private sealed record GitLabProjectsCountResponse(GitLabProjectsCountConnection? Projects);
     private sealed record GitLabProjectsCountConnection(int Count);
 
+    /// <summary>GitLab's largest page: a <c>per_page</c> above it is answered with this many.</summary>
+    private const int GitLabMaxPageSize = 100;
+
+    /// <summary>The most rows of each finished state a Closed page reads, so a Closed page is at most two requests a state.</summary>
+    private const int ClosedOrMergedHeadroom = 200;
+
+    /// <summary>
+    /// One page of the project's merge requests. Every request it sends asks GitLab for one page by <c>page</c> and
+    /// <c>per_page</c> and is its own call through the connection's limiter, cancelled with its caller: a far page is one
+    /// request, not a walk through every page before it, so the page a caller names cannot multiply what the connection
+    /// spends.
+    /// </summary>
     public async Task<IReadOnlyList<RemotePullRequest>> ListPullRequestsAsync(ProviderContext context, RemoteRepository repository, PullRequestState? stateFilter, int page, int perPage, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var reader = new ProjectListReader(context.Instance, new NGitLab.Impl.API(new NGitLab.Impl.GitLabCredentials(host, token)).Get(), int.Parse(repository.ExternalId));
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(ListPullRequestsAsync), _ =>
-        {
-            var projectId = int.Parse(repository.ExternalId);
+        // GitLab's `state=closed` is NOT the same as GitHub's `Closed` — it excludes
+        // merged MRs, which on GitLab are a distinct state (`merged`), not closed-with-flag.
+        // Our two-bucket UI (Open / Closed) treats both closed and merged as "no longer
+        // open" to match GitHub's convention and to align with our own counts call (which
+        // sums closed + merged). So when the caller asks for `Closed`, we read both states
+        // (state=closed, state=merged), merge by UpdatedAt desc, and paginate locally.
+        // Open / Draft / Merged go through the single-state page.
+        var mrs = stateFilter == PullRequestState.Closed
+            ? await ReadClosedOrMergedPageAsync(reader, page, perPage, cancellationToken).ConfigureAwait(false)
+            : await ReadMergeRequestPageAsync(reader, MapStateFilterToGitLab(stateFilter), page, perPage, cancellationToken).ConfigureAwait(false);
 
-            // GitLab labels are bare names; colour lives on the project-labels endpoint.
-            // Best-effort lookup (see method doc) shared across every page request.
-            var labelColors = TryFetchProjectLabelColors(client, projectId);
+        // GitLab labels are bare names; colour lives on the project-labels endpoint.
+        var labelColors = await ReadLabelColorsAsync(reader, cancellationToken).ConfigureAwait(false);
 
-            // GitLab's `state=closed` is NOT the same as GitHub's `Closed` — it excludes
-            // merged MRs, which on GitLab are a distinct state (`merged`), not closed-with-flag.
-            // Our two-bucket UI (Open / Closed) treats both closed and merged as "no longer
-            // open" to match GitHub's convention and to align with our own counts call (which
-            // sums closed + merged). So when the caller asks for `Closed`, we fan out to two
-            // parallel REST calls (state=closed, state=merged), merge by UpdatedAt desc, and
-            // paginate locally. Open / Draft / Merged go through the single-state fast path.
-            //
-            // Cost: page N of Closed costs ~2× the row volume of page N of Open because we
-            // walk both buckets. Acceptable for the typical "scan a few pages" use case;
-            // would need a smarter strategy if a repo had tens of thousands of closed MRs.
-            var mrs = stateFilter == PullRequestState.Closed
-                ? FetchCombinedClosedMergedPage(client, projectId, page, perPage)
-                : FetchSingleStatePage(client, projectId, MapStateFilterToGitLab(stateFilter), page, perPage);
+        return mrs.Select(mr => ToRemotePullRequest(mr, labelColors)).ToList();
+    }
 
-            return Task.FromResult((IReadOnlyList<RemotePullRequest>)mrs.Select(mr => ToRemotePullRequest(mr, labelColors)).ToList());
-        }, cancellationToken).ConfigureAwait(false);
+    /// <summary>What a list's reads of one project share: the connection whose limiter each request is charged to, a GET requestor carrying its token, and the project.</summary>
+    private sealed record ProjectListReader(ProviderInstance Instance, IHttpRequestor Requestor, int ProjectId);
+
+    /// <summary>One page of the project's merge requests in <paramref name="state"/> (every state when null), newest activity first.</summary>
+    private async Task<IReadOnlyCollection<MergeRequest>> ReadMergeRequestPageAsync(ProjectListReader reader, GitLabMergeRequestState? state, int page, int perPage, CancellationToken cancellationToken) =>
+        await ReadPageAsync<MergeRequest>(reader, nameof(ListPullRequestsAsync), MergeRequestPageUrl(reader.ProjectId, state, page, perPage), cancellationToken).ConfigureAwait(false);
+
+    private static string MergeRequestPageUrl(int projectId, GitLabMergeRequestState? state, int page, int perPage)
+    {
+        var stateParameter = state is { } named ? $"state={named}&" : "";
+
+        return $"/projects/{projectId}/merge_requests?{stateParameter}order_by=updated_at&sort=desc&per_page={perPage}&page={page}";
     }
 
     /// <summary>
-    /// Single-state page fetch (Open, Draft, Merged, or All). NGitLab's iterator pages
-    /// internally; <c>Skip+Take</c> walks pages 1..N which is wasteful at deep pagination
-    /// but matches what the MR-list code did before.
+    /// A page of Closed: GitLab's closed and merged together, newest activity first. Each state's newest page × perPage
+    /// rows (at most <see cref="ClosedOrMergedHeadroom"/>) fill the page even when one state dominates the other.
     /// </summary>
-    private static List<MergeRequest> FetchSingleStatePage(GitLabClient client, int projectId, GitLabMergeRequestState? state, int page, int perPage)
+    private async Task<List<MergeRequest>> ReadClosedOrMergedPageAsync(ProjectListReader reader, int page, int perPage, CancellationToken cancellationToken)
     {
-        var query = new MergeRequestQuery
+        var headroom = Math.Min(page * perPage, ClosedOrMergedHeadroom);
+
+        var closed = await ReadNewestMergeRequestsAsync(reader, GitLabMergeRequestState.closed, headroom, cancellationToken).ConfigureAwait(false);
+        var merged = await ReadNewestMergeRequestsAsync(reader, GitLabMergeRequestState.merged, headroom, cancellationToken).ConfigureAwait(false);
+
+        return closed.Concat(merged).OrderByDescending(mr => mr.UpdatedAt).Skip((page - 1) * perPage).Take(perPage).ToList();
+    }
+
+    /// <summary>The newest <paramref name="count"/> merge requests in <paramref name="state"/>, read in pages of up to GitLab's largest until there are enough or GitLab has no more.</summary>
+    private async Task<List<MergeRequest>> ReadNewestMergeRequestsAsync(ProjectListReader reader, GitLabMergeRequestState state, int count, CancellationToken cancellationToken)
+    {
+        var pageSize = Math.Min(count, GitLabMaxPageSize);
+        var rows = new List<MergeRequest>();
+
+        for (var page = 1; rows.Count < count; page++)
         {
-            State = state,
-            OrderBy = "updated_at",
-            Sort = "desc",
-            PerPage = perPage
-        };
-        var skip = (page - 1) * perPage;
-        return client.GetMergeRequest(projectId).Get(query).Skip(skip).Take(perPage).ToList();
+            var batch = await ReadMergeRequestPageAsync(reader, state, page, pageSize, cancellationToken).ConfigureAwait(false);
+            rows.AddRange(batch);
+
+            if (batch.Count < pageSize) break;
+        }
+
+        return rows.Take(count).ToList();
     }
 
     /// <summary>
-    /// Combined Closed+Merged page — fetches both states up to <paramref name="page"/>×<paramref name="perPage"/>
-    /// items each (sorted desc by activity), merges, re-sorts, slices the requested page.
-    /// Pulls enough headroom to fill the page even when one bucket dominates the other.
+    /// The project's label colours for a list, best-effort like <see cref="TryFetchProjectLabelColors"/>: a list that cannot
+    /// read them shows its labels without colour. One request of GitLab's largest page — a label past the first hundred
+    /// shows without colour rather than costing the list another request.
     /// </summary>
-    private static List<MergeRequest> FetchCombinedClosedMergedPage(GitLabClient client, int projectId, int page, int perPage)
+    private async Task<IReadOnlyDictionary<string, string?>> ReadLabelColorsAsync(ProjectListReader reader, CancellationToken cancellationToken)
     {
-        // Pull `page * perPage` from each state — this guarantees that even if every
-        // row on the requested page is from a single bucket, we have enough to fill it.
-        // 200-row cap so a deep-page request can't pull tens of thousands of rows.
-        var headroom = Math.Min(page * perPage, 200);
+        try
+        {
+            var url = $"/projects/{reader.ProjectId}/labels?include_ancestor_groups=true&per_page={GitLabMaxPageSize}";
 
-        var closedQuery = new MergeRequestQuery { State = GitLabMergeRequestState.closed, OrderBy = "updated_at", Sort = "desc", PerPage = perPage };
-        var mergedQuery = new MergeRequestQuery { State = GitLabMergeRequestState.merged, OrderBy = "updated_at", Sort = "desc", PerPage = perPage };
-
-        var closedItems = client.GetMergeRequest(projectId).Get(closedQuery).Take(headroom).ToList();
-        var mergedItems = client.GetMergeRequest(projectId).Get(mergedQuery).Take(headroom).ToList();
-
-        var skip = (page - 1) * perPage;
-        return closedItems.Concat(mergedItems)
-            .OrderByDescending(mr => mr.UpdatedAt)
-            .Skip(skip)
-            .Take(perPage)
-            .ToList();
+            return LabelColors(await ReadPageAsync<Label>(reader, "ListProjectLabels", url, cancellationToken).ConfigureAwait(false));
+        }
+        catch (Exception) when (!cancellationToken.IsCancellationRequested)
+        {
+            return EmptyLabelColors;
+        }
     }
+
+    /// <summary>One GET of one page, as its own call through the connection's limiter, cancelled with its caller.</summary>
+    private async Task<IReadOnlyCollection<T>> ReadPageAsync<T>(ProjectListReader reader, string operationName, string url, CancellationToken cancellationToken) =>
+        await _resilience.ExecuteAsync(reader.Instance, operationName, async ct => (await reader.Requestor.PageAsync<T>(url, ct).ConfigureAwait(false)).Page, cancellationToken).ConfigureAwait(false);
 
     public async Task<RemotePullRequest?> FindPullRequestByBranchAsync(ProviderContext context, RemoteRepository repository, string sourceBranch, string targetBranch, CancellationToken cancellationToken)
     {
@@ -378,29 +405,26 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         return string.Equals(mr.State, "merged", StringComparison.OrdinalIgnoreCase) ? mr : null;
     }
 
+    /// <summary>
+    /// One page of the project's issues, newest first, as one request for that page by <c>page</c> and <c>per_page</c> under
+    /// the caller's token — never a walk through every page before a far one — through the connection's limiter like the
+    /// merge-request list. Issues are opened or closed only, so one state's page is the page (none: every state).
+    /// </summary>
     public async Task<IReadOnlyList<RemoteIssue>> ListIssuesAsync(ProviderContext context, RemoteRepository repository, IssueState? stateFilter, int page, int perPage, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var reader = new ProjectListReader(context.Instance, new NGitLab.Impl.API(new NGitLab.Impl.GitLabCredentials(host, token)).Get(), int.Parse(repository.ExternalId));
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(ListIssuesAsync), _ =>
-        {
-            var projectId = int.Parse(repository.ExternalId);
+        var issues = await ReadPageAsync<Issue>(reader, nameof(ListIssuesAsync), IssuePageUrl(reader.ProjectId, MapIssueStateFilterToGitLab(stateFilter), page, perPage), cancellationToken).ConfigureAwait(false);
 
-            // Issues are simpler than MRs — opened/closed only, no merged sub-state to fan out across.
-            // Single-state fast path for every filter; null State = all states. NGitLab's iterator pages
-            // internally and Skip/Take walks pages 1..N, mirroring FetchSingleStatePage for MRs.
-            var query = new IssueQuery
-            {
-                State = MapIssueStateFilterToGitLab(stateFilter),
-                OrderBy = "created_at",
-                Sort = "desc",
-                PerPage = perPage
-            };
-            var skip = (page - 1) * perPage;
-            var issues = client.Issues.Get(projectId, query).Skip(skip).Take(perPage).ToList();
+        return issues.Select(ToRemoteIssue).ToList();
+    }
 
-            return Task.FromResult((IReadOnlyList<RemoteIssue>)issues.Select(ToRemoteIssue).ToList());
-        }, cancellationToken).ConfigureAwait(false);
+    private static string IssuePageUrl(int projectId, GitLabIssueState? state, int page, int perPage)
+    {
+        var stateParameter = state is { } named ? $"state={named}&" : "";
+
+        return $"/projects/{projectId}/issues?{stateParameter}order_by=created_at&sort=desc&per_page={perPage}&page={page}";
     }
 
     public async Task<RemoteIssueCounts> CountIssuesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
@@ -654,23 +678,28 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     {
         try
         {
-            var labels = client.Labels.ForProject(projectId).ToList();
-            var map = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-            foreach (var l in labels)
-            {
-                if (string.IsNullOrEmpty(l.Name)) continue;
-                // GitLab returns "#ED9121" with the leading hash; strip it so the wire
-                // contract matches GitHub's (Octokit returns the hex without #).
-                var colour = l.Color;
-                if (!string.IsNullOrEmpty(colour) && colour[0] == '#') colour = colour[1..];
-                map[l.Name] = string.IsNullOrWhiteSpace(colour) ? null : colour;
-            }
-            return map;
+            return LabelColors(client.Labels.ForProject(projectId).ToList());
         }
         catch
         {
             return new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         }
+    }
+
+    /// <summary>Label name → colour, as hex without the leading <c>#</c>; a label without one maps to null.</summary>
+    private static Dictionary<string, string?> LabelColors(IEnumerable<Label> labels)
+    {
+        var map = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        foreach (var l in labels)
+        {
+            if (string.IsNullOrEmpty(l.Name)) continue;
+            // GitLab returns "#ED9121" with the leading hash; strip it so the wire
+            // contract matches GitHub's (Octokit returns the hex without #).
+            var colour = l.Color;
+            if (!string.IsNullOrEmpty(colour) && colour[0] == '#') colour = colour[1..];
+            map[l.Name] = string.IsNullOrWhiteSpace(colour) ? null : colour;
+        }
+        return map;
     }
 
     public async Task<IReadOnlyList<RemotePullRequestCommit>> ListPullRequestCommitsAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)

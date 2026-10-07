@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Repositories;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
@@ -13,7 +14,9 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 ///
 /// This is the DISCOVERY node — it's what lets a workflow enumerate PRs and then fan out over them
 /// (e.g. "review every open PR": list → loop → fetch diff → agent → post review). Read-only; reuses
-/// the same catalog capability the Pulls tab uses, so it's provider-agnostic (GitHub + GitLab).
+/// the same catalog capability the Pulls tab uses, so it's provider-agnostic (GitHub + GitLab). Page and page size are
+/// held to the Pulls tab's own ceilings (<see cref="ListPullRequestsQuery.MaxPage"/>, <see cref="ListPullRequestsQuery.MaxPerPage"/>):
+/// called by an agent, they are the model's numbers.
 /// </summary>
 public sealed class GitListPullRequestsNode : INodeRuntime
 {
@@ -56,7 +59,7 @@ public sealed class GitListPullRequestsNode : INodeRuntime
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind from the trigger (e.g. {{trigger.repositoryId}})." },
                 "state": { "type": "string", "enum": ["Open","Draft","Merged","Closed"], "description": "Only list requests in this state. Leave empty to list all." },
-                "page": { "type": "integer", "minimum": 1, "x-control": "stepper", "x-advanced": true, "description": "Page of results (default 1)." },
+                "page": { "type": "integer", "minimum": 1, "maximum": 1000, "x-control": "stepper", "x-advanced": true, "description": "Page of results (default 1, max 1000)." },
                 "perPage": { "type": "integer", "minimum": 1, "maximum": 100, "default": 30, "x-control": "stepper", "x-advanced": true, "description": "Results per page (default 30, max 100)." }
               },
               "required": ["repositoryId"]
@@ -100,8 +103,8 @@ public sealed class GitListPullRequestsNode : INodeRuntime
         if (!TryReadState(context, out var state)) return NodeResult.Fail("Input 'state' must be one of Open, Draft, Merged, Closed.");
         if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
-        var page = ReadPositiveInt(context, "page", DefaultPage);
-        var perPage = ReadPositiveInt(context, "perPage", DefaultPerPage);
+        var page = Math.Min(ReadPositiveInt(context, "page", DefaultPage), ListPullRequestsQuery.MaxPage);
+        var perPage = Math.Min(ReadPositiveInt(context, "perPage", DefaultPerPage), ListPullRequestsQuery.MaxPerPage);
 
         var pullRequests = await context.Observability.TraceExternalCallAsync(
             target: $"git.list_prs:{repoId}",

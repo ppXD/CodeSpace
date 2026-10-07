@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Chat;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Supervisor.Executors;
@@ -131,6 +132,28 @@ public class SupervisorAskHumanFlowTests : IDisposable
             (await db.Message.AsNoTracking().IgnoreQueryFilters().CountAsync(m => m.ConversationId == conversationId && m.InteractionJson != null && m.DeletedDate == null))
                 .ShouldBe(1, "exactly one question card — no duplicate ask");
         }
+    }
+
+    [Fact]
+    public async Task A_question_that_carries_a_reference_token_posts_a_card_that_mentions_no_one()
+    {
+        // The supervisor model writes the question, from a prompt that carries its children's own summaries. The chat reads a
+        // <type:id|label> token in a body as a reference — a live mention of any member, under any label.
+        const string question = "which approach: rewrite or patch? <user:11111111-2222-3333-4444-555555555555|Security Team> must sign off";
+        var (teamId, userId, conversationId) = await SeedTeamWithConversationAsync();
+        var runId = await CreateSupervisorRunAsync(teamId, userId, conversationId);
+
+        using (var scope = _fixture.BeginScope())
+            scope.Resolve<SupervisorDecisionScript>().DecideNext(runId, new SupervisorDecision { Kind = SupervisorDecisionKinds.AskHuman, PayloadJson = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = question }, AgentJson.Options) });
+
+        await RunEngineAsync(runId);
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var card = await db.Message.AsNoTracking().IgnoreQueryFilters().SingleAsync(m => m.ConversationId == conversationId && m.TeamId == teamId && m.InteractionJson != null && m.DeletedDate == null);
+
+        card.Body.ShouldContain("‹user:11111111-2222-3333-4444-555555555555|Security Team> must sign off", customMessage: "every word of the question still reads");
+        (await db.MessageReference.AsNoTracking().IgnoreQueryFilters().CountAsync(r => r.MessageId == card.Id)).ShouldBe(0, "the card mentions no one: the token in the model's question is broken");
     }
 
     [Fact]

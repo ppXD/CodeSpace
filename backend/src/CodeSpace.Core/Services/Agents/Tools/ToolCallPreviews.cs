@@ -1,6 +1,6 @@
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using CodeSpace.Core.Services.Agents.Exceptions;
+using CodeSpace.Core.Services.Chat;
 using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Agents.Tools;
@@ -11,7 +11,7 @@ namespace CodeSpace.Core.Services.Agents.Tools;
 /// ledger row and the run's tool-call audit — so the bounds and the redaction are applied once, by
 /// <see cref="Finish"/>, before any of them sees it.
 /// </summary>
-public static partial class ToolCallPreviews
+public static class ToolCallPreviews
 {
     /// <summary>The longest a value the platform read to explain the call (a pull request's title) is kept, after redaction, before it is cut with a count of what was dropped. An argument is never cut.</summary>
     public const int MaxValueCharacters = 240;
@@ -128,7 +128,7 @@ public static partial class ToolCallPreviews
     }
 
     private static string CardLine(ToolCallPreviewLine line) =>
-        $"- {Unreferenced(line.Label)}: {(line.Value.Length == 0 ? "(empty)" : Unreferenced(line.Value))}{(line.OutsideRun ? $" — {OutsideRunNote}" : "")}";
+        $"- {MessageReferenceParser.Unreferenced(line.Label)}: {(line.Value.Length == 0 ? "(empty)" : MessageReferenceParser.Unreferenced(line.Value))}{(line.OutsideRun ? $" — {OutsideRunNote}" : "")}";
 
     private static string Bound(string text, int max)
     {
@@ -138,10 +138,4 @@ public static partial class ToolCallPreviews
 
         return $"{text[..cut]}… (+{text.Length - cut} characters)";
     }
-
-    /// <summary>Breaks the chat's reference-token grammar (<c>&lt;type:id|label&gt;</c>) where it would start, so card text mentions no one.</summary>
-    private static string Unreferenced(string text) => ReferenceTokenStart().Replace(text, "‹");
-
-    [GeneratedRegex("<(?=[a-z][a-z0-9_]*:)")]
-    private static partial Regex ReferenceTokenStart();
 }

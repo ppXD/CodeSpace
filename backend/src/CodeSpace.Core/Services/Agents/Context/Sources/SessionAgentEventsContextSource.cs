@@ -4,7 +4,11 @@ using CodeSpace.Messages.Agents;
 
 namespace CodeSpace.Core.Services.Agents.Context.Sources;
 
-/// <summary>Pullable, resumable session-wide view of append-only normalized events across agent runs.</summary>
+/// <summary>
+/// Pullable, resumable view of the calling agent run's own append-only normalized events. They carry its raw tool output,
+/// so another run of the thread — whose tier and repositories may reach what this one may not — is read through its turn
+/// summary (<c>session.turns</c>), not its events.
+/// </summary>
 public sealed class SessionAgentEventsContextSource : IContextSource, IScopedDependency
 {
     private readonly ISessionAgentEventReader _reader;
@@ -14,8 +18,9 @@ public sealed class SessionAgentEventsContextSource : IContextSource, IScopedDep
     public string Kind => "session.events";
 
     public string Description =>
-        "Durable normalized agent events across every run in this work thread, with stable run/sequence ids, event " +
-        "kind, bounded text, and safe structured-data references. Optional 'query' filters full event kind/text/run id before paging.";
+        "Durable normalized events of this agent run, with stable run/sequence ids, event kind, bounded text, and safe " +
+        "structured-data references. Other runs of this work thread are read through session.turns. Optional 'query' " +
+        "filters the event kind, run id and the bounded text shown before paging.";
 
     public async Task<AgentContextResult> RetrieveAsync(AgentContextQuery query, CancellationToken cancellationToken)
     {
@@ -25,6 +30,7 @@ public sealed class SessionAgentEventsContextSource : IContextSource, IScopedDep
         {
             TeamId = query.TeamId,
             SessionId = sessionId,
+            AgentRunId = query.RunId,
             Query = query.Query,
             Cursor = query.Cursor,
         }, cancellationToken).ConfigureAwait(false);

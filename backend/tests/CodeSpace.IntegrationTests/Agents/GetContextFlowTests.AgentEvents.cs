@@ -3,6 +3,7 @@ using System.Text;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Sessions;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using Shouldly;
@@ -13,14 +14,18 @@ public partial class GetContextFlowTests
 {
     [Fact]
     [Trait("P17", "Regression")]
-    public async Task Session_agent_events_page_across_runs_and_fresh_scopes_without_duplicates_or_gaps()
+    public async Task Session_agent_events_page_the_calling_runs_events_across_fresh_scopes_without_duplicates_or_gaps()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var sessionId = await SeedSessionAsync(teamId);
         var runA = await SeedAgentRunAsync(teamId, sessionId);
         var runB = await SeedAgentRunAsync(teamId, sessionId);
         var expected = new List<long>();
-        for (var i = 0; i < 28; i++) expected.Add(await SeedAgentEventAsync(i % 2 == 0 ? runA : runB, AgentEventKind.AssistantMessage, $"EVENT_{i:D2}"));
+        for (var i = 0; i < 28; i++)
+        {
+            expected.Add(await SeedAgentEventAsync(runA, AgentEventKind.AssistantMessage, $"EVENT_{i:D2}"));
+            await SeedAgentEventAsync(runB, AgentEventKind.AssistantMessage, $"SIBLING_{i:D2}");
+        }
 
         var first = StructuredOutput(await CallToolAsync(teamId, runA, new { source = "session.events" }));
         first.GetProperty("coverage").GetString().ShouldBe("partial");
@@ -31,6 +36,45 @@ public partial class GetContextFlowTests
         var actual = EventSequences(first).Concat(EventSequences(second)).ToList();
         actual.Count.ShouldBe(expected.Count);
         actual.Distinct().ShouldBe(expected.Order(), ignoreOrder: true);
+    }
+
+    [Fact]
+    public async Task Another_runs_raw_events_are_not_readable_even_by_query()
+    {
+        // A sibling run of the thread may have read files this run's workspace does not mount, or fetched over a network
+        // this run lacks. Its raw output stays with it: this run reads the sibling through its turn summary, not its events.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var caller = await SeedAgentRunAsync(teamId, sessionId);
+        var sibling = await SeedAgentRunAsync(teamId, sessionId);
+        var own = await SeedAgentEventAsync(caller, AgentEventKind.CommandExecuted, "OWN_OUTPUT");
+        await SeedAgentEventAsync(sibling, AgentEventKind.CommandExecuted, "SIBLING_FILE_CONTENTS");
+
+        var all = StructuredOutput(await CallToolAsync(teamId, caller, new { source = "session.events" }));
+        var probed = StructuredOutput(await CallToolAsync(teamId, caller, new { source = "session.events", query = "SIBLING_FILE" }));
+        var bySiblingId = StructuredOutput(await CallToolAsync(teamId, caller, new { source = "session.events", query = sibling.ToString() }));
+
+        EventSequences(all).ToList().ShouldBe([own]);
+        all.GetProperty("text").GetString().ShouldNotContain("SIBLING_FILE_CONTENTS");
+        probed.GetProperty("found").GetBoolean().ShouldBeFalse("a query must not find what a plain read does not show");
+        bySiblingId.GetProperty("found").GetBoolean().ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Session_agent_event_query_matches_only_the_clipped_text_it_shows()
+    {
+        // The reader shows the first ExcerptCharacters of an event. Matched against the whole text, found / not found
+        // spelled out the hidden tail one guess at a time.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId);
+        var runId = await SeedAgentRunAsync(teamId, sessionId);
+        await SeedAgentEventAsync(runId, AgentEventKind.CommandExecuted, "SHOWN_HEAD_" + new string('t', SessionAgentEventReader.ExcerptCharacters) + "_TAILVALUE=k7Q");
+
+        var shown = StructuredOutput(await CallToolAsync(teamId, runId, new { source = "session.events", query = "shown_head" }));
+        var hidden = StructuredOutput(await CallToolAsync(teamId, runId, new { source = "session.events", query = "TAILVALUE=k7Q" }));
+
+        shown.GetProperty("found").GetBoolean().ShouldBeTrue();
+        hidden.GetProperty("found").GetBoolean().ShouldBeFalse("the tail past the clip is never shown, so it is never matched");
     }
 
     [Fact]

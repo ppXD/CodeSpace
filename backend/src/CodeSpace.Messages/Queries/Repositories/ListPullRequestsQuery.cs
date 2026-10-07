@@ -19,6 +19,12 @@ public sealed record ListPullRequestsQuery : IQuery<IReadOnlyList<RemotePullRequ
     /// <summary>Upper bound for safety — both providers cap at 100 server-side, so anything higher silently degrades.</summary>
     public const int MaxPerPage = 100;
 
+    /// <summary>
+    /// The furthest page a caller may name (with <see cref="MaxPerPage"/>, the newest 100,000 requests). A page past it
+    /// reads this one: the number cannot run past what a page index and offset hold, and no list is paged this deep.
+    /// </summary>
+    public const int MaxPage = 1000;
+
     public required Guid RepositoryId { get; init; }
 
     /// <summary>Null returns all states. Open/Draft → still-open on provider; Merged/Closed → finished.</summary>

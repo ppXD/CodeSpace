@@ -29,6 +29,10 @@ public static partial class MessageReferenceParser
     [GeneratedRegex(@"<(?<type>[a-z][a-z0-9_]*):(?<id>[^|>]+)(?:\|(?<label>[^>]*))?>", RegexOptions.CultureInvariant)]
     private static partial Regex TokenPattern();
 
+    /// <summary>Where <see cref="TokenPattern"/> would start a match: a <c>&lt;</c> followed by a ref type and its colon.</summary>
+    [GeneratedRegex("<(?=[a-z][a-z0-9_]*:)", RegexOptions.CultureInvariant)]
+    private static partial Regex TokenStart();
+
     /// <summary>
     /// The distinct references a body makes, in first-seen order. Duplicates of the same ordinal
     /// (RefType, RefId) collapse to one — keeping the first label — because the reverse index
@@ -76,4 +80,11 @@ public static partial class MessageReferenceParser
             return match.Groups["type"].Value == "user" ? "@" + text : text;
         });
     }
+
+    /// <summary>
+    /// <paramref name="text"/> as plain words: where a token would start, its <c>&lt;</c> becomes <c>‹</c>, so the text
+    /// parses to no reference and mentions no one, and every word of it still reads. For text the platform posts on
+    /// someone else's behalf — an agent's question, a tool's argument — whose tokens must not become live references.
+    /// </summary>
+    public static string Unreferenced(string text) => TokenStart().Replace(text, "‹");
 }

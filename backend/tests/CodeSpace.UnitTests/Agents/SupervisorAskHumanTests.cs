@@ -23,6 +23,20 @@ namespace CodeSpace.UnitTests.Agents;
 [Trait("Category", "Unit")]
 public class SupervisorAskHumanTests
 {
+    // ── The card a human reads ───────────────────────────────────────────────────────
+
+    [Theory]
+    [InlineData("which approach? <user:11111111-2222-3333-4444-555555555555|Security Team> must sign off", "The supervisor is asking: which approach? ‹user:11111111-2222-3333-4444-555555555555|Security Team> must sign off")]
+    [InlineData("see <pull_request:acme/api#7|the fix>", "The supervisor is asking: see ‹pull_request:acme/api#7|the fix>")]
+    [InlineData("", "The supervisor is asking for your input.")]
+    public void The_question_card_mentions_no_one_whatever_the_model_wrote(string question, string body)
+    {
+        var shown = RealSupervisorActionExecutor.QuestionBody(question);
+
+        shown.ShouldBe(body);
+        Core.Services.Chat.MessageReferenceParser.Parse(shown).ShouldBeEmpty("a token in the model's question never becomes a live reference");
+    }
+
     // ── The {question} payload round-trips through the projector ─────────────────────
 
     [Fact]

@@ -11,12 +11,23 @@ namespace CodeSpace.UnitTests.Handlers.Repositories;
 [Trait("Category", "Unit")]
 public class ListIssuesQueryHandlerTests
 {
+    [Fact]
+    public void The_page_ceilings_are_pinned()
+    {
+        // The same ceilings the Pulls tab holds to. Raising either one widens what one request can ask a provider for, so it
+        // is a reviewed edit, not a drift.
+        ListIssuesQuery.MaxPerPage.ShouldBe(100);
+        ListIssuesQuery.MaxPage.ShouldBe(1000);
+    }
+
     [Theory]
     [InlineData(0, 30, 1, 30)]                 // page < 1 clamps up to 1
     [InlineData(-5, 30, 1, 30)]
     [InlineData(3, 30, 3, 30)]                 // in-range values pass through
     [InlineData(1, 0, 1, 1)]                   // perPage < 1 clamps up to 1
     [InlineData(1, 1000, 1, 100)]             // perPage > Max clamps down to MaxPerPage
+    [InlineData(1_000_000, 100, 1000, 100)]   // a page past the ceiling is the ceiling
+    [InlineData(int.MaxValue, int.MaxValue, 1000, 100)]
     public async Task Clamps_page_and_perPage_then_forwards_with_the_current_team(int page, int perPage, int expectedPage, int expectedPerPage)
     {
         var team = Guid.NewGuid();
