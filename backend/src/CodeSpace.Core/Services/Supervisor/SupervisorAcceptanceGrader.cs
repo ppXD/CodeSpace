@@ -265,7 +265,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
                 return Failed("no-branch-or-repo");
             }
 
-            var applyError = await ApplyPatchAsync(directory, patch, cancellationToken).ConfigureAwait(false);
+            var applyError = await ApplyPatchAsync(directory, patch, clone, cancellationToken).ConfigureAwait(false);
 
             if (applyError is not null)
             {
@@ -332,39 +332,50 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         }
     }
 
-    /// <summary>Full clone (no <c>--branch</c> — a base SHA is not a ref name the shared provider's clone can accept) then a detached checkout of the exact base. Throws <see cref="WorkspaceException"/> (redacted) on either git failure.</summary>
+    /// <summary>
+    /// Full clone (no <c>--branch</c> — a base SHA is not a ref name the shared provider's clone can accept) then a detached
+    /// checkout of the exact base. Throws <see cref="WorkspaceException"/> (redacted) on either git failure. Both reach the
+    /// remote, so both run as <see cref="TokenedGitCommand"/>s: the clone through git's transport, the checkout through
+    /// git-lfs, which downloads the base's LFS objects from origin and asks the credential helpers for them.
+    /// </summary>
     private async Task CloneAtBaseAsync(WorkspaceRequest clone, string baseSha, string directory, CancellationToken cancellationToken)
     {
         Directory.CreateDirectory(directory);
 
-        var url = LocalGitWorkspaceProvider.BuildAuthenticatedUrl(clone.RepositoryUrl, clone.TokenUsername, clone.Token);
+        var remote = RemoteFor(clone);
 
         var cloneResult = await _runners.Resolve(GradingRunnerKind).RunAsync(
-            TokenedGitCommand.Spec(url, new SandboxSpec { Command = "git", Args = new[] { "clone", url, directory }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }), cancellationToken).ConfigureAwait(false);
+            TokenedGitCommand.Spec(remote, new SandboxSpec { Command = "git", Args = new[] { "clone", remote.Url, directory }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }), cancellationToken).ConfigureAwait(false);
 
         if (cloneResult.Status != SandboxStatus.Success)
             throw new WorkspaceException($"git clone failed (exit {cloneResult.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(cloneResult.Stderr), clone.Token)}");
 
-        // Model-authored setup/acceptance commands run INSIDE this clone next — strip the tokened origin via the
-        // SAME shared helper LocalGitWorkspaceProvider's own branch-grading path uses (LocalGitWorkspaceProvider.
-        // StripTokenFromRemoteAsync — one implementation, not a second copy that could drift), so no credential
-        // persists in .git/config for those commands to read. FAIL-CLOSED: if the strip cannot be completed the
-        // helper throws a WorkspaceException, which this method's callers already catch into a typed grade failure
-        // and whose finally deletes the clone — the model-authored commands below are exactly the readers this
-        // credential must be kept from, so a grade is the cheaper thing to lose. Guarded on a present token,
+        // Model-authored setup/acceptance commands run INSIDE this clone next. The clone named the remote without its
+        // credential, so origin holds none; the strip stays as a belt, via the SAME shared helper LocalGitWorkspaceProvider's
+        // own branch-grading path uses (LocalGitWorkspaceProvider.StripTokenFromRemoteAsync — one implementation, not a
+        // second copy that could drift), so no credential persists in .git/config for those commands to read. FAIL-CLOSED:
+        // if the strip cannot be completed the helper throws a WorkspaceException, which this method's callers already catch
+        // into a typed grade failure and whose finally deletes the clone — the model-authored commands below are exactly the
+        // readers this credential must be kept from, so a grade is the cheaper thing to lose. Guarded on a tokened remote,
         // mirroring MaterializeAsync's own call site exactly — a public repo with no credential has nothing to strip.
-        if (!string.IsNullOrEmpty(clone.Token))
-            await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(_runners.Resolve(GradingRunnerKind), CloneTimeoutSeconds, _logger, clone.RepositoryUrl, directory, cancellationToken).ConfigureAwait(false);
+        if (remote.IsTokened)
+            await LocalGitWorkspaceProvider.StripTokenFromRemoteAsync(_runners.Resolve(GradingRunnerKind), CloneTimeoutSeconds, _logger, remote.Url, directory, cancellationToken).ConfigureAwait(false);
 
         var checkoutResult = await _runners.Resolve(GradingRunnerKind).RunAsync(
-            new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "checkout", "--detach", baseSha }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
+            TokenedGitCommand.Spec(remote, new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "checkout", "--detach", baseSha }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }), cancellationToken).ConfigureAwait(false);
 
         if (checkoutResult.Status != SandboxStatus.Success)
             throw new WorkspaceException($"base revision {baseSha} not found in the repository: {LocalGitWorkspaceProvider.Redact(Summarize(checkoutResult.Stderr), clone.Token)}");
     }
 
-    /// <summary>Apply <paramref name="patch"/> onto the already-checked-out <paramref name="directory"/> — NO stage, NO commit, NO push (this grade is read-only by construction; the clone is discarded after grading either way). Mirrors <c>LocalGitBranchIntegrator</c>'s own apply step (<c>git apply --3way</c>) minus <c>--index</c>, since nothing here is ever committed. Returns null on success, else <c>git</c>'s stderr.</summary>
-    private async Task<string?> ApplyPatchAsync(string directory, string patch, CancellationToken cancellationToken)
+    /// <summary>
+    /// Apply <paramref name="patch"/> onto the already-checked-out <paramref name="directory"/> — NO stage, NO commit, NO push
+    /// (this grade is read-only by construction; the clone is discarded after grading either way). Mirrors
+    /// <c>LocalGitBranchIntegrator</c>'s own apply step (<c>git apply --3way</c>) minus <c>--index</c>, since nothing here is
+    /// ever committed. A <see cref="TokenedGitCommand"/> for <paramref name="clone"/>'s remote: git-lfs downloads the LFS
+    /// objects the patch points at from origin. Returns null on success, else <c>git</c>'s stderr.
+    /// </summary>
+    private async Task<string?> ApplyPatchAsync(string directory, string patch, WorkspaceRequest clone, CancellationToken cancellationToken)
     {
         var patchFile = Path.Combine(directory, $".codespace-acceptance-{Guid.NewGuid():N}.patch");
         await File.WriteAllTextAsync(patchFile, patch, cancellationToken).ConfigureAwait(false);
@@ -372,7 +383,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
         try
         {
             var result = await _runners.Resolve(GradingRunnerKind).RunAsync(
-                new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "apply", "--3way", patchFile }, WorkingDirectory = directory, TimeoutSeconds = 60, AllowNetwork = true }, cancellationToken).ConfigureAwait(false);
+                TokenedGitCommand.Spec(RemoteFor(clone), new SandboxSpec { Command = "git", Args = new[] { "-C", directory, "apply", "--3way", patchFile }, WorkingDirectory = directory, TimeoutSeconds = 60, AllowNetwork = true }), cancellationToken).ConfigureAwait(false);
 
             return result.Status == SandboxStatus.Success ? null : result.Stderr;
         }
@@ -381,6 +392,9 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             try { File.Delete(patchFile); } catch { /* best-effort — the whole clone is discarded regardless */ }
         }
     }
+
+    /// <summary>The remote the grading clone reaches, named without its credential, which the commands that reach it carry.</summary>
+    private static TokenedGitCommand.Remote RemoteFor(WorkspaceRequest clone) => TokenedGitCommand.RemoteFor(clone.RepositoryUrl, clone.TokenUsername, clone.Token);
 
     /// <summary>
     /// P3a-3 (B+V0+): the ORACLE's bytes are not the candidate's to edit. When the base sha is known and the

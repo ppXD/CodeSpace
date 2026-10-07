@@ -9,52 +9,27 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Workflows;
 
 /// <summary>
-/// <see cref="LocalGitWorkspaceProvider"/> — the pure auth-URL builder (no git), plus the real clone
+/// <see cref="LocalGitWorkspaceProvider"/> — the pure redaction (no git), plus the real clone
 /// mechanics against a REAL local git repo (mirrors <see cref="LocalProcessRunnerTests"/> driving a real
 /// process). The clone tests skip where git isn't installed, so cross-host <c>dotnet test</c> stays clean.
 /// </summary>
 [Trait("Category", "Unit")]
 public sealed class LocalGitWorkspaceProviderTests
 {
-    // ─── Pure auth-URL builder ───────────────────────────────────────────────
-
-    [Fact]
-    public void No_token_leaves_the_url_unchanged() =>
-        LocalGitWorkspaceProvider.BuildAuthenticatedUrl("https://github.com/org/repo.git", null, null)
-            .ShouldBe("https://github.com/org/repo.git");
-
-    [Fact]
-    public void Token_with_no_username_defaults_to_x_access_token() =>
-        LocalGitWorkspaceProvider.BuildAuthenticatedUrl("https://github.com/org/repo.git", null, "ghp_abc")
-            .ShouldBe("https://x-access-token:ghp_abc@github.com/org/repo.git");
-
-    [Fact]
-    public void Token_uses_the_provider_specific_username() =>
-        LocalGitWorkspaceProvider.BuildAuthenticatedUrl("https://gitlab.com/org/repo.git", "oauth2", "glpat_xyz")
-            .ShouldBe("https://oauth2:glpat_xyz@gitlab.com/org/repo.git");
-
-    [Fact]
-    public void Special_characters_in_the_token_are_escaped() =>
-        LocalGitWorkspaceProvider.BuildAuthenticatedUrl("https://example.com/r.git", "u", "p@ss/word")
-            .ShouldBe("https://u:p%40ss%2Fword@example.com/r.git");
-
-    [Fact]
-    public void Authenticated_url_preserves_a_non_default_port() =>
-        LocalGitWorkspaceProvider.BuildAuthenticatedUrl("https://git.local:8443/org/repo.git", "oauth2", "t")
-            .ShouldBe("https://oauth2:t@git.local:8443/org/repo.git");
+    // ─── Pure redaction ──────────────────────────────────────────────────────
 
     [Fact]
     public void Redact_scrubs_both_the_raw_token_and_its_url_encoded_form()
     {
-        // The push argv embeds Uri.EscapeDataString(token); a token with URL-special chars appears ENCODED in a
-        // failing push command, so redacting only the raw literal would leak the reversible encoded form.
+        // No argv carries the token, but a remote or a tool can still echo it, and a token with URL-special chars may come
+        // back ENCODED — redacting only the raw literal would leak the reversible encoded form.
         const string token = "p@ss/w+rd=secret";
         var leak = $"git push https://x-access-token:{Uri.EscapeDataString(token)}@host/r.git refused; raw {token} too";
 
         var redacted = LocalGitWorkspaceProvider.Redact(leak, token);
 
         redacted.ShouldNotContain(token, Case.Insensitive, "the raw token literal must be scrubbed");
-        redacted.ShouldNotContain(Uri.EscapeDataString(token), Case.Insensitive, "the percent-encoded token (as it appears in the push argv) must ALSO be scrubbed");
+        redacted.ShouldNotContain(Uri.EscapeDataString(token), Case.Insensitive, "the percent-encoded token (as an echo may carry it) must ALSO be scrubbed");
         redacted.ShouldContain("***");
     }
 
@@ -525,12 +500,12 @@ public sealed class LocalGitWorkspaceProviderTests
         }
         : WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = "https://example.test/repo.git", Token = token });
 
-    /// <summary>The credential (in the authed URL) and the network appear ONLY in the publish repo: never with the agent clone as the working directory, never pointed at it with an argument (<c>-C</c>, <c>--git-dir</c>, <c>--work-tree</c>), never with it bound in.</summary>
+    /// <summary>The credential (in the environment) and the network appear ONLY in the publish repo: never with the agent clone as the working directory, never pointed at it with an argument (<c>-C</c>, <c>--git-dir</c>, <c>--work-tree</c>), never with it bound in.</summary>
     private static void ShouldNeverMeetTheAgentClone(IReadOnlyList<SandboxSpec> postTurn, string token, string cloneDir, string workspaceRoot)
     {
-        var reachesOut = postTurn.Where(s => s.AllowNetwork || s.Args.Any(a => a.Contains(token))).ToList();
+        var reachesOut = postTurn.Where(s => s.AllowNetwork || CarriesTheToken(s, token)).ToList();
 
-        reachesOut.Count(s => s.Args.Any(a => a.Contains(token))).ShouldBe(2, "exactly the authenticated push and its ls-remote readback carry the credential");
+        reachesOut.Count(s => CarriesTheToken(s, token)).ShouldBe(2, "exactly the authenticated push and its ls-remote readback carry the credential");
         reachesOut.Count(s => s.Args.Contains("push") || s.Args.Contains("ls-remote")).ShouldBe(2, "exactly the authenticated push and its ls-remote readback reach the remote");
 
         foreach (var spec in reachesOut)
@@ -578,7 +553,7 @@ public sealed class LocalGitWorkspaceProviderTests
         {
             bundle.ReadOnlyPaths.ShouldBe(new[] { cloneDir }, "the agent clone is bound read-only while its objects are bundled");
             bundle.AllowNetwork.ShouldBeFalse();
-            bundle.Args.ShouldNotContain(a => a.Contains(token));
+            CarriesTheToken(bundle, token).ShouldBeFalse();
             bundle.Args.Take(AgentCloneGitCommand.HardeningConfig.Count).ShouldBe(AgentCloneGitCommand.HardeningConfig);
             IsOutside(workspaceRoot, bundle.Args[bundle.Args.ToList().IndexOf("create") + 1]).ShouldBeTrue("the bundle file is written outside the workspace");
         }
@@ -596,6 +571,9 @@ public sealed class LocalGitWorkspaceProviderTests
         baseFetch.Args.ShouldNotContain(a => a.StartsWith("codespace/run", StringComparison.Ordinal), "the branch never arrives unchecked when it adds objects");
         fetches.ShouldAllBe(f => !f.AllowNetwork && f.TimeoutSeconds == 300, "a bundle import is local, and as heavy as the push, so it gets the push's budget");
     }
+
+    /// <summary>True when the token rides anywhere in <paramref name="spec"/> — its argv or its environment.</summary>
+    private static bool CarriesTheToken(SandboxSpec spec, string token) => spec.Args.Any(a => a.Contains(token)) || spec.Environment.Values.Any(v => v.Contains(token));
 
     /// <summary>True when <paramref name="path"/> is neither <paramref name="root"/> nor anything below it.</summary>
     private static bool IsOutside(string root, string path)
@@ -635,11 +613,11 @@ public sealed class LocalGitWorkspaceProviderTests
     [InlineData(false)]
     public async Task Every_command_before_the_token_strip_runs_as_a_tokened_command_when_the_clone_is_tokened(bool tokened)
     {
-        // Until the strip, the token is in reach: the probe and the clone name the authed URL, and the pin's fetch rungs go
-        // through the still-tokened origin. Every command before the strip shares one runner path, so each runs as a
-        // tokened command — the local ones (the ancestry checks, the pin's checkout) at no cost. The strip and the base
-        // read after it reach no tokened remote, and an untokened clone keeps the operator's helpers and trace2 on every
-        // command — they may be how it authenticates.
+        // Until the strip, the commands can reach the remote: the probe and the clone name it, and the pin's fetch rungs and
+        // checkout reach it through origin, git-lfs's downloads included. Every command before the strip shares one runner
+        // path, so each runs as a tokened command, carrying the token in its environment — the local ones (the ancestry
+        // checks) at no cost. The strip and the base read after it reach no remote, and an untokened clone keeps the
+        // operator's helpers and trace2 on every command — they may be how it authenticates.
         var runner = new PinFetchRunner();
         var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
 
@@ -655,16 +633,21 @@ public sealed class LocalGitWorkspaceProviderTests
 
         var strip = runner.Specs.FindIndex(s => s.Args.Contains("set-url"));
         (strip > 0).ShouldBe(tokened, "fixture check: only a tokened clone strips its origin");
+        if (tokened) runner.Specs[strip].Args[^1].ShouldBe("https://example.test/repo.git", "the strip stays as a belt: it sets origin to the URL the clone already named, a no-op");
 
         for (var i = 0; i < runner.Specs.Count; i++)
-            TokenedGitSpecs.RunsTokened(runner.Specs[i], "https://example.test").ShouldBe(tokened && i < strip, string.Join(' ', runner.Specs[i].Args));
+            TokenedGitSpecs.RunsTokened(runner.Specs[i], "https://example.test/repo.git").ShouldBe(tokened && i < strip, string.Join(' ', runner.Specs[i].Args));
+
+        runner.Specs.Where(s => TokenedGitSpecs.ArgvCarriesACredential(s, "test-token")).Select(s => string.Join(' ', s.Args)).ShouldBeEmpty("the probe and the clone name the remote without its credential");
+        runner.Specs.Where(s => TokenedGitSpecs.RunsTokened(s, "https://example.test/repo.git")).ShouldAllBe(s => TokenedGitSpecs.CarriesTheCredential(s, "x-access-token", "test-token"));
     }
 
     [Fact]
-    public async Task Only_the_publish_commands_that_name_the_authed_url_run_as_tokened_commands()
+    public async Task Only_the_publish_commands_that_reach_the_remote_run_as_tokened_commands()
     {
-        // The LFS upload, the push and its readback carry the token in their argv. Every other post-turn command — over the
-        // agent clone or in the publish repo — reaches no tokened remote and is left as written.
+        // The LFS upload, the push and its readback reach the remote, so they carry the token — in their environment, never
+        // their argv. Every other post-turn command — over the agent clone or in the publish repo — reaches no remote and is
+        // left as written.
         var runner = new PostTurnRunner(agentCommittedItself: false);
         var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
         const string token = "fixture-token";
@@ -679,11 +662,11 @@ public sealed class LocalGitWorkspaceProviderTests
         (await ((IWorkspacePushHandle)handle).PushChangesAsync("codespace/run", CancellationToken.None)).ShouldBe("codespace/run");
 
         var postTurn = runner.Specs.Skip(prepared).ToList();
-        var tokened = postTurn.Where(s => s.Args.Any(a => a.Contains(token))).ToList();
+        var tokened = postTurn.Where(s => TokenedGitSpecs.RunsTokened(s, "https://example.test/repo.git")).ToList();
 
-        tokened.Select(Subcommand).ShouldBe(new[] { "lfs", "push", "ls-remote" }, "fixture check: the LFS upload, the push and the readback all ran");
-        tokened.ShouldAllBe(s => TokenedGitSpecs.RunsTokened(s, "https://example.test"));
-        postTurn.Where(s => !tokened.Contains(s)).ShouldAllBe(s => !TokenedGitSpecs.RunsTokened(s, "https://example.test"));
+        tokened.Select(Subcommand).ShouldBe(new[] { "lfs", "push", "ls-remote" }, "the LFS upload, the push and the readback, and nothing else");
+        tokened.ShouldAllBe(s => TokenedGitSpecs.CarriesTheCredential(s, "x-access-token", token) && s.Args.Contains("https://example.test/repo.git"));
+        postTurn.Where(s => TokenedGitSpecs.ArgvCarriesACredential(s, token)).Select(s => string.Join(' ', s.Args)).ShouldBeEmpty();
     }
 
     /// <summary>The git subcommand, past any leading <c>-c key=value</c> and <c>-C dir</c>.</summary>

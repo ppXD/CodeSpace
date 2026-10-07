@@ -54,9 +54,8 @@ public class LocalGitBranchIntegratorTests
     [Fact]
     public void Both_the_raw_token_and_its_url_escaped_form_are_redacted()
     {
-        // BuildAuthenticatedUrl embeds Uri.EscapeDataString(token) in the clone/push argv, so a token with
-        // URL-special characters appears ENCODED in a failing git command — redacting only the raw literal would
-        // leak the reversible encoded form.
+        // No argv carries the token, but git or a remote can still echo it, and a token with URL-special characters
+        // may come back ENCODED — redacting only the raw literal would leak the reversible encoded form.
         const string token = "tok@en/special+chars";
         var escaped = Uri.EscapeDataString(token);
 
@@ -98,20 +97,20 @@ public class LocalGitBranchIntegratorTests
         detail.ShouldBe(filler + "…", "the cap drops the WHOLE surrogate pair rather than emit its unpaired high half");
     }
 
-    // ── Tokened commands: the ones whose git transport reaches the tokened origin ──────────
+    // ── Tokened commands: the ones whose git or git-lfs transport reaches origin ──────────
 
     [Theory]
-    [InlineData(true, false)]    // clean: the clone and the push
-    [InlineData(true, true)]     // conflicted: the clone only — nothing is pushed
+    [InlineData(true, false)]    // clean: the clone, the base checkout, the apply and the push
+    [InlineData(true, true)]     // conflicted: the clone, the checkout, the apply and the reset — nothing is pushed
     [InlineData(false, false)]   // untokened: an anonymous clone keeps the operator's helpers and trace2
     [InlineData(false, true)]
-    public async Task Only_the_clone_and_the_push_run_as_tokened_commands(bool tokened, bool conflicted)
+    public async Task Only_the_commands_that_reach_origin_run_as_tokened_commands(bool tokened, bool conflicted)
     {
-        // The integration clone keeps its tokened origin to the end, but only the commands whose git transport talks to it
-        // hand the URL's password to credential helpers or write the URL to trace2: the clone names the authed URL, and the
-        // push goes through origin. The base checkout, the apply and the reset back to base download LFS objects through origin too, but
-        // git-lfs authenticates those from the URL and neither asks nor tells a helper (TokenedGitCredentialHelperFlowTests
-        // proves it), so they run as written, like the commit, the diffs and the rev-parses.
+        // The integration clone names the remote without its credential, so origin carries none: every command that reaches
+        // it carries the token in its environment instead. The clone and the push reach it through git's transport; the base
+        // checkout, the apply and the reset back to base download LFS objects through it, and git-lfs asks the credential
+        // helpers for those (TokenedGitCredentialHelperFlowTests proves it). The commit, the diffs and the rev-parses reach
+        // nothing and run as written.
         var runner = new IntegrationRunner(conflicted);
         var integrator = new LocalGitBranchIntegrator(new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), new InlineOffloader(), NullLogger<LocalGitBranchIntegrator>.Instance);
 
@@ -121,7 +120,7 @@ public class LocalGitBranchIntegratorTests
             Contributions = new[] { new BranchContribution { Label = "agent", BaseSha = "base", Patch = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n" } },
         }, CancellationToken.None);
 
-        var transport = new[] { "clone", "push" };
+        var transport = new[] { "clone", "checkout", "apply", "reset", "push" };
         var subcommands = runner.Specs.Select(Subcommand).ToList();
         subcommands.ShouldContain(conflicted ? "reset" : "commit", "fixture check: the run took the intended path");
         subcommands.ShouldContain("checkout", "fixture check: the base was checked out");
@@ -129,7 +128,10 @@ public class LocalGitBranchIntegratorTests
         if (tokened && !conflicted) subcommands.ShouldContain("push", "fixture check: a clean tokened integration pushes");
 
         foreach (var spec in runner.Specs)
-            TokenedGitSpecs.RunsTokened(spec, "https://example.test").ShouldBe(tokened && transport.Contains(Subcommand(spec)), string.Join(' ', spec.Args));
+            TokenedGitSpecs.RunsTokened(spec, "https://example.test/repo.git").ShouldBe(tokened && transport.Contains(Subcommand(spec)), string.Join(' ', spec.Args));
+
+        runner.Specs.Single(s => Subcommand(s) == "clone").Args.ShouldContain("https://example.test/repo.git", "the remote is named without its credential");
+        runner.Specs.Where(s => TokenedGitSpecs.ArgvCarriesACredential(s, "test-token")).Select(s => string.Join(' ', s.Args)).ShouldBeEmpty();
     }
 
     /// <summary>The git subcommand, past any leading <c>-c key=value</c> and <c>-C dir</c>.</summary>

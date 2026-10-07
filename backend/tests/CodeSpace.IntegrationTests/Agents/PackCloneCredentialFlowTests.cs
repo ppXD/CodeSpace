@@ -21,17 +21,17 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// HIGH fidelity: the REAL <see cref="PackCloneFetcher"/> on the real <see cref="LocalProcessRunner"/> and real <c>git</c>,
 /// against a loopback smart-HTTP remote (<see cref="GitPublishRemoteFixture"/>) that demands a FAKE token for every read, so a
 /// clone that succeeds proves the pasted token authenticated it. An operator who pastes a URL carrying a token into the pack
-/// import must get a checkout that holds no token once cloned, in a directory no other uid can read; a failed import must name
-/// no token in its message — the text that reaches the API error body, the UI and the mediator's error log — even where git
-/// itself echoes it (a token pasted as the user alone, in any spelling); and that user-alone token must reach neither the
-/// operator's credential helpers nor their trace2 targets.
+/// import must get a checkout that never holds the token — the clone names the remote without it, so git writes none even
+/// before origin is rewritten — in a directory no other uid can read, with no argv carrying it; a failed import must name no
+/// token in its message — the text that reaches the API error body, the UI and the mediator's error log — in any spelling;
+/// and a token pasted as the user alone must reach neither the operator's credential helpers nor their trace2 targets.
 ///
-/// <para>Positive controls: the remote refuses a clone without the token; the same production clone with origin left as git
-/// wrote it holds the token, so the scan that finds none can see one; git's raw stderr carried the token wherever the message
-/// is clean of an echo, so the clean message is the redaction's doing; and the clone run without the helper reset and with
-/// trace2 on hands the token to the operator's helper and trace2 targets, so their silence is the tokened clone's doing. Each
-/// test owns its remote and a scratch HOME (a global config of its own, system config off), and removes both on every path;
-/// nothing reads or writes the real global config or keychain.</para>
+/// <para>Positive controls: the remote refuses a clone without the token; a raw clone of the pasted URL leaves the token in
+/// .git/config, so the scan that finds none can see one; and the clone run without the helper reset and with trace2 on hands
+/// the token to the operator's helper (told to erase it once refused) and trace2 targets (recording the credential
+/// variables), so their silence is the tokened clone's doing. Each test owns its remote and a scratch HOME (a global config
+/// of its own, system config off), and removes both on every path; nothing reads or writes the real global config or
+/// keychain.</para>
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -46,8 +46,8 @@ public sealed class PackCloneCredentialFlowTests
 
     [Theory]
     [InlineData(false)]
-    [InlineData(true)]   // positive control: origin left as git wrote it
-    public async Task A_pasted_token_clones_and_the_checkout_holds_no_token(bool originAsCloned)
+    [InlineData(true)]   // origin left as git wrote it: the strip is a belt, the clone never wrote the token
+    public async Task A_pasted_token_clones_and_the_checkout_never_holds_it(bool originAsCloned)
     {
         if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
 
@@ -60,11 +60,14 @@ public sealed class PackCloneCredentialFlowTests
 
         File.ReadAllText(Path.Combine(checkout.Directory, "README.md")).ShouldBe("base, revised\n", "the clone authenticated with the pasted token");
         ctx.Runner.Ran("remote").ShouldBeTrue("fixture check: the fetcher asked for origin to be rewritten");
-        FilesHolding(checkout.Directory, GitPublishRemoteFixture.FakeToken).ShouldBe(originAsCloned ? new[] { ".git/config" } : Array.Empty<string>(), originAsCloned ? "positive control: git writes the pasted URL into origin" : "the checkout the import walks holds the pasted token");
+        FilesHolding(checkout.Directory, GitPublishRemoteFixture.FakeToken).ShouldBeEmpty("the checkout the import walks holds the pasted token");
+        (await ctx.OriginUrlAsync(checkout.Directory)).ShouldBe(ctx.Remote.Url, "origin names the remote without its token, whether or not the strip ran");
+        ctx.Runner.Argvs.Where(a => a.Contains(Marker, StringComparison.Ordinal) || a.Contains("@127.0.0.1", StringComparison.Ordinal)).ShouldBeEmpty("no argv carries the pasted credential");
 
-        if (!originAsCloned) (await ctx.OriginUrlAsync(checkout.Directory)).ShouldBe(ctx.Remote.Url, "origin was rewritten to the remote without its token, not removed");
+        File.GetUnixFileMode(checkout.Directory).ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, "git cloned into the owner-only directory without widening it");
 
-        File.GetUnixFileMode(checkout.Directory).ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, "git cloned into the owner-only directory without widening it, so no other uid read .git/config while it held the token");
+        var raw = await ctx.RawCloneAsync(ctx.UrlWith($"x-access-token:{GitPublishRemoteFixture.FakeToken}"));
+        FilesHolding(raw, GitPublishRemoteFixture.FakeToken).ShouldBe(new[] { ".git/config" }, "positive control: git writes a URL it clones, credential and all, into origin");
     }
 
     [Theory]
@@ -72,8 +75,8 @@ public sealed class PackCloneCredentialFlowTests
     [InlineData(true)]   // positive control: the clone run without the helper reset and with trace2 on
     public async Task A_token_pasted_as_the_user_alone_reaches_no_credential_helper_or_trace2_target(bool unreset)
     {
-        // git asks the credential helpers for the password the URL lacks, naming the user, and writes the clone's argv and
-        // its remote-http child's to the trace2 targets — both from the operator's global config.
+        // git tells the credential helpers to erase a credential the remote refused, naming its user, and writes the values of
+        // the variables trace2.envVars names to the trace2 targets — both from the operator's global config.
         if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
 
         await using var ctx = await ScratchHostContext.StartAsync();
@@ -84,25 +87,28 @@ public sealed class PackCloneCredentialFlowTests
         ctx.OperatorTrace().ShouldContain(ctx.Remote.Url, Case.Sensitive, "fixture check: the operator's trace2 targets record an untokened clone");
 
         ctx.Runner.Unreset = unreset;
-        await Should.ThrowAsync<PackImportException>(() => ctx.Fetcher.FetchAsync(ctx.UrlWith("fake-pasted-token-0123456789"), null, CancellationToken.None), "git asks for a password the pasted URL does not carry");
+        await Should.ThrowAsync<PackImportException>(() => ctx.Fetcher.FetchAsync(ctx.UrlWith("fake-pasted-token-0123456789"), null, CancellationToken.None), "the remote refuses the pasted user with an empty password");
 
-        ctx.HelperLog().Contains(Marker, StringComparison.Ordinal).ShouldBe(unreset, unreset ? "positive control: without the reset git hands the pasted user to the operator's helper" : "the pasted token reached the operator's credential helper");
-        ctx.OperatorTrace().Contains(Marker, StringComparison.Ordinal).ShouldBe(unreset, unreset ? "positive control: with trace2 on git records the pasted URL" : "the pasted token reached the operator's trace2 targets");
+        ctx.HelperLog().Contains(Marker, StringComparison.Ordinal).ShouldBe(unreset, unreset ? "positive control: without the reset git tells the operator's helper to erase the refused pasted user" : "the pasted token reached the operator's credential helper");
+        ctx.OperatorTrace().Contains(Marker, StringComparison.Ordinal).ShouldBe(unreset, unreset ? "positive control: with trace2 on git records the credential variables" : "the pasted token reached the operator's trace2 targets");
     }
 
     [Theory]
-    [InlineData("x-access-token:fake-wrong-token-0123456789", false)]   // a wrong or revoked token: git hides the password, the message used to name it in the URL
-    [InlineData("fake-pasted-token-0123456789", true)]                  // a token pasted as the user: git asks for a password and names the user
-    [InlineData("fake%2fpasted%40token-0123456789", true)]              // the same, percent-encoded: git echoes it decoded or re-encoded
-    public async Task A_failed_clone_names_no_pasted_token(string userInfo, bool gitEchoesIt)
+    [InlineData("x-access-token:fake-wrong-token-0123456789")]   // a wrong or revoked token
+    [InlineData("fake-pasted-token-0123456789")]                  // a token pasted as the user
+    [InlineData("fake%2fpasted%40token-0123456789")]              // the same, percent-encoded
+    public async Task A_failed_clone_names_no_pasted_token(string userInfo)
     {
+        // git names the remote only by the URL it was handed, which carries no userinfo, so it echoes the token nowhere; the
+        // message's own redaction stays as a belt for a remote that echoes it.
         if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
 
         await using var ctx = await ScratchHostContext.StartAsync();
 
         var failure = await Should.ThrowAsync<PackImportException>(() => ctx.Fetcher.FetchAsync(ctx.UrlWith(userInfo), null, CancellationToken.None));
 
-        ctx.Runner.Stderr.Contains(Marker, StringComparison.Ordinal).ShouldBe(gitEchoesIt, "fixture check: where git echoed the pasted token");
+        ctx.Runner.Stderr.ShouldContain("Authentication failed", Case.Sensitive, "fixture check: the remote refused the pasted credential");
+        ctx.Runner.Stderr.ShouldNotContain(Marker, Case.Sensitive, "git echoed the pasted token");
         failure.Message.ShouldNotContain(Marker, Case.Sensitive, "the message reaches the API error body, the UI and the mediator's error log");
         failure.Message.ShouldContain($"'{ctx.Remote.Url}'", Case.Sensitive, "the message still names the remote, without its userinfo");
         failure.Message.ShouldContain("exit 128");
@@ -127,7 +133,7 @@ public sealed class PackCloneCredentialFlowTests
 
         var failure = await Should.ThrowAsync<PackImportException>(() => scope.Resolve<IMediator>().Send(import));
 
-        ctx.Runner.Stderr.ShouldContain("fake-pasted-token-0123456789", Case.Sensitive, "fixture check: git echoed the pasted token");
+        ctx.Runner.Stderr.ShouldContain("Authentication failed", Case.Sensitive, "fixture check: the clone presented the pasted credential and the remote refused it");
         failure.Message.ShouldNotContain(Marker, Case.Sensitive, "what the import surfaces to the API error body and the mediator's error log");
     }
 
@@ -198,7 +204,8 @@ public sealed class PackCloneCredentialFlowTests
 
         /// <summary>
         /// The operator's global config: a credential helper that logs every request git makes of it (the operation, then
-        /// what git sends: protocol, host, username) and answers none, and all three trace2 targets pointed at scratch files.
+        /// what git sends: protocol, host, username) and answers none, and all three trace2 targets pointed at scratch files,
+        /// recording the credential variables too.
         /// </summary>
         public void ConfigureLoggingHelperAndTrace2()
         {
@@ -206,7 +213,7 @@ public sealed class PackCloneCredentialFlowTests
             File.WriteAllText(helper, $"#!/bin/sh\necho \"op=$1\" >> '{HelperLogFile}'\ncat >> '{HelperLogFile}'\n");
             if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(helper, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
 
-            File.WriteAllText(GlobalConfig, $"[credential]\n\thelper = {helper}\n[trace2]\n\tnormalTarget = {TraceFile("normal")}\n\teventTarget = {TraceFile("event")}\n\tperfTarget = {TraceFile("perf")}\n");
+            File.WriteAllText(GlobalConfig, $"[credential]\n\thelper = {helper}\n[trace2]\n\tnormalTarget = {TraceFile("normal")}\n\teventTarget = {TraceFile("event")}\n\tperfTarget = {TraceFile("perf")}\n\tenvVars = CODESPACE_GIT_USERNAME,CODESPACE_GIT_PASSWORD\n");
         }
 
         /// <summary>Every request git made of the operator's helper.</summary>
@@ -217,6 +224,16 @@ public sealed class PackCloneCredentialFlowTests
 
         /// <summary>The remote's URL as an operator would paste it with <paramref name="userInfo"/> in it.</summary>
         public string UrlWith(string userInfo) => Remote.Url.Replace("http://", $"http://{userInfo}@", StringComparison.Ordinal);
+
+        /// <summary>A raw clone of <paramref name="url"/> on the scratch host, as git is handed it, into a directory of its own; never recorded by the runner, never production code.</summary>
+        public async Task<string> RawCloneAsync(string url)
+        {
+            var directory = Path.Combine(_home, "raw-clone");
+            var result = await new LocalProcessRunner().RunAsync(new SandboxSpec { Command = "git", Args = new[] { "-c", "core.hooksPath=/dev/null", "clone", url, directory }, Environment = Runner.Environment, TimeoutSeconds = 60, AllowNetwork = true }, CancellationToken.None);
+
+            result.Status.ShouldBe(SandboxStatus.Success, $"fixture check: the raw clone failed: {result.Stderr}");
+            return directory;
+        }
 
         /// <summary>The clone's origin URL as git reads it, on the scratch host; never recorded by the runner.</summary>
         public async Task<string> OriginUrlAsync(string cloneDir)
@@ -235,15 +252,13 @@ public sealed class PackCloneCredentialFlowTests
     }
 
     /// <summary>
-    /// The real local runner on the scratch host, recording each subcommand and git's raw stderr. With
+    /// The real local runner on the scratch host, recording each argv and git's raw stderr. With
     /// <see cref="KeepOriginAsCloned"/> set, the <c>git remote</c> edits that strip a pasted credential report success without
     /// running, so origin stays as git wrote it; with <see cref="Unreset"/> set, the clone runs without the credential-helper
-    /// reset and with trace2 on — the positive controls.
+    /// reset and with trace2 on — the positive control.
     /// </summary>
     private sealed class ScratchHostRunner(IReadOnlyDictionary<string, string> environment) : ISandboxRunner
     {
-        private static readonly string[] TraceOff = { "GIT_TRACE2", "GIT_TRACE2_EVENT", "GIT_TRACE2_PERF" };
-
         private readonly LocalProcessRunner _inner = new();
         private readonly List<SandboxSpec> _specs = new();
 
@@ -253,6 +268,9 @@ public sealed class PackCloneCredentialFlowTests
         public bool Unreset { get; set; }
         public string Stderr { get; private set; } = "";
 
+        /// <summary>Every argv the fetcher handed the runner, joined.</summary>
+        public IEnumerable<string> Argvs => _specs.Select(s => string.Join(' ', s.Args));
+
         public bool Ran(string subcommand) => _specs.Any(s => s.Args.Contains(subcommand));
 
         public async Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
@@ -261,21 +279,12 @@ public sealed class PackCloneCredentialFlowTests
 
             if (KeepOriginAsCloned && spec.Args.Contains("remote")) return new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" };
 
-            var unreset = Unreset && spec.Args.Contains("clone");
-            var env = new Dictionary<string, string>(spec.Environment);
+            var env = Unreset && spec.Args.Contains("clone") ? TokenedGitControls.WithoutTheReset(spec.Environment) : new Dictionary<string, string>(spec.Environment);
             foreach (var (key, value) in environment) env[key] = value;
-            if (unreset) foreach (var key in TraceOff) env.Remove(key);
 
-            var result = await _inner.RunAsync(spec with { Args = unreset ? WithoutTheReset(spec.Args) : spec.Args, Environment = env }, cancellationToken);
+            var result = await _inner.RunAsync(spec with { Environment = env }, cancellationToken);
             Stderr += result.Stderr;
             return result;
-        }
-
-        private static IReadOnlyList<string> WithoutTheReset(IReadOnlyList<string> args)
-        {
-            var at = Enumerable.Range(0, Math.Max(0, args.Count - 1)).FirstOrDefault(i => args[i] == "-c" && args[i + 1].StartsWith("credential.", StringComparison.Ordinal) && args[i + 1].EndsWith(".helper=", StringComparison.Ordinal), -1);
-
-            return at < 0 ? args : args.Take(at).Concat(args.Skip(at + 2)).ToList();
         }
     }
 

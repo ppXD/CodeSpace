@@ -130,7 +130,8 @@ public sealed class AgentWorkspacePushFlowTests
     public async Task Auth_failure_surfaces_a_redacted_workspace_exception()
     {
         // MANDATORY token-leak guard: a push at an unreachable/garbage remote must throw a WorkspaceException
-        // whose message has the token literal ABSENT and "***" present.
+        // whose message has the token literal ABSENT. The push names the remote without its credential, so the argv
+        // the message echoes has no token to redact.
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
 
@@ -138,8 +139,8 @@ public sealed class AgentWorkspacePushFlowTests
         await ctx.SeedBareRemoteWithOneCommitAsync();
 
         // Clone the real remote with a token (so the local commit succeeds), THEN destroy the bare remote so
-        // the push fails ("does not appear to be a git repository") — the handle re-injects the token into the
-        // failing push URL, so the surfaced WorkspaceException must redact it.
+        // the push fails ("does not appear to be a git repository") — the handle carries the token into the
+        // failing push, in its environment, so the surfaced WorkspaceException must not name it.
         await using var handle = await ctx.CloneWithTokenAsync();
         await File.WriteAllTextAsync(Path.Combine(handle.Directory, "agent-change.txt"), "x");
         ctx.DestroyBareRemote();
@@ -148,7 +149,7 @@ public sealed class AgentWorkspacePushFlowTests
             await Push(handle).PushChangesAsync(ctx.BranchName, CancellationToken.None));
 
         ex.Message.ShouldNotContain(PushTestContext.Token, Case.Insensitive, "the token literal must never leak into the surfaced error");
-        ex.Message.ShouldContain("***", customMessage: "the token is replaced with the redaction marker");
+        ex.Message.ShouldContain($"git push --force {ctx.RemoteUrl} ", Case.Sensitive, "the failing push names the remote by its URL alone");
     }
 
     [Fact]
@@ -229,7 +230,7 @@ public sealed class AgentWorkspacePushFlowTests
             _bareRemote = Path.Combine(_root, "remote.git");
         }
 
-        private string RemoteUrl => new Uri(_bareRemote).AbsoluteUri;
+        public string RemoteUrl => new Uri(_bareRemote).AbsoluteUri;
 
         /// <summary>A bare repo is the "remote"; seed it via a throwaway working clone so it has a default branch + one commit.</summary>
         public async Task SeedBareRemoteWithOneCommitAsync()
@@ -250,13 +251,13 @@ public sealed class AgentWorkspacePushFlowTests
 
         public Task<IWorkspaceHandle> CloneWithTokenAsync() =>
             // A file:// remote ignores the token; the point is that the handle CARRIES a token, so PushChangesAsync
-            // takes the authenticated path (re-injecting it into the push argv) rather than short-circuiting.
+            // takes the authenticated path (carrying it in the push's environment) rather than short-circuiting.
             NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = RemoteUrl, Token = Token, TokenUsername = "x-access-token" }), CancellationToken.None);
 
         public Task<IWorkspaceHandle> CloneAnonymousAsync() =>
             NewProvider().PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = RemoteUrl }), CancellationToken.None);
 
-        /// <summary>Delete the bare remote AFTER the clone so a subsequent push to it fails — the failing push URL embeds the token, exercising the redaction path.</summary>
+        /// <summary>Delete the bare remote AFTER the clone so a subsequent push to it fails — a tokened push failing, whose surfaced error must carry no token.</summary>
         public void DestroyBareRemote() => Directory.Delete(_bareRemote, recursive: true);
 
         /// <summary>Simulate a harness that COMMITS its own work in the clone (clean tree afterward), so the push must detect committed changes via the base-SHA diff, not only freshly-staged ones.</summary>

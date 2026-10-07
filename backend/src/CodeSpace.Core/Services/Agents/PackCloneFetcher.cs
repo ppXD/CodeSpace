@@ -19,11 +19,12 @@ namespace CodeSpace.Core.Services.Agents;
 /// crash-safety backstop: the recurring sweep (which fans out over every janitor) ages out a clone orphaned by a
 /// worker that died between clone and dispose.</para>
 ///
-/// <para>A pasted URL can carry a credential in its userinfo (<see cref="PastedSecret"/>). The clone runs as a tokened command,
-/// so the operator's credential helpers and trace2 targets never see it, in a directory only this worker's uid can read;
-/// once cloned, origin is rewritten to the URL without it, so the checkout the import walks holds none; a clone failure names
-/// the URL without it and redacts it from git's stderr, since that message reaches the API error body, the UI and the
-/// mediator's error log.</para>
+/// <para>A pasted URL can carry a credential in its userinfo (<see cref="PastedSecret"/>). The clone runs as a tokened command:
+/// it names the remote without the credential and carries it in its environment, so no argv carries it, git writes none into
+/// the checkout's origin, and the operator's credential helpers and trace2 targets never see it. The clone still runs in a
+/// directory only this worker's uid can read, and origin is still rewritten to the URL without the credential once cloned,
+/// as belts; a clone failure names the URL without it and redacts it from git's stderr, since that message reaches the API
+/// error body, the UI and the mediator's error log.</para>
 /// </summary>
 public sealed partial class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJanitor, ISingletonDependency
 {
@@ -74,9 +75,9 @@ public sealed partial class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJan
     }
 
     /// <summary>
-    /// The clone's directory, readable by this worker's uid alone. git writes the pasted URL, credential included, into
-    /// <c>.git/config</c> before the transfer starts, and origin is stripped only once it ends — up to the clone timeout later,
-    /// or never when the worker dies mid-clone and leaves it to the janitor — so it is owner-only before git runs.
+    /// The clone's directory, readable by this worker's uid alone, before git runs — a belt: the clone names the remote
+    /// without the pasted credential, so git writes none into <c>.git/config</c>, and the checkout stays the import's
+    /// private copy until it is walked (or until the janitor reclaims it when the worker dies mid-clone).
     /// </summary>
     private static void CreateOwnerOnlyDirectory(string dir)
     {
@@ -94,10 +95,10 @@ public sealed partial class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJan
     }
 
     /// <summary>
-    /// git writes the pasted URL, credential included, into the clone's origin, and the import then walks that checkout (a
-    /// worker that dies mid-import leaves it on disk for the janitor). Rewrite origin to the URL without the credential through
-    /// the workspace provider's own strip: set-url, else remove origin, else a <see cref="WorkspaceException"/> — and the
-    /// caller deletes the clone on the way out.
+    /// The import walks this checkout (a worker that dies mid-import leaves it on disk for the janitor), so its origin must
+    /// hold no credential. The clone already named the URL without it; as a belt, rewrite origin to that URL through the
+    /// workspace provider's own strip: set-url, else remove origin, else a <see cref="WorkspaceException"/> — and the caller
+    /// deletes the clone on the way out.
     /// </summary>
     private async Task StripPastedCredentialAsync(string url, string dir, CancellationToken cancellationToken)
     {
@@ -132,15 +133,15 @@ public sealed partial class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJan
 
     /// <summary>
     /// The clone as the runner gets it: <see cref="BuildCloneArgs"/> in <paramref name="dir"/>, with the network. A pasted URL
-    /// carrying a credential (<see cref="PastedSecret"/>) clones as a <see cref="TokenedGitCommand"/>, so no credential helper sees
-    /// it and no trace2 target records it — a token pasted as the user alone too, which carries no password for
-    /// <see cref="TokenedGitCommand.IsTokened"/> to find, yet git hands it to every helper it asks for the missing one.
+    /// carrying a credential (<see cref="PastedSecret"/>) clones as a <see cref="TokenedGitCommand"/>: its argv names the URL
+    /// without the userinfo, and the whole userinfo travels in its environment — a token pasted as the user alone too, which
+    /// a stored URL's bare user would not, since that names an account.
     /// </summary>
     internal static SandboxSpec BuildCloneSpec(string url, string? reference, string dir)
     {
-        var spec = new SandboxSpec { Command = "git", Args = BuildCloneArgs(url, reference, dir), WorkingDirectory = dir, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true };
+        var remote = PastedSecret(url) is null ? new TokenedGitCommand.Remote(url, null, null) : TokenedGitCommand.FromUserInfo(url);
 
-        return PastedSecret(url) is null ? spec : TokenedGitCommand.AsTokened(url, spec);
+        return TokenedGitCommand.Spec(remote, new SandboxSpec { Command = "git", Args = BuildCloneArgs(remote.Url, reference, dir), WorkingDirectory = dir, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true });
     }
 
     // ── IWorkspaceJanitor: reclaim pack clones orphaned by a crashed worker ──────────────────────────
