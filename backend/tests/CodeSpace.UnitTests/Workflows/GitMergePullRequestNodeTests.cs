@@ -49,7 +49,7 @@ public class GitMergePullRequestNodeTests
         public Task<RemotePullRequestCounts> GetCountsAsync(Guid r, Guid t, CancellationToken c) => throw new NotImplementedException();
         public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid r, Guid t, int n, CancellationToken c) => throw new NotImplementedException();
         public Task<RemotePullRequestComment> PostCommentAsync(Guid r, Guid t, int n, string b, CancellationToken c) => throw new NotImplementedException();
-        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid r, Guid t, int n, PullRequestReviewVerdict v, string? b, Guid? a, CancellationToken c) => throw new NotImplementedException();
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid r, Guid t, int n, SubmitPullRequestReviewInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
         public Task<RemotePullRequest> OpenPullRequestAsync(Guid r, Guid t, OpenPullRequestInput i, Guid? a, CancellationToken c) => throw new NotImplementedException();
     }
 
@@ -113,6 +113,96 @@ public class GitMergePullRequestNodeTests
         stub.Input!.CommitTitle.ShouldBe("Final title");
         stub.Input.CommitMessage.ShouldBe("Body of the squash commit");
         stub.Input.DeleteSourceBranch.ShouldBeTrue();
+    }
+
+    [Theory]
+    [InlineData("0a1b2c3d", "0a1b2c3d")]
+    [InlineData("  0a1b2c3d  ", "0a1b2c3d")]
+    [InlineData("", null)]   // empty: merge whatever the head is, as before
+    public async Task Passes_the_expected_head_through_so_the_provider_merges_only_that_commit(string given, string? expected)
+    {
+        var stub = new StubPrService();
+
+        await new GitMergePullRequestNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+            ["number"] = JsonSerializer.SerializeToElement(42),
+            ["expectedHeadSha"] = JsonSerializer.SerializeToElement(given),
+        }), CancellationToken.None);
+
+        stub.Input!.ExpectedHeadSha.ShouldBe(expected);
+    }
+
+    [Theory]
+    [InlineData("main", "main")]
+    [InlineData("  release/2.0  ", "release/2.0")]
+    [InlineData("", null)]   // empty: merge into whatever the base is, as before
+    public async Task Passes_the_expected_base_through_so_the_merge_lands_only_on_that_branch(string given, string? expected)
+    {
+        var stub = new StubPrService();
+
+        await new GitMergePullRequestNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+            ["number"] = JsonSerializer.SerializeToElement(42),
+            ["expectedBaseBranch"] = JsonSerializer.SerializeToElement(given),
+        }), CancellationToken.None);
+
+        stub.Input!.ExpectedBaseBranch.ShouldBe(expected);
+    }
+
+    [Fact]
+    public async Task A_merge_with_no_expected_head_or_base_pins_nothing()
+    {
+        var stub = new StubPrService();
+
+        await new GitMergePullRequestNode(stub).RunAsync(Context(), CancellationToken.None);
+
+        stub.Input!.ExpectedHeadSha.ShouldBeNull();
+        stub.Input.ExpectedBaseBranch.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData("base", "docs-sandbox", "main", "Couldn't merge PR #42: its base is now main, not docs-sandbox, the one it was pinned to, so nothing was merged. Read what changed before asking again.")]
+    [InlineData("head", "0a1b2c3d", "ffff0000", "Couldn't merge PR #42: its head is now ffff0000, not 0a1b2c3d, the one it was pinned to, so nothing was merged. Read what changed before asking again.")]
+    public async Task A_pull_request_that_moved_from_its_pins_before_the_merge_was_sent_says_so_and_that_nothing_merged(string pinned, string expected, string actual, string error)
+    {
+        var stub = new StubPrService { ThrowOnMerge = new PullRequestMovedException(42, pinned, expected, actual) };
+
+        var result = await new GitMergePullRequestNode(stub).RunAsync(Context(), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldBe(error);
+    }
+
+    [Theory]
+    [InlineData(ProviderKind.GitHub)]
+    [InlineData(ProviderKind.GitLab)]
+    public async Task A_pinned_merge_refused_because_the_head_moved_says_so_and_that_nothing_merged(ProviderKind provider)
+    {
+        var stub = new StubPrService { ThrowOnMerge = new ProviderApiException(provider, 409, "MergePullRequestAsync", "Head branch was modified. Review and try the merge again.", new Exception()) };
+
+        var result = await new GitMergePullRequestNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+            ["number"] = JsonSerializer.SerializeToElement(42),
+            ["expectedHeadSha"] = JsonSerializer.SerializeToElement("0a1b2c3d"),
+        }), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldBe($"Couldn't merge PR #42: {provider} reports its head is no longer 0a1b2c3d, the commit this merge was pinned to, so nothing was merged. Read the new commits before asking again.");
+    }
+
+    [Fact]
+    public void The_expected_head_and_base_are_declared_inputs_the_manifest_pins_and_the_target_is_the_pull_request_at_them()
+    {
+        var manifest = new GitMergePullRequestNode(new StubPrService()).Manifest;
+
+        manifest.InputSchema.GetProperty("properties").TryGetProperty("expectedHeadSha", out _).ShouldBeTrue("a workflow can bind the reviewed head too");
+        manifest.InputSchema.GetProperty("properties").TryGetProperty("expectedBaseBranch", out _).ShouldBeTrue("and the base it was reviewed against");
+        manifest.RepositoryInput.ShouldNotBeNull();
+        (manifest.RepositoryInput.PullRequestInputKey, manifest.RepositoryInput.HeadShaInputKey, manifest.RepositoryInput.BaseBranchInputKey).ShouldBe(("number", "expectedHeadSha", "expectedBaseBranch"));
+        manifest.ApprovalTargetInputs.ShouldBe(["repositoryId", "number", "expectedHeadSha", "expectedBaseBranch"], "new commits, or a new base, are a new request; a new method or commit text is not");
     }
 
     [Fact]

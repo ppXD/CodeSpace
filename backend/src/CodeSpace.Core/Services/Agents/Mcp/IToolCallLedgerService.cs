@@ -54,8 +54,14 @@ public interface IToolCallLedgerService
     /// <summary>Status-guarded CAS Pending → terminal (mirrors <see cref="AgentRunService"/> completion), team-scoped (defense-in-depth — the design mandates all reads team-scoped). Stores the ALREADY-REDACTED result/error. Throws when the transition is illegal or lost the CAS.</summary>
     Task RecordTerminalAsync(Guid ledgerId, Guid teamId, ToolCallLedgerStatus status, string? resultJson, string? error, CancellationToken cancellationToken);
 
-    /// <summary>Status-guarded CAS Pending → AwaitingApproval (durable mid-turn HITL, item D2 — mirrors <see cref="RecordTerminalAsync"/>'s discipline), team-scoped. Stamps <c>ApprovalToken</c> + <c>ApprovalDeadlineAt</c> so the row is resolvable BEFORE the card posts (the token is the authority; the card's message id is a best-effort follow-up). Returns false when the CAS is lost (the row already moved — e.g. a re-claim of an already-parked call), so the handler re-reads + re-blocks rather than posting a second card.</summary>
-    Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken cancellationToken);
+    /// <summary>Status-guarded CAS Pending → AwaitingApproval (durable mid-turn HITL, item D2 — mirrors <see cref="RecordTerminalAsync"/>'s discipline), team-scoped. Stamps <c>ApprovalToken</c> + <c>ApprovalDeadlineAt</c> so the row is resolvable BEFORE the card posts (the token is the authority; the card's message id is a best-effort follow-up), and in the same write the preview the card is built from and the target a rejection sticks to — so a row awaiting approval never lacks the pins its card showed. Returns false when the CAS is lost (the row already moved — e.g. a re-claim of an already-parked call), so the handler re-reads + re-blocks rather than posting a second card.</summary>
+    Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, ToolCallApprovalPark park, CancellationToken cancellationToken);
+
+    /// <summary>Whether a reviewer rejected a call on <paramref name="approvalTarget"/> earlier in <paramref name="agentRunId"/> — a row of that run and target that a rejection failed (<see cref="ToolCallApprovalResolver.RejectedError"/>). Team-scoped. A target expired unanswered was not rejected.</summary>
+    Task<bool> WasTargetRejectedAsync(Guid agentRunId, Guid teamId, string approvalTarget, CancellationToken cancellationToken);
+
+    /// <summary>Whether a call on <paramref name="approvalTarget"/> other than <paramref name="excludeLedgerId"/> is awaiting a reviewer in <paramref name="agentRunId"/> — parked, decided or not, and not yet run. Team-scoped. A target holds at most one live card.</summary>
+    Task<bool> IsTargetAwaitingApprovalAsync(Guid agentRunId, Guid teamId, string approvalTarget, Guid excludeLedgerId, CancellationToken cancellationToken);
 
     /// <summary>Stamp the posted approval-card message id on an AwaitingApproval row (best-effort, team-scoped) — the token + deadline already make the row resolvable, so a lost CAS here is harmless. Guards on <c>ApprovalMessageId IS NULL</c> so exactly one card is ever recorded per (run, key).</summary>
     Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken cancellationToken);
@@ -72,7 +78,7 @@ public interface IToolCallLedgerService
     /// </summary>
     Task<bool> TryBeginExecutionAsync(Guid ledgerId, Guid teamId, long fenceEpoch, CancellationToken cancellationToken);
 
-    /// <summary>Team-scoped focused read of one row's {Status, ApprovedAt, ResultJson, Error, ApprovalMessageId, ApprovalToken} — the post-wake authority a blocked handler re-reads to decide the outcome, and what a re-call needs to re-post a card whose first post failed. Null when the (ledger, team) row is absent (a foreign id finds nothing — fail-closed).</summary>
+    /// <summary>Team-scoped focused read of one row's {Status, ApprovedAt, ResultJson, Error, ApprovalMessageId, ApprovalToken, PreviewJson, ApprovalTarget} — the post-wake authority a blocked handler re-reads to decide the outcome, and what a re-call needs to re-post a card whose first post failed. Null when the (ledger, team) row is absent (a foreign id finds nothing — fail-closed).</summary>
     Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken);
 
     /// <summary>
@@ -271,20 +277,23 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
         _logger.LogInformation("Tool call ledger recorded terminal. LedgerId={LedgerId} Status={Status}", ledgerId, status);
     }
 
-    public async Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken cancellationToken)
+    public async Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, ToolCallApprovalPark park, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
 
         // Status-guarded CAS Pending → AwaitingApproval (mirrors RecordTerminalAsync's ExecuteUpdate discipline). The
         // Status == Pending guard is the single-winner: a concurrent transition (a re-claim that already parked, a
         // racing terminal) leaves the row not-Pending so this update affects 0 rows → false, and the caller re-reads
-        // + re-blocks instead of posting a second card.
+        // + re-blocks instead of posting a second card. The preview and target ride the same write: a parked row always
+        // carries the pins its card showed.
         var flipped = await _db.ToolCallLedger
             .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.Pending)
             .ExecuteUpdateAsync(s => s
                 .SetProperty(l => l.Status, ToolCallLedgerStatus.AwaitingApproval)
-                .SetProperty(l => l.ApprovalToken, approvalToken)
-                .SetProperty(l => l.ApprovalDeadlineAt, deadlineAt)
+                .SetProperty(l => l.ApprovalToken, park.Token)
+                .SetProperty(l => l.ApprovalDeadlineAt, park.DeadlineAt)
+                .SetProperty(l => l.ApprovalPreviewJson, park.PreviewJson)
+                .SetProperty(l => l.ApprovalTarget, park.Target)
                 .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
             .ConfigureAwait(false);
 
@@ -329,8 +338,18 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
     public async Task<ToolCallApprovalState?> ReadApprovalStateAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ToolCallLedger.AsNoTracking()
             .Where(l => l.Id == ledgerId && l.TeamId == teamId)
-            .Select(l => new ToolCallApprovalState { Status = l.Status, ApprovedAt = l.ApprovedAt, ResultJson = l.ResultJson, Error = l.Error, ApprovalMessageId = l.ApprovalMessageId, ApprovalToken = l.ApprovalToken })
+            .Select(l => new ToolCallApprovalState { Status = l.Status, ApprovedAt = l.ApprovedAt, ResultJson = l.ResultJson, Error = l.Error, ApprovalMessageId = l.ApprovalMessageId, ApprovalToken = l.ApprovalToken, PreviewJson = l.ApprovalPreviewJson, ApprovalTarget = l.ApprovalTarget })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    public async Task<bool> WasTargetRejectedAsync(Guid agentRunId, Guid teamId, string approvalTarget, CancellationToken cancellationToken) =>
+        await _db.ToolCallLedger.AsNoTracking()
+            .AnyAsync(l => l.AgentRunId == agentRunId && l.TeamId == teamId && l.ApprovalTarget == approvalTarget && l.Status == ToolCallLedgerStatus.Failed && l.Error == ToolCallApprovalResolver.RejectedError, cancellationToken)
+            .ConfigureAwait(false);
+
+    public async Task<bool> IsTargetAwaitingApprovalAsync(Guid agentRunId, Guid teamId, string approvalTarget, Guid excludeLedgerId, CancellationToken cancellationToken) =>
+        await _db.ToolCallLedger.AsNoTracking()
+            .AnyAsync(l => l.AgentRunId == agentRunId && l.TeamId == teamId && l.ApprovalTarget == approvalTarget && l.Status == ToolCallLedgerStatus.AwaitingApproval && l.Id != excludeLedgerId, cancellationToken)
+            .ConfigureAwait(false);
 
     public async Task<ToolCallTerminalReplayState?> ReadTerminalForReplayAsync(Guid ledgerId, Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
         await TerminalReplayQuery(_db, ledgerId, agentRunId, teamId).FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);

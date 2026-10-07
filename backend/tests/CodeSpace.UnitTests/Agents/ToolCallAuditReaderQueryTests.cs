@@ -36,22 +36,42 @@ public class ToolCallAuditReaderQueryTests
         sql.ShouldNotContain("approval_token", customMessage: "the approval bearer secret must never cross the audit read seam");
         sql.ShouldNotContain("idempotency_key", customMessage: "the server-side execution authority is not operator-facing metadata");
         sql.ShouldNotContain("input_hash", customMessage: "the execution dedup hash is not operator-facing metadata");
+        sql.ShouldNotContain("approval_target", customMessage: "the server-side rejection key is not operator-facing metadata");
     }
 
-    [Fact]
-    public void The_projection_keeps_every_operator_audit_field()
+    [Theory]
+    [InlineData(false)]   // the run's whole audit
+    [InlineData(true)]    // the page both UI surfaces read: the Tool calls tab and the canvas approval bar
+    public void The_projection_keeps_every_operator_audit_field(bool paged)
     {
-        var sql = AuditQuerySql();
+        var sql = paged ? PageQuerySql() : AuditQuerySql();
 
-        foreach (var column in new[] { "tool_kind", "status", "created_date", "last_modified_date", "error", "approved_by_user_id", "approved_at" })
+        foreach (var column in new[] { "tool_kind", "status", "created_date", "last_modified_date", "error", "approved_by_user_id", "approved_at", "approval_preview_jsonb" })
             sql.ShouldContain(column, customMessage: $"the body-free projection must retain audit column {column}. SQL was:\n{sql}");
     }
 
+    [Fact]
+    public void The_page_query_never_selects_result_or_execution_authority_columns()
+    {
+        var sql = PageQuerySql();
+
+        foreach (var column in new[] { "result_jsonb", "decision_envelope_jsonb", "approval_token", "idempotency_key", "input_hash", "approval_target" })
+            sql.ShouldNotContain(column, customMessage: $"the page is operator-facing metadata only. SQL was:\n{sql}");
+    }
+
+    private static CodeSpaceDbContext UnreachableDb() => new(new DbContextOptionsBuilder<CodeSpaceDbContext>().UseNpgsql(UnreachableDatabase).UseSnakeCaseNamingConvention().Options);
+
     private static string AuditQuerySql()
     {
-        using var db = new CodeSpaceDbContext(new DbContextOptionsBuilder<CodeSpaceDbContext>()
-            .UseNpgsql(UnreachableDatabase).UseSnakeCaseNamingConvention().Options);
+        using var db = UnreachableDb();
 
         return ToolCallAuditReader.AuditRowsQuery(db, Guid.NewGuid(), Guid.NewGuid()).ToQueryString();
+    }
+
+    private static string PageQuerySql()
+    {
+        using var db = UnreachableDb();
+
+        return ToolCallAuditReader.PageRowsQuery(db, Guid.NewGuid(), Guid.NewGuid(), cursor: null, take: 10).ToQueryString();
     }
 }

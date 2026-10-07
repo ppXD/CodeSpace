@@ -25,4 +25,10 @@ public sealed record ToolCallApprovalState
 
     /// <summary>The server-side bearer the approval card resolves by, stamped at park — what a re-posted card must carry to resolve THIS row. Never surfaced to a client.</summary>
     public string? ApprovalToken { get; init; }
+
+    /// <summary>The serialized <see cref="ToolCallPreview"/> stamped at park: what a re-posted card shows, and the pins the approved call executes with. Null for a row parked without one.</summary>
+    public string? PreviewJson { get; init; }
+
+    /// <summary>The server-derived key of the call's target, stamped at park: an approved call whose target a reviewer has since rejected does not run. Null for a row parked without one. Never surfaced to a client.</summary>
+    public string? ApprovalTarget { get; init; }
 }

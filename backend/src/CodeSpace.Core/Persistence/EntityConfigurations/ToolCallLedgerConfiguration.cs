@@ -23,6 +23,8 @@ public class ToolCallLedgerConfiguration : IEntityTypeConfiguration<ToolCallLedg
         builder.Property(l => l.ApprovalDeadlineAt).HasColumnName("approval_deadline_at");
         builder.Property(l => l.ApprovedByUserId).HasColumnName("approved_by_user_id");
         builder.Property(l => l.ApprovedAt).HasColumnName("approved_at");
+        builder.Property(l => l.ApprovalPreviewJson).HasColumnName("approval_preview_jsonb").HasColumnType("jsonb");
+        builder.Property(l => l.ApprovalTarget).HasColumnName("approval_target").HasMaxLength(200);
         builder.Property(l => l.FenceEpoch).HasColumnName("fence_epoch");
 
         var admissionOrdinal = builder.Property(l => l.AdmissionOrdinal).HasColumnName("admission_ordinal").ValueGeneratedOnAdd();

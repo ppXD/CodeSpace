@@ -4,6 +4,7 @@ using System.Text;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Exceptions;
+using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Queries.Agents;
 using Microsoft.EntityFrameworkCore;
@@ -29,7 +30,7 @@ public sealed class ToolCallAuditReader : IToolCallAuditReader, IScopedDependenc
     public ToolCallAuditReader(CodeSpaceDbContext db) { _db = db; }
 
     public async Task<IReadOnlyList<ToolCallView>> ListForRunAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken) =>
-        await AuditRowsQuery(_db, agentRunId, teamId).ToListAsync(cancellationToken).ConfigureAwait(false);
+        (await AuditRowsQuery(_db, agentRunId, teamId).ToListAsync(cancellationToken).ConfigureAwait(false)).Select(ToView).ToList();
 
     public async Task<ToolCallPage?> PageForRunAsync(PageToolCallsQuery request, Guid teamId, CancellationToken cancellationToken)
     {
@@ -57,15 +58,17 @@ public sealed class ToolCallAuditReader : IToolCallAuditReader, IScopedDependenc
     /// <summary>
     /// Exact tenant/run-scoped audit projection, ordered chronologically in PostgreSQL. Only fields serialized by
     /// <see cref="ToolCallView"/> are selected: notably not <c>ResultJson</c>, the decision envelope, approval bearer,
-    /// idempotency key or input hash. Internal so the translated SQL—not merely the DTO shape—is test-pinned.
+    /// approval target, idempotency key or input hash. The approval preview is selected: it is what the reviewer saw,
+    /// redacted and bounded at park. Internal so the translated SQL—not merely the DTO shape—is test-pinned.
     /// </summary>
-    internal static IQueryable<ToolCallView> AuditRowsQuery(CodeSpaceDbContext db, Guid agentRunId, Guid teamId) =>
+    internal static IQueryable<ToolCallAuditPageRow> AuditRowsQuery(CodeSpaceDbContext db, Guid agentRunId, Guid teamId) =>
         db.ToolCallLedger.AsNoTracking()
             .Where(row => row.AgentRunId == agentRunId && row.TeamId == teamId)
             .OrderBy(row => row.CreatedDate)
             .ThenBy(row => row.Id)
-            .Select(row => new ToolCallView
+            .Select(row => new ToolCallAuditPageRow
             {
+                Id = row.Id,
                 ToolKind = row.ToolKind,
                 Status = row.Status,
                 CreatedDate = row.CreatedDate,
@@ -73,6 +76,7 @@ public sealed class ToolCallAuditReader : IToolCallAuditReader, IScopedDependenc
                 Error = row.Error,
                 ApprovedByUserId = row.ApprovedByUserId,
                 ApprovedAt = row.ApprovedAt,
+                PreviewJson = row.ApprovalPreviewJson,
             });
 
     /// <summary>The sole row-bearing page query: exact tenant/run keyset and only cursor + existing safe view columns.</summary>
@@ -93,6 +97,7 @@ public sealed class ToolCallAuditReader : IToolCallAuditReader, IScopedDependenc
                 Error = row.Error,
                 ApprovedByUserId = row.ApprovedByUserId,
                 ApprovedAt = row.ApprovedAt,
+                PreviewJson = row.ApprovalPreviewJson,
             });
     }
 
@@ -105,6 +110,7 @@ public sealed class ToolCallAuditReader : IToolCallAuditReader, IScopedDependenc
         Error = row.Error,
         ApprovedByUserId = row.ApprovedByUserId,
         ApprovedAt = row.ApprovedAt,
+        Preview = ToolCallPreviews.Parse(row.PreviewJson),
     };
 }
 
@@ -118,6 +124,7 @@ internal sealed record ToolCallAuditPageRow
     public string? Error { get; init; }
     public Guid? ApprovedByUserId { get; init; }
     public DateTimeOffset? ApprovedAt { get; init; }
+    public string? PreviewJson { get; init; }
 }
 
 internal readonly record struct ToolCallAuditCursor(DateTimeOffset CreatedDate, Guid Id)

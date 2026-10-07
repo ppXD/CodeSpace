@@ -277,13 +277,15 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         return comments.FirstOrDefault(c => IdempotencyMarker.IsIn(c.Body, marker));
     }
 
-    public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
+    public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, SubmitPullRequestReviewInput input, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
         var marker = IdempotencyMarker.New();
 
-        // GitHub has a native review verdict — one call submits approve / request-changes / comment.
-        var review = new PullRequestReviewCreate { Body = IdempotencyMarker.Append(body, marker), Event = GitHubReviewMapping.ToEvent(verdict) };
+        // GitHub has a native review verdict — one call submits approve / request-changes / comment. A pinned head is
+        // sent as the review's commit, so the verdict is recorded against the commit the reviewer saw: GitHub refuses one
+        // no longer in the pull request (422), and counts one behind its head as stale where the base dismisses those.
+        var review = new PullRequestReviewCreate { Body = IdempotencyMarker.Append(input.Body, marker), Event = GitHubReviewMapping.ToEvent(input.Verdict), CommitId = input.ExpectedHeadSha };
 
         var created = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(SubmitReviewAsync),
             _ => client.PullRequest.Review.Create(repository.NamespacePath, repository.Name, number, review),
@@ -292,7 +294,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
 
         return new RemotePullRequestReview
         {
-            Verdict = verdict,
+            Verdict = input.Verdict,
             ExternalId = created.Id.ToString(),
             WebUrl = created.HtmlUrl
         };
@@ -366,6 +368,8 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
             },
             CommitTitle = input.CommitTitle,
             CommitMessage = input.CommitMessage,
+            // GitHub refuses with 409 when the head is no longer this commit, so a pinned merge never takes commits pushed after it was approved.
+            Sha = input.ExpectedHeadSha,
         };
 
         // A merge is one-way: re-sent after it landed, GitHub answers 405 "not mergeable" and fails a merge that
@@ -1430,6 +1434,8 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
             ClosedDate = pr.ClosedAt,
             WebUrl = pr.HtmlUrl,
             Labels = ToLabelRefs(pr.Labels),
+            HeadSha = pr.Head?.Sha,
+            HeadRepositoryFullPath = pr.Head?.Repository?.FullName,
             Body = pr.Body,
             CommitsCount = pr.Commits,
             Additions = pr.Additions,

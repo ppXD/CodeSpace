@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import { isAgentRunActive, type ToolCallLedgerStatus } from "@/api/agents";
+import { isAgentRunActive, type ToolCallLedgerStatus, type ToolCallPreview } from "@/api/agents";
 import { useAgentRun, useAgentRunEventWindow, useToolCallWindow } from "@/hooks/use-agents";
 import { useTeamMemberIdentityMap } from "@/hooks/use-team-members";
 import { AgentRunEventPayload } from "./AgentRunEventPayload";
@@ -70,6 +70,7 @@ export function AgentToolCalls({ agentRunId, hideHeader }: { agentRunId: string;
                     <ToolCallStatusBadge status={c.status} />
                     <span className="tc-when">{new Date(c.createdDate).toLocaleString()}</span>
                   </div>
+                  <ToolCallPreviewList preview={c.preview} />
                   {approverName && (
                     <div className="tc-approver">
                       <Ic.Check size={11} /> approved by {approverName}
@@ -159,6 +160,33 @@ function OffloadedToolCallArgs({ agentRunId, eventSequence, dataArtifactId, tool
       </summary>
       {expanded && <AgentRunEventPayload agentRunId={agentRunId} eventSequence={eventSequence} dataArtifactId={dataArtifactId} />}
     </details>
+  );
+}
+
+/**
+ * What a governed call was shown to do on its approval card — the same redacted, bounded lines, in the warm theme. A line
+ * naming something outside the run's repositories is flagged. `limit` keeps a compact surface (the canvas footer) short,
+ * with a count of the rest. Nothing renders for a call that never asked a human.
+ */
+export function ToolCallPreviewList({ preview, limit }: { preview: ToolCallPreview | null | undefined; limit?: number }) {
+  if (!preview || preview.lines.length === 0) return null;
+
+  const shown = limit === undefined ? preview.lines : preview.lines.slice(0, limit);
+  const hidden = preview.lines.length - shown.length;
+
+  return (
+    <dl className="tc-preview" aria-label="What this call was shown to do">
+      {shown.map((line, i) => (
+        <div key={i} className="tc-preview-row" data-outside={line.outsideRun || undefined}>
+          <dt>{line.label}</dt>
+          <dd>
+            <span className="tc-preview-value">{line.value}</span>
+            {line.outsideRun && <span className="tc-preview-flag">outside this run's repositories</span>}
+          </dd>
+        </div>
+      ))}
+      {hidden > 0 && <div className="tc-preview-more">+{hidden} more</div>}
+    </dl>
   );
 }
 

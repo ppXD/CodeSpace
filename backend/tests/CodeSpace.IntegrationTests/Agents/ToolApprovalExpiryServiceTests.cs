@@ -224,7 +224,7 @@ public class ToolApprovalExpiryServiceTests
         var token = Guid.NewGuid().ToString("N");
 
         var claim = await ledger.TryClaimAsync(Guid.NewGuid(), teamId, "git.open_pr", Guid.NewGuid().ToString("N"), "input-hash", 0, CancellationToken.None);
-        (await ledger.TryBeginApprovalAsync(claim.LedgerId, teamId, token, deadlineAt, CancellationToken.None)).ShouldBeTrue("fixture check: the claimed row parks for approval");
+        (await ledger.TryBeginApprovalAsync(claim.LedgerId, teamId, new ToolCallApprovalPark { Token = token, DeadlineAt = deadlineAt }, CancellationToken.None)).ShouldBeTrue("fixture check: the claimed row parks for approval");
 
         var card = new MessageInteraction
         {

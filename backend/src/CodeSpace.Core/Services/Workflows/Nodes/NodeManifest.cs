@@ -128,6 +128,16 @@ public sealed record NodeManifest
     public RepositoryInputSpec? RepositoryInput { get; init; }
 
     /// <summary>
+    /// The inputs an agent's call to this node is judged by when a human rejects it: the call's target. A target a
+    /// reviewer rejected is not put to a reviewer again in the same run, whatever other input the agent changes — so a
+    /// merge's target is its repository and pull request at the head and base its card pinned, not its method or commit
+    /// text: new commits are a new request, a reworded one is not. Null ⇒ every input the call names. Values are compared
+    /// as the node reads them, with the pins the card showed written over them (see <c>AgentToolInputs.Target</c>). Off the
+    /// agent-tool path it changes nothing.
+    /// </summary>
+    public IReadOnlyList<string>? ApprovalTargetInputs { get; init; }
+
+    /// <summary>
     /// Optional author-facing starter templates for this node type. Each preset is a named, ready-to-use
     /// (Config, Inputs) pair the editor offers as "start from a template" — a friendly surface over the
     /// generic schemas, so an author picks an intent (e.g. "Quorum review") instead of assembling atoms.
@@ -261,6 +271,28 @@ public sealed record RepositoryInputSpec
     /// caller picks.
     /// </summary>
     public string? RefInputKey { get; init; }
+
+    /// <summary>
+    /// Input key whose value is the number of a pull request of that repository the node acts on. Called by an agent and
+    /// put to a human for approval, the pull request is read first and its title, head (repository, branch, commit) and
+    /// base are shown on the approval card. Null ⇒ the node names no pull request.
+    /// </summary>
+    public string? PullRequestInputKey { get; init; }
+
+    /// <summary>
+    /// Input key that pins that pull request's head: the node acts only while the head is still the commit it names.
+    /// Called by an agent and put to a human for approval, the head shown on the card is pinned here, so a head that
+    /// moves after approval fails the call instead of acting on commits nobody reviewed. Null ⇒ nothing is pinned.
+    /// </summary>
+    public string? HeadShaInputKey { get; init; }
+
+    /// <summary>
+    /// Input key that pins that pull request's base: the node acts only while the pull request still targets the branch it
+    /// names. Called by an agent and put to a human for approval, the base shown on the card is pinned here, so a pull
+    /// request retargeted after approval fails the call instead of landing on a branch nobody approved. Null ⇒ the base is
+    /// shown but not pinned.
+    /// </summary>
+    public string? BaseBranchInputKey { get; init; }
 }
 
 /// <summary>How an act-as-user node's provider-input value resolves to a provider instance.</summary>

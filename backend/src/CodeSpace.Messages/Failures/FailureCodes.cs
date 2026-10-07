@@ -57,6 +57,12 @@ public static class FailureCodes
     public const string TaskRouteConfirmationRequired = "task_route_confirmation_required";
     public const string TaskRouteSnapshotMismatch = "task_route_snapshot_mismatch";
     public const string WorkspaceUnresolvable = "workspace_unresolvable";
+
+    /// <summary>An agent's tool call could not be shown to a human as it would run — the pull request it names could not be read, its head or base is not the one the call names, or its arguments are too long to show whole — so it was answered instead of put to a reviewer. Remedy: read the pull request again, or shorten the arguments, then re-issue the call.</summary>
+    public const string ToolCallNotPreviewable = "tool_call_not_previewable";
+
+    /// <summary>A pull request moved from what a write was pinned to — its head is another commit, or it targets another branch — so the write was not sent. Remedy: read what changed, then ask again.</summary>
+    public const string PullRequestMoved = "pull_request_moved";
     public const string RerunAlreadyInProgress = "rerun_already_in_progress";
     public const string RerunTargetInvalid = "rerun_target_invalid";
     public const string RerunBlockedUnsupportedNode = "rerun_blocked_unsupported_node";

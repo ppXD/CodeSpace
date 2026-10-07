@@ -78,6 +78,38 @@ public class ToolCallApprovalResolverTests
     }
 
     [Fact]
+    public async Task A_rejection_fails_every_undecided_call_of_the_run_on_the_same_target_and_wakes_each()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        var actor = Guid.NewGuid();
+        var token = NewToken();
+        const string target = "git.merge_pr:the-pull-request";
+
+        var rejected = await SeedOnTargetAsync(teamId, runId, target, token);
+        var sibling = await SeedOnTargetAsync(teamId, runId, target, NewToken());
+        var approvedSibling = await SeedOnTargetAsync(teamId, runId, target, NewToken(), approved: true);
+        var otherTarget = await SeedOnTargetAsync(teamId, runId, "git.merge_pr:another-pull-request", NewToken());
+        var otherRun = await SeedOnTargetAsync(teamId, Guid.NewGuid(), target, NewToken());
+
+        using var scope = _fixture.BeginScope();
+        var siblingWaiter = scope.Resolve<IToolApprovalWaiterRegistry>().Register(sibling);
+
+        (await Resolver(scope).ResolveByTokenAsync(token, "reject", actor, teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
+
+        foreach (var id in new[] { rejected, sibling })
+        {
+            var row = await ReadRowAsync(id);
+            (row.Status, row.Error, row.LastModifiedBy).ShouldBe((ToolCallLedgerStatus.Failed, ToolCallApprovalResolver.RejectedError, actor), "a rejection of the target fails every undecided card on it, so no approvable twin is left behind");
+        }
+
+        (await siblingWaiter.Completion).ShouldBe(ToolApprovalOutcome.Rejected, "the sibling's blocked call is woken with the rejection");
+        (await ReadRowAsync(approvedSibling)).Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "an approved sibling is the handler's to refuse, after it re-checks the target");
+        (await ReadRowAsync(otherTarget)).Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "another target is another request");
+        (await ReadRowAsync(otherRun)).Status.ShouldBe(ToolCallLedgerStatus.AwaitingApproval, "another run's card is that run's");
+    }
+
+    [Fact]
     public async Task A_foreign_team_finds_nothing_and_leaves_the_row_untouched()
     {
         var ownerTeam = await SeedTeamAsync();
@@ -225,6 +257,30 @@ public class ToolCallApprovalResolverTests
             InputHash = InputHash,
             Status = status,
             ApprovalToken = token,
+        });
+
+        await db.SaveChangesAsync();
+        return id;
+    }
+
+    private async Task<Guid> SeedOnTargetAsync(Guid teamId, Guid runId, string target, string token, bool approved = false)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var id = Guid.NewGuid();
+        db.ToolCallLedger.Add(new ToolCallLedger
+        {
+            Id = id,
+            TeamId = teamId,
+            AgentRunId = runId,
+            ToolKind = "git.merge_pr",
+            IdempotencyKey = $"git.merge_pr:{id:N}",
+            InputHash = InputHash,
+            Status = ToolCallLedgerStatus.AwaitingApproval,
+            ApprovalToken = token,
+            ApprovalTarget = target,
+            ApprovedAt = approved ? DateTimeOffset.UtcNow : null,
         });
 
         await db.SaveChangesAsync();

@@ -26,6 +26,6 @@ public sealed class SubmitPullRequestReviewCommandHandler : IRequestHandler<Subm
         // no identity to act as — reject rather than silently fall back.
         var actorUserId = _currentUser.Id ?? throw new UnauthorizedAccessException("A pull request review can only be submitted by an authenticated user.");
 
-        return await _service.SubmitReviewAsync(request.RepositoryId, _currentTeam.Id!.Value, request.Number, request.Verdict, request.Body, actorUserId, cancellationToken).ConfigureAwait(false);
+        return await _service.SubmitReviewAsync(request.RepositoryId, _currentTeam.Id!.Value, request.Number, new SubmitPullRequestReviewInput { Verdict = request.Verdict, Body = request.Body }, actorUserId, cancellationToken).ConfigureAwait(false);
     }
 }

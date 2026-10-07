@@ -80,7 +80,7 @@ public class PullRequestReviewActorFlowTests
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IPullRequestService>()
-            .SubmitReviewAsync(repositoryId, teamId, 5, PullRequestReviewVerdict.Comment, "looks good", actorUserId, CancellationToken.None);
+            .SubmitReviewAsync(repositoryId, teamId, 5, new SubmitPullRequestReviewInput { Verdict = PullRequestReviewVerdict.Comment, Body = "looks good" }, actorUserId, CancellationToken.None);
     }
 
     private async Task<SeedResult> SeedAsync(bool linkActor)

@@ -79,9 +79,11 @@ public sealed class McpNodeLifetimeFlowTests(PostgresFixture fixture)
         }
 
         await using var client = await WireClient.ConnectAsync(host.Connect);
-        var foreign = await client.CallAsync(1, new { repositoryId, teamId = foreignTeam, command = "must-never-execute" }, "agent.run_command");
+        var foreign = await client.CallAsync(1, new { repositoryId, command = "must-never-execute" }, "agent.run_command");
         var missingId = Guid.NewGuid();
-        var missing = await client.CallAsync(2, new { repositoryId = missingId, teamId = foreignTeam, command = "must-never-execute" }, "agent.run_command");
+        var missing = await client.CallAsync(2, new { repositoryId = missingId, command = "must-never-execute" }, "agent.run_command");
+        var teamNamed = await client.CallAsync(3, new { repositoryId, teamId = foreignTeam, command = "must-never-execute" }, "agent.run_command");
+        teamNamed.GetProperty("content")[0].GetProperty("text").GetString().ShouldNotBeNull().ShouldStartWith("Tool 'agent.run_command' does not take 'teamId'.", customMessage: "a model-authored team is refused before the tool is reached");
         foreign.GetProperty("isError").GetBoolean().ShouldBeTrue();
         missing.GetProperty("isError").GetBoolean().ShouldBeTrue();
         var foreignText = foreign.GetProperty("content")[0].GetProperty("text").GetString().ShouldNotBeNull();
@@ -89,7 +91,7 @@ public sealed class McpNodeLifetimeFlowTests(PostgresFixture fixture)
         foreignText.ShouldContain($"Repository {repositoryId} not found.", customMessage: "a repository outside the run's binding must be refused before any clone or command");
         foreignText.Replace(repositoryId.ToString(), "id").ShouldBe(missingText.Replace(missingId.ToString(), "id"), "foreign and missing repositories must have indistinguishable failure shapes");
         foreignText.ShouldNotContain("foreign.invalid");
-        host.Endpoint.ObservedToolCalls.ShouldBe(2);
+        host.Endpoint.ObservedToolCalls.ShouldBe(3);
     }
 
     [Fact]
@@ -189,7 +191,8 @@ public sealed class McpNodeLifetimeFlowTests(PostgresFixture fixture)
     {
         public const string Key = "test.node_scope";
         public string TypeKey => Key;
-        public NodeManifest Manifest { get; } = new() { DisplayName = "Node scope probe", Category = "Test", Kind = NodeKind.Regular, IsAgentToolEligible = true, ConfigSchema = SchemaBuilder.EmptyObject(), InputSchema = SchemaBuilder.EmptyObject(), OutputSchema = SchemaBuilder.EmptyObject() };
+        // Declares teamId so a model can send one: the adapter must still run the node under the authenticated run's team.
+        public NodeManifest Manifest { get; } = new() { DisplayName = "Node scope probe", Category = "Test", Kind = NodeKind.Regular, IsAgentToolEligible = true, ConfigSchema = SchemaBuilder.EmptyObject(), InputSchema = SchemaBuilder.Parse("""{"type":"object","properties":{"mode":{"type":"string"},"teamId":{"type":"string"}}}"""), OutputSchema = SchemaBuilder.EmptyObject() };
         public async Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
         {
             var callTeamId = context.Scope.Sys[SystemScopeKeys.TeamId].GetGuid();

@@ -15,8 +15,8 @@ public enum PullRequestMergeMethod
 
 /// <summary>
 /// Provider-neutral request to MERGE an open pull/merge request. Maps onto GitHub's
-/// <c>MergePullRequest { MergeMethod, CommitTitle, CommitMessage }</c> + a follow-up branch delete, and
-/// GitLab's <c>MergeRequestMerge { Squash, ShouldRemoveSourceBranch, … }</c>.
+/// <c>MergePullRequest { MergeMethod, CommitTitle, CommitMessage, Sha }</c> + a follow-up branch delete, and
+/// GitLab's <c>MergeRequestMerge { Squash, ShouldRemoveSourceBranch, Sha, … }</c>.
 /// </summary>
 public sealed record MergePullRequestInput
 {
@@ -31,6 +31,12 @@ public sealed record MergePullRequestInput
 
     /// <summary>Delete the source branch after a successful merge — only from the pull request's own repository, never a same-named branch of the base for a fork's pull request. Default false.</summary>
     public bool DeleteSourceBranch { get; init; }
+
+    /// <summary>Merge only while the head is still this commit (GitHub merge <c>sha</c>; GitLab accept <c>sha</c>): a head that moved fails the merge instead of merging commits nobody reviewed. Null merges whatever the head is.</summary>
+    public string? ExpectedHeadSha { get; init; }
+
+    /// <summary>Merge only while the pull request still targets this branch: one retargeted since fails the merge instead of landing on a branch nobody approved. Neither provider takes it as a precondition, so it is checked by reading the pull request just before the merge. Null merges into whatever the base is.</summary>
+    public string? ExpectedBaseBranch { get; init; }
 }
 
 /// <summary>What became of a merged pull request's source branch. Provider-neutral.</summary>

@@ -13,7 +13,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// MERGES an open pull/merge request via <see cref="IPullRequestService.MergePullRequestAsync"/> — the
 /// completion half of the Git write surface (open → review → merge). Inputs: <c>repositoryId</c>,
 /// <c>number</c>, optional <c>method</c> (merge / squash / rebase) / <c>commitTitle</c> /
-/// <c>commitMessage</c> / <c>deleteSourceBranch</c> / <c>actAsUserId</c>. Outputs <c>merged</c>, <c>sha</c>,
+/// <c>commitMessage</c> / <c>deleteSourceBranch</c> / <c>expectedHeadSha</c> / <c>expectedBaseBranch</c> / <c>actAsUserId</c>. Outputs <c>merged</c>, <c>sha</c>,
 /// <c>message</c>, and what became of the source branch (<c>sourceBranchDeletion</c>, <c>sourceBranchDetail</c>).
 ///
 /// Wire <c>number</c> from upstream (e.g. an auto-merge-after-approval workflow). The provider translates
@@ -51,7 +51,11 @@ public sealed class GitMergePullRequestNode : INodeRuntime
         // agent_run_id provides traceability.
         IsAgentToolEligible = true,
         // Called by an agent, only a repository its run is bound to — and a write, so a patch-only repository refuses it.
-        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true },
+        // Its approval card shows the pull request (title, head, base) and pins the head and base it shows: the approved
+        // merge runs only at that commit, into that branch. A reviewer's rejection sticks to the pull request at that head
+        // and base, not to the method or commit text — new commits are a new request.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true, PullRequestInputKey = "number", HeadShaInputKey = "expectedHeadSha", BaseBranchInputKey = "expectedBaseBranch" },
+        ApprovalTargetInputs = ["repositoryId", "number", "expectedHeadSha", "expectedBaseBranch"],
         AlwaysRequiresApproval = true,
         ActsAsUser = new ActsAsUserSpec { ActorInputKey = "actAsUserId", ProviderInputKey = "repositoryId", ProviderSource = ActorProviderSource.Repository, CapabilityType = typeof(IPullRequestWriteCapability) },
         // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
@@ -74,6 +78,8 @@ public sealed class GitMergePullRequestNode : INodeRuntime
                 "commitTitle": { "type": "string", "description": "Optional merge-commit title (squash/merge). Provider default when empty." },
                 "commitMessage": { "type": "string", "x-long": true, "description": "Optional merge-commit message body." },
                 "deleteSourceBranch": { "type": "boolean", "description": "Delete the source branch after a successful merge, only from the pull request's own repository: a fork's branch is never matched to a same-named branch of the base. The sourceBranchDeletion output says what happened.", "x-spotlight": 3 },
+                "expectedHeadSha": { "type": "string", "description": "Merge only while the pull request's head is still this commit; a head that moved fails the merge instead of merging commits nobody reviewed. Bind the sha a review step read. Called by an agent, it is set to the head shown on the approval card." },
+                "expectedBaseBranch": { "type": "string", "description": "Merge only while the pull request still targets this branch; one retargeted since fails the merge instead of landing on a branch nobody approved. Called by an agent, it is set to the base shown on the approval card." },
                 "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Merge AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number"]
@@ -106,6 +112,8 @@ public sealed class GitMergePullRequestNode : INodeRuntime
             CommitTitle = TryReadNonEmpty(context, "commitTitle", out var t) ? t : null,
             CommitMessage = TryReadNonEmpty(context, "commitMessage", out var m) ? m : null,
             DeleteSourceBranch = TryReadBool(context, "deleteSourceBranch"),
+            ExpectedHeadSha = TryReadNonEmpty(context, "expectedHeadSha", out var head) ? head : null,
+            ExpectedBaseBranch = TryReadNonEmpty(context, "expectedBaseBranch", out var baseBranch) ? baseBranch : null,
         };
         var actAsUserId = TryReadActAsUserId(context, out var a) ? a : (Guid?)null;
 
@@ -115,7 +123,7 @@ public sealed class GitMergePullRequestNode : INodeRuntime
             result = await context.Observability.TraceExternalCallAsync(
                 target: $"git.merge_pr:{repoId}:{number}",
                 method: "merge_pull_request",
-                requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, merge_method = method.ToString(), delete_source_branch = input.DeleteSourceBranch, act_as_user_id = actAsUserId }),
+                requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, merge_method = method.ToString(), delete_source_branch = input.DeleteSourceBranch, expected_head_sha = input.ExpectedHeadSha, expected_base_branch = input.ExpectedBaseBranch, act_as_user_id = actAsUserId }),
                 action: ct => _prService.MergePullRequestAsync(repoId, teamId, number, input, actAsUserId, ct),
                 completionExtractor: r => new ExternalCallCompletion
                 {
@@ -123,8 +131,9 @@ public sealed class GitMergePullRequestNode : INodeRuntime
                 },
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
-        catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number)); }
-        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number)); }
+        catch (PullRequestMovedException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number, input.ExpectedHeadSha)); }
+        catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number, input.ExpectedHeadSha)); }
+        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number, input.ExpectedHeadSha)); }
 
         context.Logger.LogInformation("Merged PR #{Num} on repo {RepoId} (merged={Merged}, method {Method}, source branch {SourceBranchDeletion})", number, repoId, result.Merged, method, result.SourceBranchDeletion);
 
@@ -140,8 +149,13 @@ public sealed class GitMergePullRequestNode : INodeRuntime
         return NodeResult.Ok(outputs);
     }
 
-    private static string DescribeMergeFailure(Exception ex, int number) => ex switch
+    /// <summary>The merge's failure in words. A pull request read again just before the merge that moved from its pins, and a conflict on a pinned merge (GitHub and GitLab both answer 409 when <c>sha</c> is not the head), are the head or base having moved, and nothing merged.</summary>
+    private static string DescribeMergeFailure(Exception ex, int number, string? expectedHeadSha) => ex switch
     {
+        PullRequestMovedException moved =>
+            $"Couldn't merge PR #{number}: {moved.Message}, so nothing was merged. Read what changed before asking again.",
+        ProviderApiException { StatusCode: 409 } api when expectedHeadSha is not null =>
+            $"Couldn't merge PR #{number}: {api.ProviderKind} reports its head is no longer {expectedHeadSha}, the commit this merge was pinned to, so nothing was merged. Read the new commits before asking again.",
         ProviderInsufficientScopeException scope =>
             $"Couldn't merge PR #{number}: your {scope.ProviderKind} token is missing the {string.Join(", ", scope.MissingScopes)} scope. Re-link your identity with that scope, then try again.",
         ProviderApiException { StatusCode: 403 } api =>

@@ -222,6 +222,7 @@ public class ToolCallAuditFlowTests
         sql.ShouldNotContain("approval_token");
         sql.ShouldNotContain("idempotency_key");
         sql.ShouldNotContain("input_hash");
+        sql.ShouldNotContain("approval_target");
 
         var page = (await PageAsync(userId, teamId, new PageToolCallsQuery { AgentRunId = runId, Limit = 128 }))!;
         page.Items.Count.ShouldBe(128);

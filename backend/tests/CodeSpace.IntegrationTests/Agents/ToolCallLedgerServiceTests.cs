@@ -89,6 +89,83 @@ public class ToolCallLedgerServiceTests
     }
 
     [Fact]
+    public async Task The_park_stamps_the_preview_and_target_its_card_is_built_from_in_the_same_write_and_the_approval_read_returns_the_preview()
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        const string preview = """{"lines":[{"label":"head","value":"outsider/api:release","outsideRun":true}],"pins":{"expectedHeadSha":"0a1b"}}""";
+
+        using var scope = _fixture.BeginScope();
+        var ledgerId = (await Svc(scope).TryClaimAsync(runId, teamId, "git.merge_pr", Key, InputHash, 0, CancellationToken.None)).LedgerId;
+
+        (await Svc(scope).TryBeginApprovalAsync(ledgerId, teamId, new ToolCallApprovalPark { Token = "tok-preview", DeadlineAt = DateTimeOffset.UtcNow.AddMinutes(10), PreviewJson = preview, Target = "git.merge_pr:target" }, CancellationToken.None)).ShouldBeTrue();
+
+        var row = await ReadRowAsync(ledgerId);
+        (row.Status, row.ApprovalToken, row.ApprovalTarget).ShouldBe((ToolCallLedgerStatus.AwaitingApproval, "tok-preview", "git.merge_pr:target"));
+        JsonDocument.Parse(row.ApprovalPreviewJson.ShouldNotBeNull()).RootElement.GetProperty("pins").GetProperty("expectedHeadSha").GetString().ShouldBe("0a1b");
+        var state = (await Svc(scope).ReadApprovalStateAsync(ledgerId, teamId, CancellationToken.None)).ShouldNotBeNull();
+        JsonDocument.Parse(state.PreviewJson.ShouldNotBeNull()).RootElement.GetProperty("lines")[0].GetProperty("value").GetString().ShouldBe("outsider/api:release", "a re-call re-posts and pins from the row's own preview");
+    }
+
+    [Theory]
+    // how the earlier row on the target ended                     same run   same team   rejected
+    [InlineData("rejected", true, true, true)]
+    [InlineData("expired", true, true, false)]        // nobody answered: not a rejection
+    [InlineData("failed-otherwise", true, true, false)]   // failed for any other reason: not a rejection
+    [InlineData("rejected", false, true, false)]      // another run's rejection is that run's
+    [InlineData("rejected", true, false, false)]      // team-scoped: another team reads nothing
+    public async Task A_target_counts_as_rejected_only_when_a_reviewer_rejected_it_in_the_same_run(string ending, bool sameRun, bool sameTeam, bool rejected)
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        const string target = "git.merge_pr:the-target";
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var ledgerId = (await Svc(scope).TryClaimAsync(runId, teamId, "git.merge_pr", Key, InputHash, 0, CancellationToken.None)).LedgerId;
+            var token = $"tok-{Guid.NewGuid():N}";
+            (await Svc(scope).TryBeginApprovalAsync(ledgerId, teamId, new ToolCallApprovalPark { Token = token, DeadlineAt = DateTimeOffset.UtcNow.AddMinutes(10), Target = target }, CancellationToken.None)).ShouldBeTrue();
+
+            if (ending == "rejected") (await scope.Resolve<IToolCallApprovalResolver>().ResolveByTokenAsync(token, "reject", Guid.NewGuid(), teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
+            else if (ending == "expired") await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.Where(l => l.Id == ledgerId).ExecuteUpdateAsync(u => u.SetProperty(l => l.Status, ToolCallLedgerStatus.Expired).SetProperty(l => l.Error, ToolCallLedgerService.ApprovalExpiredError));   // the reaper's own write, without its deployment-wide sweep
+            else await Svc(scope).RecordTerminalAsync(ledgerId, teamId, ToolCallLedgerStatus.Failed, null, "Couldn't merge PR #7: GitHub returned HTTP 500.", CancellationToken.None);
+        }
+
+        using var read = _fixture.BeginScope();
+        (await Svc(read).WasTargetRejectedAsync(sameRun ? runId : Guid.NewGuid(), sameTeam ? teamId : await SeedTeamAsync(), target, CancellationToken.None)).ShouldBe(rejected);
+    }
+
+    [Theory]
+    // the other row on the target                                   same run   same team   awaiting
+    [InlineData(ToolCallLedgerStatus.AwaitingApproval, false, true, true, true)]
+    [InlineData(ToolCallLedgerStatus.AwaitingApproval, true, true, true, true)]      // approved and not yet run: still before a reviewer's call
+    [InlineData(ToolCallLedgerStatus.Running, true, true, true, false)]              // running: no longer awaiting anyone
+    [InlineData(ToolCallLedgerStatus.Failed, false, true, true, false)]              // settled
+    [InlineData(ToolCallLedgerStatus.AwaitingApproval, false, false, true, false)]   // another run's card is that run's
+    [InlineData(ToolCallLedgerStatus.AwaitingApproval, false, true, false, false)]   // team-scoped: another team reads nothing
+    public async Task A_target_counts_as_awaiting_while_another_call_of_the_run_is_parked_on_it(ToolCallLedgerStatus status, bool approved, bool sameRun, bool sameTeam, bool awaiting)
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+        const string target = "git.merge_pr:the-target";
+        Guid otherId;
+
+        using (var scope = _fixture.BeginScope())
+        {
+            otherId = (await Svc(scope).TryClaimAsync(runId, teamId, "git.merge_pr", Key, InputHash, 0, CancellationToken.None)).LedgerId;
+            (await Svc(scope).TryBeginApprovalAsync(otherId, teamId, new ToolCallApprovalPark { Token = $"tok-{Guid.NewGuid():N}", DeadlineAt = DateTimeOffset.UtcNow.AddMinutes(10), Target = target }, CancellationToken.None)).ShouldBeTrue();
+            await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.Where(l => l.Id == otherId).ExecuteUpdateAsync(u => u.SetProperty(l => l.Status, status).SetProperty(l => l.ApprovedAt, approved ? DateTimeOffset.UtcNow : null));
+        }
+
+        using var read = _fixture.BeginScope();
+        var freshId = Guid.NewGuid();
+
+        (await Svc(read).IsTargetAwaitingApprovalAsync(sameRun ? runId : Guid.NewGuid(), sameTeam ? teamId : await SeedTeamAsync(), target, freshId, CancellationToken.None)).ShouldBe(awaiting);
+        (await Svc(read).IsTargetAwaitingApprovalAsync(runId, teamId, target, otherId, CancellationToken.None)).ShouldBeFalse("a row is never its own sibling");
+        (await Svc(read).ReadApprovalStateAsync(otherId, teamId, CancellationToken.None)).ShouldNotBeNull().ApprovalTarget.ShouldBe(target, "the handler reads the target back to re-check it before an approved call runs");
+    }
+
+    [Fact]
     public async Task Two_concurrent_claims_for_the_same_key_yield_exactly_one_proceed()
     {
         // The TOCTOU proof: two identical claims race the unique index in parallel; the DB serializes them so exactly
@@ -462,7 +539,7 @@ public class ToolCallLedgerServiceTests
         using var scope = _fixture.BeginScope();
         var token = $"tok-{Guid.NewGuid():N}";
 
-        (await Svc(scope).TryBeginApprovalAsync(ledgerId, teamId, token, DateTimeOffset.UtcNow.AddMinutes(10), CancellationToken.None)).ShouldBeTrue();
+        (await Svc(scope).TryBeginApprovalAsync(ledgerId, teamId, new ToolCallApprovalPark { Token = token, DeadlineAt = DateTimeOffset.UtcNow.AddMinutes(10) }, CancellationToken.None)).ShouldBeTrue();
         (await scope.Resolve<IToolCallApprovalResolver>().ResolveByTokenAsync(token, "approve", Guid.NewGuid(), teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
         (await Svc(scope).TryBeginExecutionAsync(ledgerId, teamId, fenceEpoch, CancellationToken.None)).ShouldBeTrue();
     }

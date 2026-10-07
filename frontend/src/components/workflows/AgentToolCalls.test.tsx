@@ -182,6 +182,44 @@ describe("AgentToolCalls", () => {
     expect(screen.getByText(/403 Forbidden: insufficient scope/)).toBeInTheDocument();
   });
 
+  it("shows what a governed call was shown to do on its approval card, flagging a value outside the run", () => {
+    state.toolCalls = [call({
+      toolKind: "git.merge_pr",
+      status: "AwaitingApproval",
+      preview: {
+        lines: [
+          { label: "repository (bound, writable)", value: "acme/api", outsideRun: false },
+          { label: "pull request", value: "#7 Retry safely (Open)", outsideRun: false },
+          { label: "head", value: "outsider/api:release", outsideRun: true },
+          { label: "pinned head commit", value: "0a1b2c3d", outsideRun: false },
+        ],
+        pins: { expectedHeadSha: "0a1b2c3d" },
+      },
+    })];
+
+    render(<AgentToolCalls agentRunId="r1" />);
+
+    const preview = screen.getByLabelText("What this call was shown to do");
+    const rows = Array.from(preview.querySelectorAll(".tc-preview-row")).map((row) => [row.querySelector("dt")?.textContent, row.querySelector(".tc-preview-value")?.textContent]);
+    expect(rows).toEqual([
+      ["repository (bound, writable)", "acme/api"],
+      ["pull request", "#7 Retry safely (Open)"],
+      ["head", "outsider/api:release"],
+      ["pinned head commit", "0a1b2c3d"],
+    ]);
+    const flagged = preview.querySelectorAll("[data-outside]");
+    expect(flagged).toHaveLength(1);
+    expect(flagged[0].textContent).toContain("outside this run's repositories");
+  });
+
+  it("renders no preview for a call that never asked a human", () => {
+    state.toolCalls = [call({ preview: null }), call({ toolKind: "git.post_pr_comment" })];
+
+    render(<AgentToolCalls agentRunId="r1" />);
+
+    expect(screen.queryByLabelText("What this call was shown to do")).toBeNull();
+  });
+
   it("falls back to the agent's actual tool calls when the governed ledger is empty", () => {
     // A Codex / Claude-Code run uses its own harness tools — the governed ledger is empty, but the event stream
     // carries the real ToolCall events. The tab shows those (name + a compact arg preview) rather than "none".

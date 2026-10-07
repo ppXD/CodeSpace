@@ -77,6 +77,8 @@ public class FailureTaxonomyTests
         FailureCodes.WorkflowDefinitionInvalid.ShouldBe("workflow_definition_invalid");
         FailureCodes.TaskRouteConfirmationRequired.ShouldBe("task_route_confirmation_required");
         FailureCodes.WorkspaceUnresolvable.ShouldBe("workspace_unresolvable");
+        FailureCodes.ToolCallNotPreviewable.ShouldBe("tool_call_not_previewable");
+        FailureCodes.PullRequestMoved.ShouldBe("pull_request_moved");
         FailureCodes.RerunAlreadyInProgress.ShouldBe("rerun_already_in_progress");
         FailureCodes.RerunTargetInvalid.ShouldBe("rerun_target_invalid");
         FailureCodes.RerunBlockedUnsupportedNode.ShouldBe("rerun_blocked_unsupported_node");
