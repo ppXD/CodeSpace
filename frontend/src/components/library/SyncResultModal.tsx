@@ -6,15 +6,16 @@ import type { PackSummary, PackSyncResult } from "@/api/packs";
 import { ApiError } from "@/api/request";
 import { defaultSelectedPaths, toRows } from "@/components/agents/packPreview";
 import { PreviewGroup } from "@/components/agents/packPreviewRows";
-import { useImportPack } from "@/hooks/use-packs";
+import { useImportFromPack } from "@/hooks/use-packs";
 
 import { newArtifactCount, syncSummaryLabel } from "./syncView";
 
 /**
  * Sync result modal — shown after re-pulling a pack. The header reports what changed (up to date / updated /
- * new), and any discovered-but-not-imported artifacts are listed for the operator to select and add (committed
- * via the same import path as a first import, so the pack's saved URL + ref drive the commit). A pure-refresh
- * sync with nothing new is a one-line "everything's in sync" with a Done button.
+ * new), and any discovered-but-not-imported artifacts are listed for the operator to select and add — committed into
+ * THIS pack by id, so the server clones the pack's own saved source + ref (a private pack's credential never reaches the
+ * browser, and the add never resolves a different pack). A pure-refresh sync with nothing new is a one-line
+ * "everything's in sync" with a Done button.
  */
 export function SyncResultModal({ pack, result, onClose }: { pack: PackSummary; result: PackSyncResult; onClose: () => void }) {
   const rows = toRows(result.newArtifacts);
@@ -23,7 +24,7 @@ export function SyncResultModal({ pack, result, onClose }: { pack: PackSummary; 
   const hasNew = newArtifactCount(result) > 0;
 
   const [selected, setSelected] = useState<Set<string>>(() => new Set(defaultSelectedPaths(result.newArtifacts)));
-  const importPack = useImportPack();
+  const importPack = useImportFromPack();
 
   // While an add is committing, dismissal is blocked so a partial-failure error can't be lost with the modal.
   const dismiss = () => { if (!importPack.isPending) onClose(); };
@@ -43,7 +44,7 @@ export function SyncResultModal({ pack, result, onClose }: { pack: PackSummary; 
   }
 
   function add() {
-    importPack.mutate({ url: pack.url ?? "", reference: result.reference ?? "", sourcePaths: [...selected] }, { onSuccess: onClose });
+    importPack.mutate({ packId: pack.id, sourcePaths: [...selected] }, { onSuccess: onClose });
   }
 
   const importErr = importPack.error instanceof ApiError ? importPack.error.message : importPack.error ? "Couldn't add the selected artifacts." : null;

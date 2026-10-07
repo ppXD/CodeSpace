@@ -18,4 +18,7 @@ public interface IPackImportService
 
     /// <summary>Re-pull the pack <paramref name="packId"/> from its saved source: refresh every already-imported artifact in place (kept handles) and return what changed plus the discovered-but-not-imported artifacts as a preview to add.</summary>
     Task<PackSyncResult> SyncAsync(Guid teamId, Guid packId, Guid actorUserId, CancellationToken cancellationToken);
+
+    /// <summary>Re-clone the pack <paramref name="packId"/> from its saved source at its saved ref and persist exactly the chosen <paramref name="sourcePaths"/> into THAT pack — the add-new step after a Sync. The pack is never resolved again by URL, so a private pack (whose stored URL cannot clone) and a legacy duplicate both import into themselves. Returns a per-path outcome.</summary>
+    Task<PackImportResult> ImportFromPackAsync(Guid teamId, Guid packId, IReadOnlyList<string> sourcePaths, Guid actorUserId, CancellationToken cancellationToken);
 }

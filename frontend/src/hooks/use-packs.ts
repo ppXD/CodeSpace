@@ -1,4 +1,4 @@
-import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { keepPreviousData, type QueryClient, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 
 import { packsApi, type PackArtifactKind } from "@/api/packs";
 
@@ -52,19 +52,31 @@ export function usePreviewPack() {
   });
 }
 
+/**
+ * An import creates/updates a pack AND its artifacts — refresh the packs rail + every pack detail (the just-imported
+ * pack is on the Library page the user is looking at), the paged artifact lists, and the agents library.
+ */
+function invalidateImported(queryClient: QueryClient) {
+  queryClient.invalidateQueries({ queryKey: ["packs"] });
+  queryClient.invalidateQueries({ queryKey: ["pack"] });
+  queryClient.invalidateQueries({ queryKey: ["pack-artifacts"] });
+  queryClient.invalidateQueries({ queryKey: ["agents"] });
+}
+
 export function useImportPack() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ url, reference, sourcePaths }: { url: string; reference: string; sourcePaths: string[] }) => packsApi.importFromUrl(url, reference, sourcePaths),
-    onSuccess: () => {
-      // An import creates/updates a pack AND its artifacts — refresh the packs rail + every pack detail
-      // (the just-imported pack is on the Library page the user is looking at), the paged artifact lists, and
-      // the agents library.
-      queryClient.invalidateQueries({ queryKey: ["packs"] });
-      queryClient.invalidateQueries({ queryKey: ["pack"] });
-      queryClient.invalidateQueries({ queryKey: ["pack-artifacts"] });
-      queryClient.invalidateQueries({ queryKey: ["agents"] });
-    },
+    onSuccess: () => invalidateImported(queryClient),
+  });
+}
+
+/** Add the artifacts a sync discovered to the pack it synced — cloned server-side from that pack's saved source, so no URL is sent. */
+export function useImportFromPack() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ packId, sourcePaths }: { packId: string; sourcePaths: string[] }) => packsApi.importFromPack(packId, sourcePaths),
+    onSuccess: () => invalidateImported(queryClient),
   });
 }
 

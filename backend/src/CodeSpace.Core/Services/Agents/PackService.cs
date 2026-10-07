@@ -101,12 +101,13 @@ public sealed class PackService : IPackService, IScopedDependency
         return rows.ToDictionary(r => r.PackId, r => r.Count);
     }
 
-    private static PackSummary ToSummary(Persistence.Entities.Pack pack, int agentCount, int skillCount) => new()
+    /// <summary>The read model every team member — Viewers included — receives. The URL is stripped of userinfo even though the writer already stores it clean: a legacy row the clone-URL backfill has not sealed yet still holds its token, and this closes the API the moment the code deploys. Internal so it is unit-pinned.</summary>
+    internal static PackSummary ToSummary(Persistence.Entities.Pack pack, int agentCount, int skillCount) => new()
     {
         Id = pack.Id,
         Kind = pack.Kind,
         Name = pack.Name,
-        Url = pack.Url,
+        Url = pack.Url is null ? null : PackCloneUrlProtector.WithoutCredential(pack.Url),
         Reference = pack.Reference,
         LastSyncedSha = pack.LastSyncedSha,
         LastSyncedDate = pack.LastSyncedDate,

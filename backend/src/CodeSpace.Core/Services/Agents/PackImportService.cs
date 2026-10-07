@@ -18,12 +18,14 @@ public sealed partial class PackImportService : IPackImportService, IScopedDepen
     private readonly IPackSourceFetcher _fetcher;
     private readonly IPackSourceWalker _walker;
     private readonly CodeSpaceDbContext _db;
+    private readonly IPackCloneUrlProtector _protector;
 
-    public PackImportService(IPackSourceFetcher fetcher, IPackSourceWalker walker, CodeSpaceDbContext db)
+    public PackImportService(IPackSourceFetcher fetcher, IPackSourceWalker walker, CodeSpaceDbContext db, IPackCloneUrlProtector protector)
     {
         _fetcher = fetcher;
         _walker = walker;
         _db = db;
+        _protector = protector;
     }
 
     public async Task<PackPreview> PreviewFromUrlAsync(string url, string? reference, Guid teamId, CancellationToken cancellationToken)

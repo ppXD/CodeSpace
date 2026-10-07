@@ -143,4 +143,11 @@ export const packsApi = {
   /** Re-pull a pack from its saved source — refresh its imported artifacts, return what changed + the new ones. */
   sync: (packId: string) =>
     fetchJson<PackSyncResult>(`/api/packs/${packId}/sync`, { method: "POST" }),
+
+  /**
+   * Add the selected artifacts a sync discovered to that same pack. The server clones the pack's own saved source + ref
+   * (a private pack's credential never leaves the server), so the body carries only the selection — never a URL.
+   */
+  importFromPack: (packId: string, sourcePaths: string[]) =>
+    fetchJson<PackImportResult>(`/api/packs/${packId}/import`, { method: "POST", body: JSON.stringify({ sourcePaths }) }),
 };

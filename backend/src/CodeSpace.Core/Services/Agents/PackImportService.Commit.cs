@@ -13,6 +13,10 @@ namespace CodeSpace.Core.Services.Agents;
 /// duplicates. Agent + skill row-writing is the import concern's own logic; slug derivation reuses
 /// <see cref="AgentDefinitionService.DeriveSlug"/>.
 ///
+/// <para>The pack stores the URL without its credential; a pasted token is kept only sealed
+/// (<see cref="IPackCloneUrlProtector"/>), and the add-after-sync path imports by pack id from that sealed source,
+/// never by resolving a URL again.</para>
+///
 /// <para>ATOMIC by design — the whole import is ONE <c>SaveChangesAsync</c> inside the command's ambient
 /// transaction (<c>TransactionalBehavior</c>). Known handle collisions are decided IN MEMORY before the save
 /// (a handle that already belongs to a DIFFERENT active definition, or a second artifact in the same pack that
@@ -29,7 +33,7 @@ public sealed partial class PackImportService
 {
     public async Task<PackImportResult> ImportFromUrlAsync(string url, string? reference, IReadOnlyList<string> sourcePaths, Guid teamId, Guid actorUserId, CancellationToken cancellationToken)
     {
-        var selected = sourcePaths.Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).ToList();
+        var selected = NormalizeSelection(sourcePaths);
 
         // Nothing selected → a clean no-op: never clone or touch a Pack for an empty commit.
         if (selected.Count == 0) return new PackImportResult { PackId = Guid.Empty, Items = Array.Empty<PackArtifactImportResult>() };
@@ -38,8 +42,38 @@ public sealed partial class PackImportService
 
         var discovered = await _walker.WalkAsync(checkout.Directory, cancellationToken).ConfigureAwait(false);
 
+        // The pasted URL is what cloned; the pack stores it without its credential and keeps the original sealed.
+        var source = _protector.Seal(url);
         var now = DateTimeOffset.UtcNow;
-        var (pack, packIsNew) = await ResolvePackTargetAsync(url, reference, teamId, actorUserId, now, cancellationToken).ConfigureAwait(false);
+        var (pack, packIsNew) = await ResolvePackTargetAsync(source.Url, reference, teamId, actorUserId, now, cancellationToken).ConfigureAwait(false);
+
+        return await LandSelectionAsync(new ImportTarget(pack, packIsNew, reference, source, actorUserId, now), discovered, selected, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<PackImportResult> ImportFromPackAsync(Guid teamId, Guid packId, IReadOnlyList<string> sourcePaths, Guid actorUserId, CancellationToken cancellationToken)
+    {
+        var selected = NormalizeSelection(sourcePaths);
+
+        var pack = await LoadRemotePackAsync(teamId, packId, cancellationToken).ConfigureAwait(false);
+
+        if (selected.Count == 0) return new PackImportResult { PackId = pack.Id, Items = Array.Empty<PackArtifactImportResult>() };
+
+        using var checkout = await _fetcher.FetchAsync(_protector.CloneUrlOf(pack), pack.Reference, cancellationToken).ConfigureAwait(false);
+
+        var discovered = await _walker.WalkAsync(checkout.Directory, cancellationToken).ConfigureAwait(false);
+
+        // The pack's own source and ref cloned, so they are recorded unchanged.
+        return await LandSelectionAsync(new ImportTarget(pack, IsNew: false, pack.Reference, (pack.Url!, pack.EncryptedCloneUrl), actorUserId, DateTimeOffset.UtcNow), discovered, selected, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The selection as a distinct, ordinal-sorted list — the order every import upserts in.</summary>
+    private static List<string> NormalizeSelection(IReadOnlyList<string> sourcePaths) =>
+        sourcePaths.Distinct(StringComparer.Ordinal).OrderBy(p => p, StringComparer.Ordinal).ToList();
+
+    /// <summary>Upsert each selected artifact of <paramref name="discovered"/> into the target pack on its (pack, source-path) sync identity and, when at least one landed, stage the pack write and the declared-skill bindings and save once.</summary>
+    private async Task<PackImportResult> LandSelectionAsync(ImportTarget target, DiscoveredPack discovered, IReadOnlyList<string> selected, CancellationToken cancellationToken)
+    {
+        var (pack, teamId, actorUserId, now) = (target.Pack, target.Pack.TeamId, target.ActorUserId, target.Now);
 
         var agentsByPath = IndexByPath(discovered.Agents, a => a.SourcePath);
         var skillsByPath = IndexByPath(discovered.Skills, s => s.SourcePath);
@@ -49,8 +83,8 @@ public sealed partial class PackImportService
         // never picked up here — otherwise the lookup would match that live bench agent and the upsert would take the
         // UPDATE branch, clobbering its content (and creating no snapshot) instead of adding a fresh Store snapshot
         // beside it. A brand-new pack has none yet, so skip the lookup.
-        var existingAgents = packIsNew ? EmptyByPath<AgentDefinition>() : await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == pack.Id && a.Scope == DefinitionScope.Store && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
-        var existingSkills = packIsNew ? EmptyByPath<SkillDefinition>() : await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == pack.Id && s.Scope == DefinitionScope.Store && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
+        var existingAgents = target.IsNew ? EmptyByPath<AgentDefinition>() : await ExistingByPathAsync(_db.AgentDefinition.Where(a => a.PackId == pack.Id && a.Scope == DefinitionScope.Store && a.DeletedDate == null), a => a.SourcePath!, cancellationToken).ConfigureAwait(false);
+        var existingSkills = target.IsNew ? EmptyByPath<SkillDefinition>() : await ExistingByPathAsync(_db.SkillDefinition.Where(s => s.PackId == pack.Id && s.Scope == DefinitionScope.Store && s.DeletedDate == null), s => s.SourcePath!, cancellationToken).ConfigureAwait(false);
 
         // Skill handles → id, loaded once and EXTENDED in memory as new skills are added this batch, so an imported
         // agent's declared skills resolve against this map (existing + same-batch). Store snapshots are no longer
@@ -80,11 +114,14 @@ public sealed partial class PackImportService
         }
 
         // Only create/touch the Pack when something actually landed — an all-Skipped/all-Failed selection leaves
-        // no phantom library and no misleading sync timestamp.
+        // no phantom library, no misleading sync timestamp, and no changed clone source (the command's transaction
+        // saves every tracked change, so nothing may be staged on the pack before this point).
         if (!items.Any(i => i.Outcome is PackImportOutcome.Imported or PackImportOutcome.Updated))
-            return new PackImportResult { PackId = packIsNew ? Guid.Empty : pack.Id, Items = items };
+            return new PackImportResult { PackId = target.IsNew ? Guid.Empty : pack.Id, Items = items };
 
-        PersistPackSync(pack, packIsNew, reference, actorUserId, now);
+        PersistPackSync(target);
+
+        RecordCloneSource(target);
 
         BindDeclaredSkills(newAgentSkills, skillSlugToId, actorUserId, now);
 
@@ -93,10 +130,10 @@ public sealed partial class PackImportService
         return new PackImportResult { PackId = pack.Id, Items = items };
     }
 
-    /// <summary>Resolve the team's active pack for this source (one per team+url+subpath, per the unique index), or build a NEW unsaved one. Read-only: neither mutates nor adds — the actual write is deferred to <see cref="PersistPackSync"/> so a no-op commit never touches a pack. The URL flow has no subpath (the whole repo).</summary>
+    /// <summary>Resolve the team's active pack for this source (<see cref="FindSourcePackAsync"/>), or build a NEW unsaved one. <paramref name="url"/> is the credential-free URL, so a re-paste with a rotated token resolves to the SAME pack, and a legacy duplicate is never the match (a new import lands on the pack holding the source). Read-only: neither mutates nor adds — the actual write is deferred to <see cref="PersistPackSync"/> and <see cref="RecordCloneSource"/> so a no-op commit never touches a pack. The URL flow has no subpath (the whole repo).</summary>
     private async Task<(Pack Pack, bool IsNew)> ResolvePackTargetAsync(string url, string? reference, Guid teamId, Guid actorUserId, DateTimeOffset now, CancellationToken cancellationToken)
     {
-        var existing = await _db.Pack.SingleOrDefaultAsync(p => p.TeamId == teamId && p.Url == url && p.Subpath == null && p.DeletedDate == null, cancellationToken).ConfigureAwait(false);
+        var existing = await FindSourcePackAsync(teamId, url, cancellationToken).ConfigureAwait(false);
 
         if (existing != null) return (existing, false);
 
@@ -118,20 +155,43 @@ public sealed partial class PackImportService
         return (pack, true);
     }
 
-    /// <summary>Stage the pack write that accompanies a non-empty import: add the new pack, or refresh the existing pack's ref + sync timestamp. Flushed by the single import save alongside the artifact rows.</summary>
-    private void PersistPackSync(Pack pack, bool isNew, string? reference, Guid actorUserId, DateTimeOffset now)
+    /// <summary>
+    /// The team's active pack holding <paramref name="url"/> (credential-free) as its source: the one stored under it, else the
+    /// oldest whose URL is it plus a pasted credential — a row the clone-URL backfill has not sealed yet. A re-paste of the same
+    /// or a rotated token lands in that row and seals it (<see cref="RecordCloneSource"/>) instead of creating a pack the
+    /// backfill would then make the row's holder. The stored match wins, since sealing an unsealed fork beside it would collide
+    /// on the source index; oldest-first is the order the backfill picks a holder in. '@' is the backfill's own sound prefilter.
+    /// </summary>
+    private async Task<Pack?> FindSourcePackAsync(Guid teamId, string url, CancellationToken cancellationToken)
     {
-        if (isNew)
+        var candidates = await _db.Pack
+            .Where(p => p.TeamId == teamId && p.Subpath == null && p.DuplicateOfPackId == null && p.DeletedDate == null && (p.Url == url || p.Url!.Contains("@")))
+            .OrderBy(p => p.CreatedDate).ThenBy(p => p.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return candidates.FirstOrDefault(p => p.Url == url) ?? candidates.FirstOrDefault(p => PackCloneUrlProtector.WithoutCredential(p.Url!) == url);
+    }
+
+    /// <summary>Stage the pack write that accompanies a non-empty import: add the new pack, or refresh the existing pack's ref + sync timestamp. Flushed by the single import save alongside the artifact rows.</summary>
+    private void PersistPackSync(ImportTarget target)
+    {
+        if (target.IsNew)
         {
-            _db.Pack.Add(pack);
+            _db.Pack.Add(target.Pack);
             return;
         }
 
-        pack.Reference = reference;
-        pack.LastSyncedDate = now;
-        pack.LastModifiedDate = now;
-        pack.LastModifiedBy = actorUserId;
+        target.Pack.Reference = target.Reference;
+        target.Pack.LastSyncedDate = target.Now;
+        target.Pack.LastModifiedDate = target.Now;
+        target.Pack.LastModifiedBy = target.ActorUserId;
     }
+
+    /// <summary>The pack's source is the URL its last successful import cloned: a tokened paste replaces the sealed credential (a rotated token), a clean paste that cloned clears it (the repository was readable without one), and an unsealed legacy row it landed in gets its credential-free URL.</summary>
+    private static void RecordCloneSource(ImportTarget target) => (target.Pack.Url, target.Pack.EncryptedCloneUrl) = target.Source;
+
+    /// <summary>Where and as whom a selection lands: the resolved pack (new or existing), the ref and source (the credential-free URL and the sealed one) that cloned it, the actor, and the import's timestamp.</summary>
+    private sealed record ImportTarget(Pack Pack, bool IsNew, string? Reference, (string Url, string? EncryptedCloneUrl) Source, Guid ActorUserId, DateTimeOffset Now);
 
     private PackArtifactImportResult UpsertAgent(Pack pack, ParsedAgentDefinition parsed, IReadOnlyDictionary<string, AgentDefinition> existingByPath, Guid teamId, Guid actorUserId, DateTimeOffset now)
     {

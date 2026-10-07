@@ -13,12 +13,16 @@ internal sealed class GitTestRemoteServer : IDisposable
     private readonly CancellationTokenSource _stopping = new();
     private readonly List<Task> _requests = new();
     private Task? _accept;
+    private readonly string? _requiredAuthorization;
     public string Root { get; }
     public string Url { get; private set; } = "";
 
-    public GitTestRemoteServer(string root)
+    /// <param name="root">The directory served as <c>GIT_PROJECT_ROOT</c>.</param>
+    /// <param name="requiredBasicCredential">When set (<c>user:password</c>), every request — a clone or fetch included — must present it as Basic auth or is answered 401: a private remote, so a read that succeeds proves the credential authenticated. Null (the default) serves anonymously.</param>
+    public GitTestRemoteServer(string root, string? requiredBasicCredential = null)
     {
         Root = root;
+        _requiredAuthorization = requiredBasicCredential is null ? null : "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes(requiredBasicCredential));
         // Reserve an ephemeral loopback port; retry binding only if another process won the close/bind race.
         for (var attempt = 0; ; attempt++)
         {
@@ -57,6 +61,12 @@ internal sealed class GitTestRemoteServer : IDisposable
         {
             using var input = new MemoryStream();
             await context.Request.InputStream.CopyToAsync(input, _stopping.Token);
+            if (_requiredAuthorization is not null && !string.Equals(context.Request.Headers["Authorization"], _requiredAuthorization, StringComparison.Ordinal))
+            {
+                context.Response.StatusCode = 401;
+                context.Response.Headers["WWW-Authenticate"] = "Basic realm=\"fixture\"";
+                return;
+            }
             var info = StartInfo(Root, new[] { "http-backend" });
             info.RedirectStandardInput = true;
             info.Environment["GIT_PROJECT_ROOT"] = Root;

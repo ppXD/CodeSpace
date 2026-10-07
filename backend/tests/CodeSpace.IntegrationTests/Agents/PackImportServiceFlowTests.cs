@@ -50,7 +50,8 @@ public class PackImportServiceFlowTests
                 var service = new PackImportService(
                     new PackCloneFetcher(new AllowAll(), scope.Resolve<ISandboxRunnerRegistry>(), NullLogger<PackCloneFetcher>.Instance),
                     scope.Resolve<IPackSourceWalker>(),
-                    scope.Resolve<CodeSpaceDbContext>());
+                    scope.Resolve<CodeSpaceDbContext>(),
+                    scope.Resolve<IPackCloneUrlProtector>());
 
                 preview = await service.PreviewFromUrlAsync(src, reference: null, teamId, CancellationToken.None);
             }
