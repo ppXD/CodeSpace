@@ -31,6 +31,13 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// resumed pass re-derives and RE-INTEGRATES against then-current facts (the human may have pushed a fix or a
 /// reconciled branch), so an approve after a repair lands the Clean candidate; a still-conflicted retry
 /// completes honestly with the review trail on its outputs — one park per run, never a loop.</para>
+///
+/// <para>The node owns the NARRATIVE of its own outcome. Every pass — clean, conflicted, skipped, resumed — emits
+/// <c>summary</c> (<see cref="RunIntegrationSummary"/>: what actually landed, what conflicted and where its work is
+/// kept) and <c>withheld</c> (<see cref="RunIntegrationContributions.Withheld"/>: the units the head gate kept off the
+/// candidate because their own definition-of-done rejected them — dropped BEFORE integration, so in no outcome).
+/// The plan-map synth is handed the summary: before it, the reduce narrated a partial integration as a whole
+/// deliverable, because <c>appliedCount</c> / <c>conflicts</c> / <c>reason</c> reached nothing it reads.</para>
 /// </summary>
 public sealed class GitIntegrateRunNode : INodeRuntime
 {
@@ -79,7 +86,7 @@ public sealed class GitIntegrateRunNode : INodeRuntime
               "required": ["repositoryId"]
             }
             """),
-        OutputSchema = SchemaBuilder.Parse("""
+        OutputSchema = SchemaBuilder.Parse($$"""
             {
               "type": "object",
               "properties": {
@@ -87,7 +94,12 @@ public sealed class GitIntegrateRunNode : INodeRuntime
                 "integratedBranch": { "type": ["string","null"] },
                 "appliedCount": { "type": "integer" },
                 "reason": { "type": ["string","null"] },
-                "conflicts": { "type": "array" }
+                "conflicts": { "type": "array" },
+                "summary": { "type": "string", "maxLength": {{RunIntegrationSummary.MaxChars}}, "description": "One account of what actually landed on the integrated branch, what conflicted or was skipped (and where its work is kept), and what was withheld — produced on every pass, and read by the plan-map synth." },
+                "withheld": { "type": "array", "items": { "type": "object", "properties": { "label": { "type": "string" }, "reason": { "type": "string" } } }, "description": "The units kept off the candidate BEFORE integration because their own acceptance check failed or was waived — in no other output. Empty when nothing was withheld." },
+                "reviewApproved": { "type": "boolean", "description": "Resumed pass only: the human's verdict on the parked conflict." },
+                "reviewComment": { "type": "string", "description": "Resumed pass only: the reviewer's comment." },
+                "reviewedBy": { "type": "string", "description": "Resumed pass only: who reviewed the parked conflict." }
               }
             }
             """)
@@ -102,9 +114,10 @@ public sealed class GitIntegrateRunNode : INodeRuntime
         var manifests = await _manifests.ListForWorkflowRunAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var agentWork = await LoadAgentWorkAsync(runId, teamId, cancellationToken).ConfigureAwait(false);
         var contributions = RunIntegrationContributions.Build(repoId, manifests, agentWork);
+        var withheld = RunIntegrationContributions.Withheld(repoId, manifests, agentWork);
 
         if (contributions.Count == 0)
-            return NodeResult.Ok(SkippedOutputs("the run produced no integrable work for this repository"));
+            return NodeResult.Ok(SkippedOutputs("the run produced no integrable work for this repository", withheld));
 
         // The ancestor-most base, not the first contribution's: a withheld producer is dropped from the contributions
         // while its manifest row survives, so the run's root lives in the ledger even when the surviving contributions
@@ -112,7 +125,7 @@ public sealed class GitIntegrateRunNode : INodeRuntime
         var baseSha = IntegrationBaseAnchor.Resolve(manifests, repoId, contributions.Select(c => c.BaseSha).FirstOrDefault(sha => !string.IsNullOrEmpty(sha)));
 
         if (string.IsNullOrEmpty(baseSha))
-            return NodeResult.Ok(SkippedOutputs("the produced work recorded no base revision to integrate from"));
+            return NodeResult.Ok(SkippedOutputs("the produced work recorded no base revision to integrate from", withheld));
 
         WorkspaceRequest? workspace;
         try
@@ -165,7 +178,7 @@ public sealed class GitIntegrateRunNode : INodeRuntime
 
         context.Logger.LogInformation("git.integrate_run on repo {RepoId}: {Status} ({Applied}/{Total} applied)", repoId, result.Status, result.AppliedCount, contributions.Count);
 
-        var outputs = GitIntegrateNode.ProjectOutputs(result);
+        var outputs = WithNarrative(GitIntegrateNode.ProjectOutputs(result), RunIntegrationSummary.ForResult(result, withheld), withheld);
 
         // The review trail rides the outputs on the resumed pass — who looked, what they said — so the terminal
         // (and any downstream consumer) sees the conflict was REVIEWED, never silently narrated past.
@@ -219,14 +232,28 @@ public sealed class GitIntegrateRunNode : INodeRuntime
         .Select(r => new RunAgentWork(r.Id, r.NodeId, r.IterationKey, r.CreatedDate, r.ResultJson, r.TaskJson))
         .ToList();
 
-    private static Dictionary<string, JsonElement> SkippedOutputs(string reason) => new()
+    private static Dictionary<string, JsonElement> SkippedOutputs(string reason, IReadOnlyList<WithheldContribution> withheld)
     {
-        ["status"] = JsonSerializer.SerializeToElement("Skipped"),
-        ["integratedBranch"] = JsonSerializer.SerializeToElement((string?)null),
-        ["appliedCount"] = JsonSerializer.SerializeToElement(0),
-        ["reason"] = JsonSerializer.SerializeToElement(reason),
-        ["conflicts"] = JsonSerializer.SerializeToElement(Array.Empty<object>()),
-    };
+        var outputs = new Dictionary<string, JsonElement>
+        {
+            ["status"] = JsonSerializer.SerializeToElement("Skipped"),
+            ["integratedBranch"] = JsonSerializer.SerializeToElement((string?)null),
+            ["appliedCount"] = JsonSerializer.SerializeToElement(0),
+            ["reason"] = JsonSerializer.SerializeToElement(reason),
+            ["conflicts"] = JsonSerializer.SerializeToElement(Array.Empty<object>()),
+        };
+
+        return WithNarrative(outputs, RunIntegrationSummary.ForSkipped(reason, withheld), withheld);
+    }
+
+    /// <summary>The outcome's prose and the units kept off the candidate, added to EVERY pass's outputs — the one seam, so no arm (clean, conflicted, skipped, resumed) can omit what the synth reads.</summary>
+    private static Dictionary<string, JsonElement> WithNarrative(Dictionary<string, JsonElement> outputs, string summary, IReadOnlyList<WithheldContribution> withheld)
+    {
+        outputs["summary"] = JsonSerializer.SerializeToElement(summary);
+        outputs["withheld"] = JsonSerializer.SerializeToElement(withheld.Select(w => new { label = w.Label, reason = w.Reason }));
+
+        return outputs;
+    }
 
     private static bool TryReadGuid(NodeRunContext context, string key, out Guid id)
     {

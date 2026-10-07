@@ -48,14 +48,7 @@ public static class RunIntegrationContributions
 {
     public static IReadOnlyList<BranchContribution> Build(Guid repositoryId, IReadOnlyList<PublishManifest> manifests, IReadOnlyList<RunAgentWork> agentWork)
     {
-        var workByRunId = agentWork.ToDictionary(w => w.AgentRunId);
-
-        var produced = manifests
-            .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId is not null && m.RepositoryId == repositoryId && m.PublishStateValue != PublishState.None)
-            .Where(m => !IsWithheldFromHead(m))
-            .Select(m => (Manifest: m, Work: workByRunId.GetValueOrDefault(m.AgentRunId!.Value)))
-            .Where(pair => pair.Work is not null)
-            .Select(pair => (pair.Manifest, Work: pair.Work!));
+        var produced = ProducedRows(repositoryId, manifests, agentWork).Where(pair => !IsWithheldFromHead(pair.Manifest));
 
         return LatestAttemptPerUnit(produced)
             .OrderBy(pair => pair.Work.CreatedDate).ThenBy(pair => pair.Work.AgentRunId)
@@ -70,6 +63,56 @@ public static class RunIntegrationContributions
             })
             .ToList();
     }
+
+    /// <summary>
+    /// The other face of <see cref="IsWithheldFromHead"/>: the units the head gate kept OUT of <see cref="Build"/>'s
+    /// contributions, reported instead of discarded. A withheld unit reaches no integrator outcome at all — it is
+    /// dropped before integration — so without this an outcome that reads <c>Clean</c> over the survivors is
+    /// indistinguishable from a run that integrated everything it produced, and whoever narrates it (the plan-map synth)
+    /// calls a partial deliverable whole.
+    ///
+    /// <para>A unit is withheld only when NONE of its work landed. A retry respawns a fresh agent run, so a unit whose
+    /// first attempt flunked and whose second passed has both rows in the ledger — and its work is on the candidate;
+    /// naming the flunked attempt would tell the reader that delivered work was not. "Did it land" is asked on the same
+    /// unit the contribution reduction uses: the (node, iteration) cell where the cell IS the unit, the attempt itself
+    /// in the supervisor lane, where the cell is a turn shared by K concurrent deliverables and a peer that landed must
+    /// not hide the one that was withheld. One entry per unit, at its latest attempt's verdict, in agent-run creation
+    /// order — the same total order <see cref="Build"/> applies, so the report repeats across builds.</para>
+    /// </summary>
+    public static IReadOnlyList<WithheldContribution> Withheld(Guid repositoryId, IReadOnlyList<PublishManifest> manifests, IReadOnlyList<RunAgentWork> agentWork)
+    {
+        var produced = ProducedRows(repositoryId, manifests, agentWork).ToList();
+        var landed = LatestAttemptPerUnit(produced.Where(pair => !IsWithheldFromHead(pair.Manifest))).Select(pair => UnitKey(pair.Work)).ToHashSet();
+
+        return produced
+            .Where(pair => IsWithheldFromHead(pair.Manifest) && !landed.Contains(UnitKey(pair.Work)))
+            .GroupBy(pair => UnitKey(pair.Work))
+            .Select(LatestRowOfUnit)
+            .OrderBy(pair => pair.Work.CreatedDate).ThenBy(pair => pair.Work.AgentRunId)
+            .Select(pair => new WithheldContribution(UnitLabel(pair.Work), $"acceptance {pair.Manifest.AcceptanceState}"))
+            .ToList();
+    }
+
+    /// <summary>Every row this repository's agents PRODUCED — Agent-kind, in this repository, carrying something (a None-state row left no trace), and joined to the agent-run row that holds its result bytes. Before any verdict is applied: <see cref="Build"/> drops the withheld ones, <see cref="Withheld"/> reports them.</summary>
+    private static IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> ProducedRows(Guid repositoryId, IReadOnlyList<PublishManifest> manifests, IReadOnlyList<RunAgentWork> agentWork)
+    {
+        var workByRunId = agentWork.ToDictionary(w => w.AgentRunId);
+
+        return manifests
+            .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId is not null && m.RepositoryId == repositoryId && m.PublishStateValue != PublishState.None)
+            .Select(m => (Manifest: m, Work: workByRunId.GetValueOrDefault(m.AgentRunId!.Value)))
+            .Where(pair => pair.Work is not null)
+            .Select(pair => (pair.Manifest, Work: pair.Work!));
+    }
+
+    /// <summary>The unit's newest row — by agent-run creation, then id, then alias — so the pick is total and repeats across builds (the order <see cref="KeepLatestAttempt"/> uses, plus the alias tie-break between one attempt's own sibling rows).</summary>
+    private static (PublishManifest Manifest, RunAgentWork Work) LatestRowOfUnit(IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> unit) =>
+        unit.OrderBy(pair => pair.Work.CreatedDate).ThenBy(pair => pair.Work.AgentRunId).ThenBy(pair => pair.Manifest.RepositoryAlias, StringComparer.Ordinal).Last();
+
+    private static string UnitLabel(RunAgentWork work) => AgentAcceptanceContract.UnitId(work.NodeId, work.IterationKey ?? "");
+
+    /// <summary>What "this unit" means when asking whether it landed: its <see cref="UnitLabel"/> where the cell is the unit, the agent run itself where it is not (the fence <see cref="LatestAttemptPerUnit"/> applies).</summary>
+    private static string UnitKey(RunAgentWork work) => CellIsTheUnit(work.TaskJson) ? UnitLabel(work) : work.AgentRunId.ToString("N");
 
     /// <summary>
     /// "This unit's work is WITHHELD from the reviewable head" — the ledger-row analogue of the supervisor lane's

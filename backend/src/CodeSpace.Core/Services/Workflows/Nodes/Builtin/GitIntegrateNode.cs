@@ -156,11 +156,13 @@ public sealed class GitIntegrateNode : INodeRuntime
         ["appliedCount"] = JsonSerializer.SerializeToElement(result.AppliedCount),
         ["reason"] = JsonSerializer.SerializeToElement(result.Reason),
         ["conflicts"] = JsonSerializer.SerializeToElement(
-            result.Outcomes
-                .Where(o => o.Disposition != ContributionDisposition.Applied)
-                .OrderBy(o => o.Skipped)
+            NotApplied(result)
                 .Select(o => new { label = o.Label, disposition = o.Disposition.ToString(), reason = o.Reason, conflictedFiles = o.ConflictedFiles, fallbackBranch = o.FallbackBranch, skipped = o.Skipped })),
     };
+
+    /// <summary>The outcomes that did NOT apply, a real failure before a bystander (stable — ties keep outcome order). The one ordering <c>conflicts[]</c> above and <c>git.integrate_run</c>'s prose summary both read, so what a reader is told first never depends on which of the two it reads.</summary>
+    internal static IEnumerable<ContributionOutcome> NotApplied(IntegrationResult result) =>
+        result.Outcomes.Where(o => o.Disposition != ContributionDisposition.Applied).OrderBy(o => o.Skipped);
 
     private static IReadOnlyList<BranchContribution> ReadContributions(NodeRunContext context)
     {

@@ -303,6 +303,191 @@ public class GitIntegrateRunNodeFlowTests
         integrator.LastRequest.Contributions.Select(c => c.Patch).ShouldBe(new[] { "diff-alpha", "diff-beta" }, customMessage: "and each sibling's own bytes reach the integrator");
     }
 
+    // ─── The run's own account of the integration: the text the plan-map synth is handed ───
+    //
+    // The integrate node owns the narrative. Its outputs already said `status` / `appliedCount` / `conflicts`, but a
+    // reader of those could not tell a run that integrated everything from one that integrated everything EXCEPT the
+    // unit its own definition-of-done rejected — that unit is dropped before the integrator sees it and appears in no
+    // outcome. `summary` states what landed; `withheld` names what was kept off the candidate on purpose. Both ride
+    // EVERY pass (clean, conflicted, skipped, resumed), and every key the node emits is one its OutputSchema declares.
+
+    [Fact]
+    public async Task A_clean_integration_tells_the_reader_what_landed_and_where()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#0", minutesAgo: 9, branch: "codespace/agent/a");
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#1", minutesAgo: 3, branch: "codespace/agent/b");
+
+        using var scope = _fixture.BeginScope();
+        var node = NodeOver(scope, new RecordingIntegrator { Result = CleanResult(runId, "agent#map#0", "agent#map#1") });
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None);
+
+        result.Outputs["summary"].GetString().ShouldBe($"Integration: 2 contribution(s) landed on codespace/integration/{runId:N}.");
+        result.Outputs["withheld"].GetArrayLength().ShouldBe(0, "nothing was withheld ⇒ an empty array, present on every pass");
+        EveryEmittedOutputIsDeclared(node, result);
+    }
+
+    [Fact]
+    public async Task A_conflicted_integration_says_nothing_landed_and_names_what_did_not()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#0", minutesAgo: 9, branch: "codespace/agent/a");
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#1", minutesAgo: 3, branch: "codespace/agent/b");
+
+        using var scope = _fixture.BeginScope();
+        var node = NodeOver(scope, new RecordingIntegrator { Result = ConflictedResult() });
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success, "without the park opt-in a conflict is a routable outcome");
+        result.Outputs["summary"].GetString().ShouldBe(
+            "Integration conflicted: no integrated branch was published, so none of this run's work landed on one (1 of 2 contribution(s) applied cleanly, but integration is all-or-nothing). "
+            + "Conflicted and withheld from the integrated branch: agent#map#1 → codespace/agent/b.");
+        EveryEmittedOutputIsDeclared(node, result);
+    }
+
+    [Fact]
+    public async Task A_run_that_produced_nothing_integrable_says_why_it_skipped()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator();
+        var node = NodeOver(scope, integrator);
+
+        var result = await node.RunAsync(Context(Guid.NewGuid(), teamId, runId), CancellationToken.None);
+
+        result.Outputs["summary"].GetString().ShouldBe("Integration skipped: the run produced no integrable work for this repository.");
+        result.Outputs["withheld"].GetArrayLength().ShouldBe(0);
+        integrator.Calls.ShouldBe(0, "a skipped pass never touches git");
+        EveryEmittedOutputIsDeclared(node, result);
+    }
+
+    [Fact]
+    public async Task A_run_whose_work_recorded_no_base_revision_says_why_it_skipped()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#0", minutesAgo: 5, branch: "codespace/agent/a", baseSha: "");
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator();
+        var node = NodeOver(scope, integrator);
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["status"].GetString().ShouldBe("Skipped", "fixture check: the no-base arm — not the no-contributions one — is what ran");
+        result.Outputs["summary"].GetString().ShouldBe("Integration skipped: the produced work recorded no base revision to integrate from.");
+        integrator.Calls.ShouldBe(0);
+        EveryEmittedOutputIsDeclared(node, result);
+    }
+
+    /// <summary>
+    /// The unit a flunked (or human-waived) definition-of-done withheld is named beside the candidate it is NOT on.
+    /// Before, it appeared in no output: the outcome said <c>Clean</c> over the survivors, and the synth narrated a whole
+    /// deliverable. The assertion on the request is the fixture check — the unit really was dropped before the integrator.
+    /// </summary>
+    [Theory]
+    [InlineData(PublishAcceptanceState.Failed, "acceptance Failed")]
+    [InlineData(PublishAcceptanceState.Waived, "acceptance Waived")]
+    public async Task A_withheld_unit_is_named_beside_the_clean_candidate_it_is_not_on(PublishAcceptanceState state, string reason)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#0", minutesAgo: 9, branch: "codespace/agent/a");
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#1", minutesAgo: 3, branch: "codespace/agent/b", acceptance: state);
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator { Result = CleanResult(runId, "agent#map#0") };
+        var node = NodeOver(scope, integrator);
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None);
+
+        integrator.LastRequest!.Contributions.Select(c => c.Label).ShouldBe(new[] { "agent#map#0" }, "fixture check: the withheld unit never reached the integrator");
+        result.Outputs["summary"].GetString().ShouldBe($"Integration: 1 contribution(s) landed on codespace/integration/{runId:N}. Withheld before integration: agent#map#1 — {reason}.");
+
+        var withheld = result.Outputs["withheld"].EnumerateArray().ShouldHaveSingleItem();
+        withheld.GetProperty("label").GetString().ShouldBe("agent#map#1");
+        withheld.GetProperty("reason").GetString().ShouldBe(reason);
+        EveryEmittedOutputIsDeclared(node, result);
+    }
+
+    /// <summary>The withheld set is read BEFORE the skip decision: when the only unit the run produced was withheld, the integration skips — and the skip must say WHY, or the synth reads an empty run instead of a rejected one.</summary>
+    [Fact]
+    public async Task When_every_unit_was_withheld_the_skip_names_them_and_git_is_never_touched()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#0", minutesAgo: 5, branch: "codespace/agent/a", acceptance: PublishAcceptanceState.Failed);
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator();
+        var node = NodeOver(scope, integrator);
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None);
+
+        result.Outputs["status"].GetString().ShouldBe("Skipped");
+        result.Outputs["summary"].GetString().ShouldBe("Integration skipped: the run produced no integrable work for this repository. Withheld before integration: agent#map#0 — acceptance Failed.");
+        result.Outputs["withheld"].EnumerateArray().ShouldHaveSingleItem().GetProperty("label").GetString().ShouldBe("agent#map#0");
+        integrator.Calls.ShouldBe(0);
+        EveryEmittedOutputIsDeclared(node, result);
+    }
+
+    /// <summary>The resumed pass re-integrates and states its outcome like any other pass, beside the review trail it already carried — and that trail (<c>reviewApproved</c> / <c>reviewComment</c> / <c>reviewedBy</c>) is declared too, so the keys the pass emits are all bindable.</summary>
+    [Fact]
+    public async Task The_resumed_pass_states_the_outcome_too_beside_the_review_trail()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#0", minutesAgo: 9, branch: "codespace/agent/a");
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#1", minutesAgo: 3, branch: "codespace/agent/b");
+
+        using var scope = _fixture.BeginScope();
+        var node = NodeOver(scope, new RecordingIntegrator { Result = ConflictedResult() });
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId, parkOnConflict: true, resumePayload: """{"approved":false,"comment":"ship the fragments","by":"user-2"}"""), CancellationToken.None);
+
+        result.Outputs["reviewedBy"].GetString().ShouldBe("user-2", "fixture check: this is the resumed pass");
+        result.Outputs["summary"].GetString().ShouldStartWith("Integration conflicted: no integrated branch was published");
+        result.Outputs.Keys.ShouldContain("withheld");
+        EveryEmittedOutputIsDeclared(node, result);
+    }
+
+    [Fact]
+    public async Task A_wide_conflict_cannot_bloat_the_summary_past_its_bound()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+        await SeedProducedUnitAsync(teamId, runId, repositoryId, "map#0", minutesAgo: 5, branch: "codespace/agent/a");
+
+        var outcomes = Enumerable.Range(0, 120)
+            .Select(i => new ContributionOutcome { Label = $"agent#map#{i}", Disposition = ContributionDisposition.Conflicted, FallbackBranch = $"codespace/agent/{new string('b', 40)}-{i}", Reason = "textual conflict" })
+            .ToList();
+
+        using var scope = _fixture.BeginScope();
+        var node = NodeOver(scope, new RecordingIntegrator { Result = IntegrationResult.Build(IntegrationStatus.Conflicted, null, outcomes, "a contribution conflicted while integrating") });
+
+        var result = await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None);
+
+        var summary = result.Outputs["summary"].GetString()!;
+
+        summary.Length.ShouldBe(2_000, "the reduce prompt it is appended to is budgeted elsewhere — this text must stay negligible against that budget");
+        summary.ShouldEndWith("…");
+        result.Outputs["conflicts"].GetArrayLength().ShouldBe(120, "the bound is on the prose, never on the machine-readable conflicts[]");
+    }
+
     // ─── Seeds ──────────────────────────────────────────────────────────────────
 
     private async Task<Guid> SeedRunAsync(Guid teamId, Guid userId)
@@ -354,6 +539,27 @@ public class GitIntegrateRunNodeFlowTests
             TeamId = teamId, WorkflowRunId = runId, RepositoryId = repositoryId, RepositoryAlias = "primary",
             BaseSha = baseSha, Branch = branch, AcceptanceState = acceptance, PublishStateValue = PublishState.Pushed,
         }, CancellationToken.None);
+    }
+
+    /// <summary>One produced unit — an agent run plus the publish-manifest row its attempt wrote: the pair the node derives a contribution (or a withheld unit) from.</summary>
+    private async Task SeedProducedUnitAsync(Guid teamId, Guid runId, Guid repositoryId, string iterationKey, int minutesAgo, string branch, PublishAcceptanceState acceptance = PublishAcceptanceState.NotApplicable, string baseSha = "b1")
+    {
+        var agentRunId = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed(iterationKey, minutesAgo));
+        await SeedAgentManifestAsync(teamId, runId, agentRunId, repositoryId, branch, baseSha, acceptance);
+    }
+
+    private static GitIntegrateRunNode NodeOver(Autofac.ILifetimeScope scope, RecordingIntegrator integrator) =>
+        new(integrator, new StubResolver(), scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpaceDbContext>());
+
+    private static IntegrationResult CleanResult(Guid runId, params string[] labels) =>
+        IntegrationResult.Build(IntegrationStatus.Clean, $"codespace/integration/{runId:N}", labels.Select(label => new ContributionOutcome { Label = label, Disposition = ContributionDisposition.Applied }).ToList());
+
+    /// <summary>A key the node emits but its OutputSchema does not declare is unbindable — <c>DefinitionValidator</c> rejects the reference — so every pass's outputs must be a subset of the declared ones.</summary>
+    private static void EveryEmittedOutputIsDeclared(GitIntegrateRunNode node, NodeResult result)
+    {
+        var declared = node.Manifest.OutputSchema.GetProperty("properties").EnumerateObject().Select(p => p.Name).ToList();
+
+        result.Outputs.Keys.Except(declared).ShouldBeEmpty("an output the node emits but its OutputSchema does not declare cannot be bound by any graph");
     }
 
     private static NodeRunContext Context(Guid repositoryId, Guid teamId, Guid runId, bool parkOnConflict = false, string? resumePayload = null) => new()
