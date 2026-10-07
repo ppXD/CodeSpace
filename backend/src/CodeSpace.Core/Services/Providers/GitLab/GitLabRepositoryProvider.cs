@@ -814,37 +814,66 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     public async Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var projectId = int.Parse(repository.ExternalId);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(ListChecksAsync), _ =>
-        {
-            try
-            {
-                var projectId = int.Parse(repository.ExternalId);
-                var mrClient = client.GetMergeRequest(projectId);
-
-                // MR pipelines are returned newest-first. We only render checks from the
-                // LATEST pipeline — older pipelines belong in a "history" view the SPA
-                // doesn't have yet, and showing all of them at once would be noise.
-                var pipelines = mrClient.GetPipelines(number).ToList();
-                if (pipelines.Count == 0) return Task.FromResult<IReadOnlyList<RemotePullRequestCheck>>(Array.Empty<RemotePullRequestCheck>());
-
-                var latest = pipelines[0];
-
-                // IPipelineClient.GetJobs(pipelineId) is the canonical "list jobs in this
-                // pipeline" endpoint — one round-trip, returns the typed Job[] directly.
-                var jobs = client.GetPipelines(projectId).GetJobs(latest.Id);
-
-                var checks = jobs.Select(ToRemoteCheck).ToList();
-                return Task.FromResult<IReadOnlyList<RemotePullRequestCheck>>(checks);
-            }
-            catch
-            {
-                // Token without read_api / pipelines scope, or pipelines simply disabled
-                // on the project — render no checks rather than failing the PR detail view.
-                return Task.FromResult<IReadOnlyList<RemotePullRequestCheck>>(Array.Empty<RemotePullRequestCheck>());
-            }
-        }, cancellationToken).ConfigureAwait(false);
+        // No catch: workflows gate merges on this list, so a read that fails — rate limit, outage, refused token, dropped
+        // connection, a payload NGitLab cannot parse — leaves as a failure. Turned into "no checks" it reads as green CI.
+        return await _resilience.ExecuteAsync(context.Instance, nameof(ListChecksAsync), _ => Task.FromResult(ReadLatestPipelineChecks(client, projectId, number)), cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The jobs of the merge request's latest pipeline (GitLab lists them newest-first; older pipelines are history), floored
+    /// by that pipeline's own status. Empty only when GitLab confirms the merge request has no pipeline to show.
+    /// </summary>
+    private static IReadOnlyList<RemotePullRequestCheck> ReadLatestPipelineChecks(IGitLabClient client, int projectId, int number)
+    {
+        var latest = client.GetMergeRequest(projectId).GetPipelines(number).FirstOrDefault();
+        if (latest == null) return ConfirmNoPipeline(client, projectId, number);
+
+        var jobs = client.GetPipelines(projectId).GetJobs(latest.Id).Select(ToRemoteCheck).ToList();
+
+        return FloorByPipelineStatus(jobs, ToPipelineCheck(latest));
+    }
+
+    /// <summary>
+    /// GitLab answers a merge request's pipeline list with [] both when no pipeline ran and when this credential may read none
+    /// of them: the list is filtered by read_pipeline, not refused. The read here can use a different credential from the
+    /// merge (the connection's versus the actor's), so a blind read must not open the gate. [] stands as "no checks" only when
+    /// CI is off for the project, or when the credential may read the project's pipelines and the merge request names no
+    /// head pipeline the list left out (one in a fork the credential cannot see).
+    /// </summary>
+    private static IReadOnlyList<RemotePullRequestCheck> ConfirmNoPipeline(IGitLabClient client, int projectId, int number)
+    {
+        if (IsCiDisabled(client, projectId)) return Array.Empty<RemotePullRequestCheck>();
+
+        EnsurePipelinesReadable(client, projectId);
+        EnsureNoUnlistedHeadPipeline(client, projectId, number);
+
+        return Array.Empty<RemotePullRequestCheck>();
+    }
+
+    /// <summary>CI/CD turned off for the project: no pipeline can run, and the project's own pipeline list refuses every credential.</summary>
+    private static bool IsCiDisabled(IGitLabClient client, int projectId) => client.Projects.GetById(projectId, new SingleProjectQuery()).BuildsAccessLevel == "disabled";
+
+    /// <summary>
+    /// The project's own pipeline list refuses with 403 a credential that may not read pipelines (or jobs), where the merge
+    /// request's list answers it []. Reading one page is the check; a refusal leaves as one.
+    /// </summary>
+    private static void EnsurePipelinesReadable(IGitLabClient client, int projectId) => _ = client.GetPipelines(projectId).Search(new PipelineQuery { PerPage = 1 }).FirstOrDefault();
+
+    private static void EnsureNoUnlistedHeadPipeline(IGitLabClient client, int projectId, int number)
+    {
+        if (client.GetMergeRequest(projectId)[number].HeadPipeline is { } head)
+            throw new InvalidOperationException($"GitLab lists no pipeline for merge request !{number}, yet names its head pipeline #{head.Id} ({head.Status.ToString().ToLowerInvariant()}) — a pipeline this credential may not read, so the merge request's checks cannot be read");
+    }
+
+    /// <summary>
+    /// The pipeline's verdict is a floor under its jobs: when no job carries it — a downstream pipeline failed, a job is
+    /// missing from the list, the job holding a blocked pipeline reads as an optional manual one — the pipeline joins the list
+    /// as a check of its own, so a pipeline GitLab does not call success never reads green.
+    /// </summary>
+    private static IReadOnlyList<RemotePullRequestCheck> FloorByPipelineStatus(List<RemotePullRequestCheck> jobs, RemotePullRequestCheck pipeline) =>
+        jobs.Any(job => job.Status == pipeline.Status) ? jobs : jobs.Append(pipeline).ToList();
 
     public async Task<RemotePullRequestComment> PostCommentAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
     {
@@ -1015,6 +1044,30 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             DetailsUrl = job.WebUrl
         };
     }
+
+    /// <summary>The pipeline itself as a check — what <see cref="FloorByPipelineStatus"/> adds when no job carries the pipeline's verdict.</summary>
+    private static RemotePullRequestCheck ToPipelineCheck(PipelineBasic pipeline) => new()
+    {
+        Name = "pipeline",
+        Status = MapPipelineStatus(pipeline.Status),
+        Conclusion = pipeline.Status.ToString().ToLowerInvariant(),
+        DetailsUrl = pipeline.WebUrl
+    };
+
+    /// <summary>
+    /// A pipeline passes only when GitLab calls it success. NGitLab types its status as a job status, but the two read
+    /// differently: a manual or delayed job is optional (Skipped), while a pipeline whose status is manual is blocked on a
+    /// manual job and one that is scheduled waits on a delayed job — neither is done, so both are Pending. A skipped pipeline
+    /// ran nothing, and GitLab's own merge check does not count it as success unless the project opts in, so it is
+    /// Cancelled. Anything else that is not success or failed (created, pending, running, an unknown status) is Pending.
+    /// </summary>
+    private static PullRequestCheckStatus MapPipelineStatus(JobStatus status) => status switch
+    {
+        JobStatus.Success => PullRequestCheckStatus.Success,
+        JobStatus.Failed => PullRequestCheckStatus.Failure,
+        JobStatus.Canceled or JobStatus.Canceling or JobStatus.Skipped => PullRequestCheckStatus.Cancelled,
+        _ => PullRequestCheckStatus.Pending
+    };
 
     // GitLab JobStatus: Unknown, Running, Pending, Failed, Success, Created, Canceled, Skipped,
     // Manual, NoBuild, Preparing, WaitingForResource, Scheduled, Canceling. Note `Canceled` —

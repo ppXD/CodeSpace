@@ -235,19 +235,14 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
             // caller pass the SHA in, but that leaks Octokit detail into the service layer.
             var pr = await client.PullRequest.Get(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
             var headSha = pr.Head?.Sha;
-            if (string.IsNullOrEmpty(headSha)) return (IReadOnlyList<RemotePullRequestCheck>)Array.Empty<RemotePullRequestCheck>();
 
-            try
-            {
-                var response = await client.Check.Run.GetAllForReference(repository.NamespacePath, repository.Name, headSha).ConfigureAwait(false);
-                return (IReadOnlyList<RemotePullRequestCheck>)response.CheckRuns.Select(ToRemoteCheck).ToList();
-            }
-            catch (AuthorizationException)
-            {
-                // Token lacks `repo` or Checks: Read — graceful empty rather than failing
-                // the whole PR detail view.
-                return (IReadOnlyList<RemotePullRequestCheck>)Array.Empty<RemotePullRequestCheck>();
-            }
+            // Workflows gate merges on this list, so neither a missing head nor a refused read may become "no checks" —
+            // an empty list reads as green CI.
+            if (string.IsNullOrEmpty(headSha))
+                throw new InvalidOperationException($"GitHub returned pull request #{number} without a head commit, so its checks cannot be read");
+
+            var response = await client.Check.Run.GetAllForReference(repository.NamespacePath, repository.Name, headSha).ConfigureAwait(false);
+            return (IReadOnlyList<RemotePullRequestCheck>)response.CheckRuns.Select(ToRemoteCheck).ToList();
         }, cancellationToken).ConfigureAwait(false);
     }
 
