@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Providers.Identity;
 using CodeSpace.Core.Services.Providers.Scopes;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.PullRequests;
@@ -77,11 +78,11 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         return await commentCap.PostCommentAsync(context, remote, number, body, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
+    public async Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, SubmitPullRequestReviewInput input, Guid? actorUserId, CancellationToken cancellationToken)
     {
         // A comment / request-changes verdict needs something to say; approve may stand alone (LGTM).
-        if (verdict != PullRequestReviewVerdict.Approve && string.IsNullOrWhiteSpace(body))
-            throw new InvalidOperationException($"A '{verdict}' review requires a non-empty body.");
+        if (input.Verdict != PullRequestReviewVerdict.Approve && string.IsNullOrWhiteSpace(input.Body))
+            throw new InvalidOperationException($"A '{input.Verdict}' review requires a non-empty body.");
 
         var repo = await LoadRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         EnsureCredentialBound(repo);
@@ -96,7 +97,9 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         var context = new ProviderContext(repo.ProviderInstance, credential);
         var remote = repo.ToRemoteRepository();
 
-        return await reviewCap.SubmitReviewAsync(context, remote, number, verdict, body, cancellationToken).ConfigureAwait(false);
+        await EnsureUnmovedAsync(context, remote, number, new PullRequestPin(input.ExpectedHeadSha, BaseBranch: null), cancellationToken).ConfigureAwait(false);
+
+        return await reviewCap.SubmitReviewAsync(context, remote, number, input, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, Guid teamId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken)
@@ -134,8 +137,41 @@ public sealed class PullRequestService : IPullRequestService, IScopedDependency
         var context = new ProviderContext(repo.ProviderInstance, credential);
         var remote = repo.ToRemoteRepository();
 
+        await EnsureUnmovedAsync(context, remote, number, new PullRequestPin(input.ExpectedHeadSha, input.ExpectedBaseBranch), cancellationToken).ConfigureAwait(false);
+
         return await writeCap.MergePullRequestAsync(context, remote, number, input, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// Reads the pull request again, with the credential about to write, just before a write pinned to what a reviewer
+    /// saw, and refuses when it moved: a head that is another commit, a base that is another branch. The provider's own
+    /// precondition (a merge's or an approval's sha) closes the rest of the window for the head; neither provider takes
+    /// the base as one, so for the base this read is the check. Nothing to read when nothing is pinned.
+    /// </summary>
+    private async Task EnsureUnmovedAsync(ProviderContext context, RemoteRepository remote, int number, PullRequestPin pin, CancellationToken cancellationToken)
+    {
+        if (pin is { HeadSha: null, BaseBranch: null }) return;
+
+        var catalog = _registry.Require<IPullRequestCatalogCapability>(context.Instance.Provider);
+        var current = await catalog.GetPullRequestAsync(context, remote, number, cancellationToken).ConfigureAwait(false);
+
+        if (Moved(current, pin) is { } moved) throw moved;
+    }
+
+    /// <summary>How <paramref name="current"/> moved from <paramref name="pin"/>, or null when it did not: a head compared as git compares a sha (any case), a base exactly, as git compares a branch. A head the provider no longer reports has moved.</summary>
+    internal static PullRequestMovedException? Moved(RemotePullRequest current, PullRequestPin pin)
+    {
+        if (pin.HeadSha is { } head && !string.Equals(current.HeadSha, head, StringComparison.OrdinalIgnoreCase))
+            return new PullRequestMovedException(current.Number, "head", head, current.HeadSha ?? "unknown");
+
+        if (pin.BaseBranch is { } branch && !string.Equals(current.TargetBranch, branch, StringComparison.Ordinal))
+            return new PullRequestMovedException(current.Number, "base", branch, current.TargetBranch);
+
+        return null;
+    }
+
+    /// <summary>What a write was pinned to: the pull request's head commit and its base branch, each optional.</summary>
+    internal readonly record struct PullRequestPin(string? HeadSha, string? BaseBranch);
 
     /// <summary>Actor's own credential when <paramref name="actorUserId"/> is set (throws
     /// ActorIdentityRequiredException if they haven't linked one); otherwise the repo's connection credential.</summary>

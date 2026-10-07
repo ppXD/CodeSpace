@@ -316,7 +316,7 @@ public sealed class AgentToolRepositoryBindingFlowTests(PostgresFixture fixture)
 
     private static WorkspaceRepositorySpec Bound(Guid repositoryId, WorkspaceAccess access) => new() { Alias = repositoryId.ToString("N"), RepositoryId = repositoryId, Access = access };
 
-    /// <summary>One argument bag every repository tool accepts: each node reads its own keys and ignores the rest, so a theory over tools needs no per-tool shape.</summary>
+    /// <summary>One argument bag for every repository tool: <see cref="CallToolAsync"/> sends each tool only the keys it declares, so a theory over tools needs no per-tool shape.</summary>
     private static JsonElement ArgumentsFor(Guid repositoryId, string? branch, string command, params string[] args) => JsonSerializer.SerializeToElement(new Dictionary<string, object?>
     {
         ["repositoryId"] = repositoryId.ToString(),
@@ -347,11 +347,20 @@ public sealed class AgentToolRepositoryBindingFlowTests(PostgresFixture fixture)
         }
     }
 
-    private static async Task<JsonElement> CallToolAsync(McpRequestHandler handler, string name, JsonElement arguments)
+    /// <summary>The call a model makes: only the keys the tool declares (an undeclared key is refused before anything else), taken from <paramref name="arguments"/>.</summary>
+    private async Task<JsonElement> CallToolAsync(McpRequestHandler handler, string name, JsonElement arguments)
     {
-        var request = JsonSerializer.SerializeToElement(new { jsonrpc = "2.0", id = 1, method = "tools/call", @params = new { name, arguments } });
+        var request = JsonSerializer.SerializeToElement(new { jsonrpc = "2.0", id = 1, method = "tools/call", @params = new { name, arguments = await DeclaredOnlyAsync(name, arguments) } });
 
         return (await handler.HandleAsync(request, CancellationToken.None))!.Value.GetProperty("result");
+    }
+
+    private async Task<Dictionary<string, JsonElement>> DeclaredOnlyAsync(string name, JsonElement arguments)
+    {
+        await using var scope = fixture.BeginScope();
+        var declared = AgentToolInputs.Declared(scope.Resolve<IAgentToolRegistry>().Resolve(name).ShouldNotBeNull().InputSchema);
+
+        return arguments.EnumerateObject().Where(property => declared.Contains(property.Name)).ToDictionary(property => property.Name, property => property.Value.Clone());
     }
 
     private static string Text(JsonElement toolResult) => toolResult.GetProperty("content")[0].GetProperty("text").GetString() ?? "";

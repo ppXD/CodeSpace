@@ -36,4 +36,7 @@ public sealed record ToolCallView
 
     /// <summary>When the call was approved (the approval audit trail). Null until approved.</summary>
     public DateTimeOffset? ApprovedAt { get; init; }
+
+    /// <summary>What the call was shown to do when it was parked for approval — the same redacted, bounded summary its approval card carried. Null for a call that never asked a human.</summary>
+    public ToolCallPreview? Preview { get; init; }
 }

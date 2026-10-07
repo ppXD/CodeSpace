@@ -12,7 +12,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// <summary>
 /// Submits a REVIEW VERDICT (approve / request-changes / comment) back to a PR/MR via
 /// <see cref="IPullRequestService.SubmitReviewAsync"/> — the write-back that closes the review loop.
-/// Inputs: <c>repositoryId</c>, <c>number</c>, <c>verdict</c>, optional <c>body</c>. Outputs the
+/// Inputs: <c>repositoryId</c>, <c>number</c>, <c>verdict</c>, optional <c>body</c> / <c>expectedHeadSha</c>. Outputs the
 /// submitted <c>verdict</c> + the review <c>url</c>.
 ///
 /// Wire <c>verdict</c> from an upstream decision — e.g. a chat card click surfaced as
@@ -51,7 +51,9 @@ public sealed class GitPrReviewNode : INodeRuntime
         // forge an APPROVE review as a teammate). The ledger's agent_run_id provides traceability.
         IsAgentToolEligible = true,
         // Called by an agent, only a repository its run is bound to — and a write, so a patch-only repository refuses it.
-        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true },
+        // Its approval card shows the pull request it acts on (title, head and base) and pins the head it shows: the
+        // approved review is submitted only against that commit, so a push after approval submits nothing.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true, PullRequestInputKey = "number", HeadShaInputKey = "expectedHeadSha" },
         // Acts AS the actor's own identity (Model B). Declaring this lets the engine generically gate
         // the responder's linked identity when this node sits downstream of an interactive wait whose
         // responder feeds actAsUserId — no chat/engine changes needed for future act-as-user nodes.
@@ -74,6 +76,7 @@ public sealed class GitPrReviewNode : INodeRuntime
                 "number": { "type": "integer", "description": "The pull/merge request number." },
                 "verdict": { "type": "string", "enum": ["approve", "request_changes", "comment"], "x-control": "segmented", "x-enumLabels": { "approve": "Approve", "request_changes": "Request changes", "comment": "Comment" }, "description": "The verdict to submit. Wire {{nodes.<wait>.outputs.action}} from a chat card click." },
                 "body": { "type": "string", "description": "Review body — required for request_changes / comment, optional for approve. Supports {{ }} references." },
+                "expectedHeadSha": { "type": "string", "description": "Review only while the pull request's head is still this commit; a head that moved fails the review instead of approving commits nobody read. Bind the sha a review step read. Called by an agent, it is set to the head shown on the approval card." },
                 "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Submit the review AS this CodeSpace user's own linked GitHub/GitLab identity, so it's authored by the person who approved. Bind {{nodes.<wait>.outputs.by}} from an approval step. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number","verdict"]
@@ -98,7 +101,9 @@ public sealed class GitPrReviewNode : INodeRuntime
         if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
         var body = TryReadBody(context, out var b) ? b : null;
+        var expectedHeadSha = TryReadExpectedHeadSha(context, out var head) ? head : null;
         var actAsUserId = TryReadActAsUserId(context, out var a) ? a : (Guid?)null;
+        var input = new SubmitPullRequestReviewInput { Verdict = verdict, Body = body, ExpectedHeadSha = expectedHeadSha };
 
         // Trace the side-effecting Git API call. The body is summarised (length only) to keep the
         // ledger small; the service enforces the body-required-for-comment/request-changes rule and
@@ -110,8 +115,8 @@ public sealed class GitPrReviewNode : INodeRuntime
             review = await context.Observability.TraceExternalCallAsync(
                 target: $"git.submit_review:{repoId}:{number}",
                 method: "submit_review",
-                requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, verdict = verdict.ToString(), body_chars = body?.Length ?? 0, act_as_user_id = actAsUserId }),
-                action: ct => _prService.SubmitReviewAsync(repoId, teamId, number, verdict, body, actAsUserId, ct),
+                requestPayload: JsonSerializer.SerializeToElement(new { repository_id = repoId, pull_request_number = number, verdict = verdict.ToString(), body_chars = body?.Length ?? 0, expected_head_sha = expectedHeadSha, act_as_user_id = actAsUserId }),
+                action: ct => _prService.SubmitReviewAsync(repoId, teamId, number, input, actAsUserId, ct),
                 completionExtractor: result => new ExternalCallCompletion
                 {
                     ResponsePayload = JsonSerializer.SerializeToElement(new { verdict = result.Verdict.ToString(), url = result.WebUrl })
@@ -123,8 +128,9 @@ public sealed class GitPrReviewNode : INodeRuntime
         // wired to this node's `error` handle tell the clicker WHY the review didn't land, instead
         // of leaking a raw SDK string. (Identity existence is gated up front at respond time → 428;
         // repo-level permission is only knowable here, at write time.)
-        catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number)); }
-        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number)); }
+        catch (PullRequestMovedException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number, expectedHeadSha)); }
+        catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number, expectedHeadSha)); }
+        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number, expectedHeadSha)); }
 
         context.Logger.LogInformation("Submitted {Verdict} review for repo {RepoId} PR #{Num}", verdict, repoId, number);
 
@@ -141,10 +147,18 @@ public sealed class GitPrReviewNode : INodeRuntime
     /// A clean, actionable message for a typed provider write failure — surfaced as the node's
     /// failure (and on its <c>error</c> handle), so a chat.post_message can tell the clicker WHY
     /// their review didn't land instead of leaking a raw SDK string. Scope gap vs no-permission
-    /// (403) vs not-found (404) each get their own remediation.
+    /// (403) vs not-found (404) each get their own remediation. A review pinned to a head says when the head
+    /// moved: read again before the review (the service), or refused by the provider's own precondition
+    /// (GitLab's approve answers 409; GitHub answers 422 for a commit no longer in the pull request).
     /// </summary>
-    private static string DescribeWriteFailure(Exception ex, int number) => ex switch
+    private static string DescribeWriteFailure(Exception ex, int number, string? expectedHeadSha) => ex switch
     {
+        PullRequestMovedException moved =>
+            $"Couldn't submit the review to PR #{number}: {moved.Message}, so nothing was submitted. Read what changed before asking again.",
+        ProviderApiException { StatusCode: 409 } api when expectedHeadSha is not null =>
+            $"Couldn't submit the review to PR #{number}: {api.ProviderKind} reports its head is no longer {expectedHeadSha}, the commit this review was pinned to, so nothing was submitted. Read the new commits before asking again.",
+        ProviderApiException { StatusCode: 422 } api when expectedHeadSha is not null =>
+            $"Couldn't submit the review to PR #{number}: {api.ProviderKind} rejected it — its head may no longer include {expectedHeadSha}, the commit this review was pinned to, or this is your own pull request. Nothing was submitted.",
         ProviderInsufficientScopeException scope =>
             $"Couldn't submit the review: your {scope.ProviderKind} token is missing the {string.Join(", ", scope.MissingScopes)} scope. Re-link your identity with that scope, then try again.",
         ProviderApiException { StatusCode: 403 } api =>
@@ -182,6 +196,15 @@ public sealed class GitPrReviewNode : INodeRuntime
 
         var raw = (value.GetString() ?? "").Replace("_", "");
         return Enum.TryParse(raw, ignoreCase: true, out verdict) && Enum.IsDefined(verdict);
+    }
+
+    /// <summary>The optional pinned head: a non-blank string, trimmed. Absent / blank ⇒ the review takes whatever the head is.</summary>
+    private static bool TryReadExpectedHeadSha(NodeRunContext context, out string head)
+    {
+        head = "";
+        if (!context.Inputs.TryGetValue("expectedHeadSha", out var value) || value.ValueKind != JsonValueKind.String) return false;
+        head = (value.GetString() ?? "").Trim();
+        return head.Length > 0;
     }
 
     private static bool TryReadBody(NodeRunContext context, out string body)

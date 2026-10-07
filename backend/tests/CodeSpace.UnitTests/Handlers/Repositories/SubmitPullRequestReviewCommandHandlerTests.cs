@@ -58,10 +58,10 @@ public class SubmitPullRequestReviewCommandHandlerTests
         public Guid? ActorUserId;
         public int Calls;
 
-        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, SubmitPullRequestReviewInput input, Guid? actorUserId, CancellationToken cancellationToken)
         {
-            RepoId = repositoryId; TeamId = teamId; Number = number; Verdict = verdict; Body = body; ActorUserId = actorUserId; Calls++;
-            return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, ExternalId = "rev-1", WebUrl = "https://example.test/review/1" });
+            RepoId = repositoryId; TeamId = teamId; Number = number; Verdict = input.Verdict; Body = input.Body; ActorUserId = actorUserId; Calls++;
+            return Task.FromResult(new RemotePullRequestReview { Verdict = input.Verdict, ExternalId = "rev-1", WebUrl = "https://example.test/review/1" });
         }
 
         public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid r, Guid t, PullRequestState? s, int p, int pp, CancellationToken c) => throw new NotImplementedException();

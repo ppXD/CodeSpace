@@ -188,10 +188,10 @@ public sealed class TestRepositoryProvider : IRepositoryCatalogCapability, ICred
 
     // Echoes the acting credential's id back as the review's ExternalId so a test can assert WHICH
     // credential made the write-back call (actor vs connection) without a shared recorder.
-    public Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken) =>
+    public Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, SubmitPullRequestReviewInput input, CancellationToken cancellationToken) =>
         Task.FromResult(new RemotePullRequestReview
         {
-            Verdict = verdict,
+            Verdict = input.Verdict,
             ExternalId = context.Credential.Id.ToString(),
             WebUrl = $"https://test.local/{repository.FullPath}/-/reviews/{number}"
         });

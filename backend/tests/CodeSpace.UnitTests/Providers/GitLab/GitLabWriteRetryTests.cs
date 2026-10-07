@@ -139,7 +139,7 @@ public sealed class GitLabWriteRetryTests : IDisposable
         var notes = new ForgeCollection(_ => AttemptOutcome.Lands, NoteJson);
         _gitlab.Answer("GET", "/api/v4/projects/4242/merge_requests/7/approvals", approvals.Get).Answer("POST", "/api/v4/projects/4242/merge_requests/7/approve", approvals.Approve).Answer("POST", "/api/v4/projects/4242/merge_requests/7/notes", notes.Create).Answer("GET", "/api/v4/projects/4242/merge_requests/7/notes", notes.List);
 
-        var review = await Provider().SubmitReviewAsync(Context(), Repository, 7, PullRequestReviewVerdict.Approve, "Ship it.", CancellationToken.None);
+        var review = await Provider().SubmitReviewAsync(Context(), Repository, 7, new SubmitPullRequestReviewInput { Verdict = PullRequestReviewVerdict.Approve, Body = "Ship it." }, CancellationToken.None);
 
         approvals.Approved.ShouldBeTrue();
         _gitlab.Sent("POST", "/api/v4/projects/4242/merge_requests/7/approve").ShouldBe(expectedApproves);

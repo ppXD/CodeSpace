@@ -29,11 +29,13 @@ public interface IPullRequestService
     /// <summary>
     /// Submit a review VERDICT (approve / request-changes / comment) back to a PR/MR — the write-back
     /// half of the review loop, via the provider's <c>IPullRequestReviewCapability</c>. The provider
-    /// maps the neutral verdict to its own API. <paramref name="body"/> is required for
+    /// maps the neutral verdict to its own API. The body is required for
     /// <see cref="PullRequestReviewVerdict.Comment"/> and <see cref="PullRequestReviewVerdict.RequestChanges"/>
     /// (you can't comment / block with nothing to say) and optional for
     /// <see cref="PullRequestReviewVerdict.Approve"/>. Throws <see cref="InvalidOperationException"/> (400)
-    /// for a missing repo / missing required body, or on insufficient write scope (422).
+    /// for a missing repo / missing required body, or on insufficient write scope (422). A review pinned to a head
+    /// (<see cref="SubmitPullRequestReviewInput.ExpectedHeadSha"/>) reads the pull request again first and throws
+    /// <see cref="Messages.Exceptions.PullRequestMovedException"/> when the head moved, submitting nothing.
     ///
     /// <para><paramref name="actorUserId"/> opts into per-user attribution (Model B): when set, the
     /// write authenticates AS that user's own linked provider identity instead of the repo's
@@ -41,7 +43,7 @@ public interface IPullRequestService
     /// haven't linked one, <see cref="Messages.Exceptions.ActorIdentityRequiredException"/> is thrown
     /// (mapped to <c>actor_identity_required</c>). Null = use the connection credential (unchanged).</para>
     /// </summary>
-    Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken);
+    Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, SubmitPullRequestReviewInput input, Guid? actorUserId, CancellationToken cancellationToken);
 
     /// <summary>
     /// OPEN a pull/merge request between two existing branches via the provider's
@@ -59,7 +61,8 @@ public interface IPullRequestService
     /// (repo lookup, credential null-check, write-scope + Write-role, Model B actor attribution) as
     /// <see cref="OpenPullRequestAsync"/>. Throws <see cref="InvalidOperationException"/> (400) for a missing
     /// repo, on insufficient write scope (422), or when the request can't be merged (conflicts / not mergeable
-    /// / already merged → mapped from the provider's 4xx).
+    /// / already merged → mapped from the provider's 4xx). A merge pinned to a head or a base reads the pull request again
+    /// first and throws <see cref="Messages.Exceptions.PullRequestMovedException"/> when either moved, merging nothing.
     /// </summary>
     Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, Guid teamId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken);
 }

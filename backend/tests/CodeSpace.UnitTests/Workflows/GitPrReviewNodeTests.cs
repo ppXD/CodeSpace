@@ -22,15 +22,16 @@ public class GitPrReviewNodeTests
         public int Number;
         public PullRequestReviewVerdict Verdict;
         public string? Body;
+        public string? ExpectedHeadSha;
         public Guid? ActorUserId;
         public int Calls;
         public Exception? ThrowOnReview;
 
-        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken)
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, SubmitPullRequestReviewInput input, Guid? actorUserId, CancellationToken cancellationToken)
         {
-            RepoId = repositoryId; TeamId = teamId; Number = number; Verdict = verdict; Body = body; ActorUserId = actorUserId; Calls++;
+            RepoId = repositoryId; TeamId = teamId; Number = number; Verdict = input.Verdict; Body = input.Body; ExpectedHeadSha = input.ExpectedHeadSha; ActorUserId = actorUserId; Calls++;
             if (ThrowOnReview != null) throw ThrowOnReview;
-            return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, ExternalId = "rev-1", WebUrl = "https://example.test/review/1" });
+            return Task.FromResult(new RemotePullRequestReview { Verdict = input.Verdict, ExternalId = "rev-1", WebUrl = "https://example.test/review/1" });
         }
 
         public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid r, Guid t, PullRequestState? s, int p, int pp, CancellationToken c) => throw new NotImplementedException();
@@ -222,6 +223,60 @@ public class GitPrReviewNodeTests
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Error.ShouldContain("number");
     }
+
+    [Theory]
+    [InlineData("0a1b2c3d", "0a1b2c3d")]
+    [InlineData("  0a1b2c3d  ", "0a1b2c3d")]
+    [InlineData("", null)]   // empty: review whatever the head is, as before
+    public async Task Passes_the_expected_head_through_so_the_review_is_submitted_only_against_that_commit(string given, string? expected)
+    {
+        var stub = new StubPrService();
+
+        await new GitPrReviewNode(stub).RunAsync(PinnedContext(given), CancellationToken.None);
+
+        stub.ExpectedHeadSha.ShouldBe(expected);
+    }
+
+    [Fact]
+    public void The_expected_head_is_a_declared_input_the_manifest_pins()
+    {
+        var manifest = new GitPrReviewNode(new StubPrService()).Manifest;
+
+        manifest.InputSchema.GetProperty("properties").TryGetProperty("expectedHeadSha", out _).ShouldBeTrue("a workflow can bind the reviewed head too");
+        manifest.RepositoryInput.ShouldNotBeNull().HeadShaInputKey.ShouldBe("expectedHeadSha", "an agent's approved review is pinned to the head its card showed");
+    }
+
+    [Theory]
+    [InlineData(ProviderKind.GitLab, 409, "Couldn't submit the review to PR #42: GitLab reports its head is no longer 0a1b2c3d, the commit this review was pinned to, so nothing was submitted. Read the new commits before asking again.")]
+    [InlineData(ProviderKind.GitHub, 422, "Couldn't submit the review to PR #42: GitHub rejected it — its head may no longer include 0a1b2c3d, the commit this review was pinned to, or this is your own pull request. Nothing was submitted.")]
+    public async Task A_pinned_review_the_provider_refused_on_its_head_says_so_and_that_nothing_was_submitted(ProviderKind provider, int status, string error)
+    {
+        var stub = new StubPrService { ThrowOnReview = new ProviderApiException(provider, status, "SubmitReviewAsync", "refused", new Exception()) };
+
+        var result = await new GitPrReviewNode(stub).RunAsync(PinnedContext("0a1b2c3d"), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldBe(error);
+    }
+
+    [Fact]
+    public async Task A_pull_request_whose_head_moved_before_the_review_was_sent_says_so_and_that_nothing_was_submitted()
+    {
+        var stub = new StubPrService { ThrowOnReview = new PullRequestMovedException(42, "head", "0a1b2c3d", "ffff0000") };
+
+        var result = await new GitPrReviewNode(stub).RunAsync(PinnedContext("0a1b2c3d"), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldBe("Couldn't submit the review to PR #42: its head is now ffff0000, not 0a1b2c3d, the one it was pinned to, so nothing was submitted. Read what changed before asking again.");
+    }
+
+    private static NodeRunContext PinnedContext(string expectedHeadSha) => ContextFromInputs(new()
+    {
+        ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+        ["number"] = JsonSerializer.SerializeToElement(42),
+        ["verdict"] = JsonSerializer.SerializeToElement("approve"),
+        ["expectedHeadSha"] = JsonSerializer.SerializeToElement(expectedHeadSha),
+    });
 
     private static NodeRunContext BuildContext(string? repositoryId, int number, string verdict, string? body)
     {

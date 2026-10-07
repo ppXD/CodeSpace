@@ -48,13 +48,19 @@ public class AgentToolRegistryTests
     private static AgentToolRegistry BuildWith(IEnumerable<INodeRuntime> nodes, IEnumerable<IAgentTool> firstParty)
     {
         var runtimes = nodes.ToArray();
-        return new AgentToolRegistry(runtimes, firstParty, new TestNodeInvocations(runtimes), new NoRepositoryPolicy(), NullLoggerFactory.Instance);
+        return new AgentToolRegistry(runtimes, firstParty, new TestNodeInvocations(runtimes), new NoRepositoryPolicy(), new ArgumentsPreviewer(), NullLoggerFactory.Instance);
     }
 
     /// <summary>A repository policy that lets every use through — these tests pin the catalog, not the binding.</summary>
     private sealed class NoRepositoryPolicy : IAgentRepositoryPolicy
     {
         public Task<string?> RefusalAsync(AgentRepositoryUse use, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
+    }
+
+    /// <summary>A previewer that shows the arguments as given — these tests pin the catalog, not the approval card.</summary>
+    private sealed class ArgumentsPreviewer : IAgentToolPreviewer
+    {
+        public Task<ToolCallPreview> PreviewAsync(NodeManifest manifest, AgentToolCall call, IReadOnlyDictionary<string, JsonElement> inputs, CancellationToken cancellationToken) => Task.FromResult(ToolCallPreviews.FromArguments(call.Input));
     }
 
     private sealed class TestNodeInvocations(IReadOnlyList<INodeRuntime> nodes) : INodeInvocationExecutor
@@ -236,7 +242,7 @@ public class AgentToolRegistryTests
         // CONNECTION credential), making the "not a wider attack surface" claim true.
         var pr = new CapturingPullRequestService();
         var node = ActAsUserNode(kind, pr);
-        var tool = new NodeAgentTool(node, new TestNodeInvocations(new[] { node }), new NoRepositoryPolicy(), NullLogger.Instance);
+        var tool = new NodeAgentTool(node, new TestNodeInvocations(new[] { node }), new NoRepositoryPolicy(), new ArgumentsPreviewer(), NullLogger.Instance);
 
         var teamId = Guid.NewGuid();
         var victim = Guid.NewGuid();   // a teammate the model tries to impersonate
@@ -293,10 +299,10 @@ public class AgentToolRegistryTests
             });
         }
 
-        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken ct)
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, SubmitPullRequestReviewInput input, Guid? actorUserId, CancellationToken ct)
         {
             LastActorUserId = actorUserId;
-            return Task.FromResult(new RemotePullRequestReview { Verdict = verdict, WebUrl = "https://x" });
+            return Task.FromResult(new RemotePullRequestReview { Verdict = input.Verdict, WebUrl = "https://x" });
         }
 
         public Task<IReadOnlyList<RemotePullRequest>> ListAsync(Guid repositoryId, Guid teamId, PullRequestState? state, int page, int perPage, CancellationToken ct) => throw new NotSupportedException();

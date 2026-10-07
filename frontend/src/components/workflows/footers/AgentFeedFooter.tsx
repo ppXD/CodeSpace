@@ -8,6 +8,7 @@ import { useAgentRun, useAgentRunEventPreview, useToolCallWindow } from "@/hooks
 
 import { parseTurnKey } from "../mapBranches";
 import { formatTokens, formatUsd } from "../runActivity";
+import { ToolCallPreviewList } from "../AgentToolCalls";
 import { ReceiptFooter } from "./ReceiptFooter";
 import type { NodeFooterProps } from "./index";
 
@@ -108,7 +109,9 @@ function FeedBar({ events, metricsSource, supervisor, rows }: { events: AgentRun
  * ledger row ({@link ToolCallView} from {@link useToolCallWindow}) is read-only and carries no decision id or the
  * call's arguments, and {@link "../AgentToolCalls".AgentToolCalls} exposes no decision mutation to reuse — so
  * these are affordances, not yet a live API call (the task's "render an affordance, don't duplicate an API
- * call" branch). The tool name is shown; the call args aren't in the DTO, so no `{short arg}` is available.
+ * call" branch). The tool name is shown, and under it the first lines of what the call was shown to do on its
+ * approval card (the row's server-built preview: repository, pull request, head …), so the bar never asks about a
+ * call it cannot describe.
  */
 function ApprovalBar({ tool }: { tool: ToolCallView }) {
   const stop = (e: React.MouseEvent) => e.stopPropagation();
@@ -119,6 +122,7 @@ function ApprovalBar({ tool }: { tool: ToolCallView }) {
         <span className="wf-rf-feed-ic" data-icon="shield" aria-hidden="true"><Ic.Shield size={12} /></span>
         <span className="wf-rf-feed-title">Awaiting approval: {tool.toolKind}</span>
       </div>
+      <ToolCallPreviewList preview={tool.preview} limit={4} />
       <div className="wf-rf-approve-row">
         <button type="button" className="wf-rf-approve" onClick={stop} title="Approve — not yet wired (B3-followup)">Approve</button>
         <button type="button" className="wf-rf-deny" onClick={stop} title="Deny — not yet wired (B3-followup)">Deny</button>

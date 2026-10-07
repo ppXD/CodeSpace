@@ -1,5 +1,4 @@
 using CodeSpace.Messages.Dtos.Providers;
-using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Providers.Capabilities;
 
@@ -14,9 +13,10 @@ namespace CodeSpace.Core.Services.Providers.Capabilities;
 public interface IPullRequestReviewCapability : IProviderCapability
 {
     /// <summary>
-    /// Submit <paramref name="verdict"/> (with an optional markdown <paramref name="body"/>) to PR/MR
-    /// <paramref name="number"/>. The provider maps the neutral verdict to its own API. Throws when the
-    /// bound credential lacks the required scope (mapped to 422 with the missing-scope hint).
+    /// Submit <paramref name="input"/>'s verdict (with an optional markdown body) to PR/MR <paramref name="number"/>. The
+    /// provider maps the neutral verdict to its own API, and a pinned head to its own precondition (GitHub's review
+    /// <c>commit_id</c>, GitLab's approve <c>sha</c>). Throws when the bound credential lacks the required scope (mapped to
+    /// 422 with the missing-scope hint).
     /// </summary>
-    Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken);
+    Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, SubmitPullRequestReviewInput input, CancellationToken cancellationToken);
 }

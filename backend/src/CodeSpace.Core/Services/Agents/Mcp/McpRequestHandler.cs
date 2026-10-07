@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Chat;
@@ -78,6 +79,22 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// landed. It must never invite a blind retry.
     /// </summary>
     public const string InterruptedToolCallError = "This tool call was interrupted before it completed (the tool timed out, the run was cancelled, or the worker running it was lost), so whether its effect was applied is unknown; it may have been. It is recorded as failed: re-issuing it with identical arguments returns this same result without running it again. Check whether it took effect (for example, read back the PR or comment it would have created or changed) before re-issuing it with changed arguments.";
+
+    /// <summary>
+    /// The answer — recorded as the row's Denied reason — to a call whose target a reviewer already rejected in this run:
+    /// the same tool on the same target (a merge: the same repository and pull request at the same head and base), however
+    /// its other arguments differ. It is not put to a reviewer again, so a rejection cannot be worn down by asking until
+    /// someone approves. Load-bearing: an identical re-call replays exactly this text.
+    /// </summary>
+    public const string RejectedTargetError = "A reviewer already rejected this tool on this same target earlier in this run, so it was not put to a reviewer again and nothing ran. Changing other arguments does not make it a new request; change what it acts on (a pull request's commits) or the approach instead.";
+
+    /// <summary>
+    /// The answer — recorded as the row's Denied reason — to a call whose target already has a call awaiting a reviewer in
+    /// this run, from this connection or another of the same run: a target holds at most one live card, so a reviewer is
+    /// never asked twice about one thing at once, and rejecting one card cannot leave an approvable twin behind.
+    /// Load-bearing: an identical re-call replays exactly this text.
+    /// </summary>
+    public const string AwaitingTargetError = "A call of this tool on this same target is already awaiting a reviewer's decision in this run, so this one was not put to a reviewer and nothing ran. Wait for that decision by re-issuing that call exactly; re-issuing this one returns this same answer.";
 
     /// <summary>The approval card's two button keys. The resolver (<see cref="IToolCallApprovalResolver"/>) only ever acts on these two; both resolve the wait (first-wins) — reject fails the call, approve stamps the decision for the handler to execute.</summary>
     private const string ApproveKey = "approve";
@@ -380,42 +397,106 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// terminal duplicate replays. The side effect ALWAYS runs behind the single-winner AwaitingApproval→Running
     /// execution claim in <see cref="ClaimThenExecuteAsync"/> (BEFORE <c>tool.CallAsync</c>), so of any number of
     /// executors that reach an approved row exactly one runs it once and every other replays — no double side effect.
+    /// It starts from what the call will do (its preview, which the card shows and the row keeps): a call whose preview
+    /// cannot be resolved is answered before anything is claimed, and an approved call runs with the pins its row kept.
     /// </summary>
     private async Task<JsonElement> RunApprovalFlowAsync(IAgentTool tool, string name, JsonElement arguments, CancellationToken cancellationToken)
     {
+        ToolCallPreview preview;
+
+        try
+        {
+            preview = await PreviewForApprovalAsync(tool, arguments, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ToolCallPreviewException ex)
+        {
+            return ToolResult(isError: true, ex.Message);   // what the card must show cannot be read — answered, nothing claimed or posted
+        }
+
+        return await ClaimForApprovalAsync(new ApprovalRequest(tool, name, arguments, preview), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// What the call will do, resolved by its tool (<see cref="IAgentTool.PreviewAsync"/>) and made fit for a human:
+    /// redacted, on one line per value and bounded (<see cref="ToolCallPreviews.Finish"/>). Resolved before the claim, so a
+    /// call whose pull request cannot be read is answered with no row parked — the cost is one provider read on each
+    /// identical re-call, whose own row then answers it.
+    /// </summary>
+    private async Task<ToolCallPreview> PreviewForApprovalAsync(IAgentTool tool, JsonElement arguments, CancellationToken cancellationToken) =>
+        ToolCallPreviews.Finish(await tool.PreviewAsync(CallFor(arguments), cancellationToken).ConfigureAwait(false), _redactor);
+
+    private async Task<JsonElement> ClaimForApprovalAsync(ApprovalRequest request, CancellationToken cancellationToken)
+    {
         var teamId = _teamId!.Value;   // CanServeApprovalAsync already proved team + ledger + collaborators non-null AND the conversation is the run's team's
 
-        var inputHash = ToolCallKey.InputHash(arguments);   // SERVER-derived — never read from the wire
-        var key = ToolCallKey.For(tool.Kind, inputHash);
+        var inputHash = ToolCallKey.InputHash(request.Arguments);   // SERVER-derived — never read from the wire
+        var key = ToolCallKey.For(request.Tool.Kind, inputHash);
 
-        var claim = await _ledger!.TryClaimAsync(_runId, teamId, tool.Kind, key, inputHash, _fenceEpoch, cancellationToken).ConfigureAwait(false);
+        var claim = await _ledger!.TryClaimAsync(_runId, teamId, request.Tool.Kind, key, inputHash, _fenceEpoch, cancellationToken).ConfigureAwait(false);
 
         return claim.Outcome switch
         {
             ToolCallClaimOutcome.Duplicate => ReplayPriorResult(claim),                                            // already resolved — replay (approved+executed, rejected, or expired)
-            ToolCallClaimOutcome.InFlight => await ResumeOrTicketAsync(tool, name, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),   // a re-call of a still-parked row — never a second card
-            _ => await ParkForApprovalAsync(tool, name, arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),                              // fresh claim — park + post + block
+            ToolCallClaimOutcome.InFlight => await ResumeOrTicketAsync(request.Tool, request.Name, request.Arguments, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),   // a re-call of a still-parked row — never a second card
+            _ => await ParkUnlessTargetTakenAsync(request, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),                                                            // fresh claim — park + post + block
         };
     }
 
     /// <summary>
-    /// A FRESH claim's park: CAS Pending → AwaitingApproval (stamping token + deadline), post the redacted approval
-    /// card (stamping its message id), then BLOCK on the bounded wait. If the CAS is lost (a concurrent path already
-    /// parked or terminated the row), DON'T post — re-bind to whatever the row became (the no-second-card guard). If the
-    /// post throws, the row stays parked with no card, and the next identical call posts it (<see cref="ResumeOrTicketAsync"/>).
+    /// A fresh claim is put to a reviewer unless its target — the same tool on the same target, keyed server-side from
+    /// <see cref="ToolCallPreview.Target"/> — is already taken in this run. A reviewer rejected it: a call can differ from a
+    /// rejected one in arguments that do not change what it acts on (a merge's commit text), and putting that to a reviewer
+    /// again, on a card that reads the same, would wear the rejection down. Or a call on it already awaits a reviewer,
+    /// perhaps from another connection of the run: a second card would ask about one thing twice, and rejecting one would
+    /// leave the other approvable. Either way the claim is Denied, with nothing run and no card.
     /// </summary>
-    private async Task<JsonElement> ParkForApprovalAsync(IAgentTool tool, string name, JsonElement arguments, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    private async Task<JsonElement> ParkUnlessTargetTakenAsync(ApprovalRequest request, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
-        var token = Guid.NewGuid().ToString("N");
-        var deadlineAt = DateTimeOffset.UtcNow.AddSeconds(ApprovalBoundSeconds());
+        var target = TargetKey(request);
 
-        var parked = await _ledger!.TryBeginApprovalAsync(ledgerId, teamId, token, deadlineAt, cancellationToken).ConfigureAwait(false);
+        if (await _ledger!.WasTargetRejectedAsync(_runId, teamId, target, cancellationToken).ConfigureAwait(false))
+            return await DenyTakenTargetAsync(request.Name, RejectedTargetError, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
-        if (!parked) return await ResumeOrTicketAsync(tool, name, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        if (await _ledger.IsTargetAwaitingApprovalAsync(_runId, teamId, target, ledgerId, cancellationToken).ConfigureAwait(false))
+            return await DenyTakenTargetAsync(request.Name, AwaitingTargetError, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
-        await PostAndRecordApprovalCardAsync(tool, name, token, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        return await ParkForApprovalAsync(request, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
 
-        return await BlockForDecisionAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    private async Task<JsonElement> DenyTakenTargetAsync(string toolName, string error, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        _logger.LogWarning("Agent run {RunId}: tool {ToolName} asked on a target already taken in the run; denied without a card: {Reason}", _runId, toolName, error);
+
+        return await RecordTerminalOrReplayAsync(teamId, ledgerId, ToolCallLedgerStatus.Denied, resultJson: null, error, ToolResult(isError: true, error), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The server-derived key of the call's target: <c>toolKind:SHA-256(canonical(target))</c>, the same shape as the idempotency key.</summary>
+    private static string TargetKey(ApprovalRequest request) => ToolCallKey.For(request.Tool.Kind, ToolCallKey.InputHash(request.Preview.Target));
+
+    /// <summary>
+    /// A FRESH claim's park: CAS Pending → AwaitingApproval (stamping token + deadline, and the preview + target the card
+    /// is built from), post the redacted approval card (stamping its message id), then BLOCK on the bounded wait. If the
+    /// CAS is lost (a concurrent path already parked or terminated the row), DON'T post — re-bind to whatever the row
+    /// became (the no-second-card guard). If the post throws, the row stays parked with no card, and the next identical
+    /// call posts it from the row's own preview (<see cref="ResumeOrTicketAsync"/>).
+    /// </summary>
+    private async Task<JsonElement> ParkForApprovalAsync(ApprovalRequest request, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var park = new ToolCallApprovalPark
+        {
+            Token = Guid.NewGuid().ToString("N"),
+            DeadlineAt = DateTimeOffset.UtcNow.AddSeconds(ApprovalBoundSeconds()),
+            PreviewJson = ToolCallPreviews.Serialize(request.Preview),
+            Target = TargetKey(request),
+        };
+
+        var parked = await _ledger!.TryBeginApprovalAsync(ledgerId, teamId, park, cancellationToken).ConfigureAwait(false);
+
+        if (!parked) return await ResumeOrTicketAsync(request.Tool, request.Name, request.Arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        await PostAndRecordApprovalCardAsync(ApprovalCardBody(request.Name, request.Tool, request.Preview), park.Token, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        return await BlockForDecisionAsync(request.Tool, request.Arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -434,12 +515,38 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return ReplayTerminalState(state);
 
-        if (state.ApprovedAt is not null) return await ClaimThenExecuteAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        if (state.ApprovedAt is not null) return await ExecuteApprovedAsync(tool, arguments, state, ledgerId, cancellationToken).ConfigureAwait(false);
 
-        if (UnpostedCardToken(state) is { } token) await RepostApprovalCardAsync(tool, name, token, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        if (UnpostedCardToken(state) is { } token) await RepostApprovalCardAsync(ApprovalCardBody(name, tool, ToolCallPreviews.Parse(state.PreviewJson)), token, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
         return await BlockForDecisionAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// An approved row runs — unless a reviewer rejected its target in this run since it was parked: a rejection of the
+    /// target outranks an approval of it that has not run (two cards on one target parked an instant apart, one approved,
+    /// the other rejected). Then it is settled as rejected, nothing runs, and an identical re-call replays that. A row
+    /// parked with no target has nothing to compare.
+    /// </summary>
+    private async Task<JsonElement> ExecuteApprovedAsync(IAgentTool tool, JsonElement arguments, ToolCallApprovalState state, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var teamId = _teamId!.Value;   // only an approval flow reaches an approved row, and it proved the team first
+
+        if (state.ApprovalTarget is { } target && await _ledger!.WasTargetRejectedAsync(_runId, teamId, target, cancellationToken).ConfigureAwait(false))
+            return await RefuseRejectedTargetAsync(tool.Kind, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        return await ClaimThenExecuteAsync(tool, Pinned(arguments, state), teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task<JsonElement> RefuseRejectedTargetAsync(string toolKind, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        _logger.LogWarning("Agent run {RunId}: approved tool call {LedgerId} ({ToolKind}) not run — a reviewer rejected its target since it was parked", _runId, ledgerId, toolKind);
+
+        return await RecordTerminalOrReplayAsync(teamId, ledgerId, ToolCallLedgerStatus.Failed, resultJson: null, ToolCallApprovalResolver.RejectedError, ToolResult(isError: true, ToolCallApprovalResolver.RejectedError), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The arguments an approved call executes with: its own, with the pins its row's preview carries (the head and base a merge's card showed) written over them, so it acts only on what the reviewer saw.</summary>
+    private static JsonElement Pinned(JsonElement arguments, ToolCallApprovalState state) => ToolCallPreviews.Pinned(arguments, ToolCallPreviews.Parse(state.PreviewJson)?.Pins);
 
     /// <summary>The token of a row parked for approval that records no card — its park's post threw — else null. A row with a recorded card, or not yet parked, has nothing to re-post.</summary>
     private static string? UnpostedCardToken(ToolCallApprovalState state) =>
@@ -451,17 +558,17 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// mid-post can add a second card. Each card serializes only its own clicks, but both carry the one token, and the
     /// resolver's CAS lets the row take only the first decision from either card — a later click on the other is refused.
     /// </summary>
-    private async Task RepostApprovalCardAsync(IAgentTool tool, string name, string token, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    private async Task RepostApprovalCardAsync(string body, string token, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
         _logger.LogWarning("Agent run {RunId}: tool call {LedgerId} is parked for approval but records no card (its post failed); posting it now", _runId, ledgerId);
 
-        await PostAndRecordApprovalCardAsync(tool, name, token, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        await PostAndRecordApprovalCardAsync(body, token, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>Post the approval card carrying <paramref name="token"/> and record its message id on the row — the park's post, and the re-post of a park whose post never landed.</summary>
-    private async Task PostAndRecordApprovalCardAsync(IAgentTool tool, string name, string token, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    private async Task PostAndRecordApprovalCardAsync(string body, string token, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
-        var messageId = await PostApprovalCardAsync(tool, name, token, cancellationToken).ConfigureAwait(false);
+        var messageId = await PostApprovalCardAsync(body, token, cancellationToken).ConfigureAwait(false);
 
         await _ledger!.SetApprovalMessageAsync(ledgerId, teamId, messageId, cancellationToken).ConfigureAwait(false);
     }
@@ -541,7 +648,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         if (ToolCallLedgerStateMachine.IsTerminal(state.Status)) return ReplayTerminalState(state);
 
-        if (state.ApprovedAt is not null) return await ClaimThenExecuteAsync(tool, arguments, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        if (state.ApprovedAt is not null) return await ExecuteApprovedAsync(tool, arguments, state, ledgerId, cancellationToken).ConfigureAwait(false);
 
         return null;
     }
@@ -630,7 +737,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         var token = Guid.NewGuid().ToString("N");
         var deadlineAt = DateTimeOffset.UtcNow.AddSeconds(DecisionTimeoutSeconds(arguments));
 
-        var parked = await _ledger!.TryBeginApprovalAsync(ledgerId, teamId, token, deadlineAt, cancellationToken).ConfigureAwait(false);
+        var parked = await _ledger!.TryBeginApprovalAsync(ledgerId, teamId, new ToolCallApprovalPark { Token = token, DeadlineAt = deadlineAt }, cancellationToken).ConfigureAwait(false);
 
         if (!parked) return await ResumeDecisionOrTicketAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
@@ -834,12 +941,12 @@ public sealed class McpRequestHandler : IMcpRequestHandler
             + (request.RecommendedOption is { Length: > 0 } rec ? $"\n\n_Recommended:_ {rec}" : ""));
 
     /// <summary>
-    /// Build + post the REDACTED approval card into the run's approval conversation. The body names the tool + a
-    /// redacted argument summary + the run id (no secret reaches the message); the server-side <see cref="ToolCallApprovalTarget"/>
-    /// carries the token (omitted from the client-facing view). The component is built by the registry (mirrors
-    /// ChatPostMessageNode) so a future card kind is a factory change, not an edit here. Returns the posted message id.
+    /// Post the REDACTED approval card (<see cref="ApprovalCardBody"/>) into the run's approval conversation; the
+    /// server-side <see cref="ToolCallApprovalTarget"/> carries the token (omitted from the client-facing view). The
+    /// component is built by the registry (mirrors ChatPostMessageNode) so a future card kind is a factory change, not an
+    /// edit here. Returns the posted message id.
     /// </summary>
-    private async Task<Guid> PostApprovalCardAsync(IAgentTool tool, string name, string token, CancellationToken cancellationToken)
+    private async Task<Guid> PostApprovalCardAsync(string body, string token, CancellationToken cancellationToken)
     {
         var component = _components!.Build(ApprovalButtonsConfig())
             ?? throw new InvalidOperationException("The approval action-buttons component factory is not registered.");
@@ -852,7 +959,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
             Resolve = new ResolvePolicy(),    // first responder wins
         };
 
-        var posted = await _bot!.PostAsBotAsync(_approvalConversationId!.Value, ApprovalCardBody(name, tool), interaction, cancellationToken).ConfigureAwait(false);
+        var posted = await _bot!.PostAsBotAsync(_approvalConversationId!.Value, body, interaction, cancellationToken).ConfigureAwait(false);
 
         return posted.Id;
     }
@@ -868,9 +975,17 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         },
     }, AgentJson.Options);
 
-    /// <summary>The redacted card body: tool + a redacted argument summary + the run id. Routed through <see cref="ToolResult"/>'s redactor indirectly via the redactor here — the message must never carry a secret.</summary>
-    private string ApprovalCardBody(string name, IAgentTool tool) =>
-        _redactor.Redact($"Agent run {_runId} requests approval to run **{name}** ({tool.Description}). Approve to let it proceed, or reject to refuse it.");
+    /// <summary>
+    /// The redacted card body: the run id, the tool, and what the call will do — the finished preview, one line per value
+    /// (<see cref="ToolCallPreviews.CardText"/>). Plain text: the chat shows a message body as typed, so markdown would
+    /// reach the reviewer as stray asterisks and backslashes. A row parked before previews existed has none, and its card
+    /// names the tool alone. Routed through the run's redactor as a whole too: the message must never carry a secret.
+    /// </summary>
+    private string ApprovalCardBody(string name, IAgentTool tool, ToolCallPreview? preview) =>
+        _redactor.Redact($"Agent run {_runId} requests approval to run {name} ({tool.Description}).{ToolCallPreviews.CardText(preview)}\n\nApprove to let it proceed, or reject to refuse it.");
+
+    /// <summary>A call on its way to a reviewer: the tool, the name it was called by, the model's arguments, and its finished preview.</summary>
+    private sealed record ApprovalRequest(IAgentTool Tool, string Name, JsonElement Arguments, ToolCallPreview Preview);
 
     /// <summary>The typed pending-ticket returned when the bound elapses with no decision — names the ledger ticket so the model (or operator) can re-issue the exact call to retry once a human approves.</summary>
     private JsonElement PendingTicket(Guid ledgerId) =>

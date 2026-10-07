@@ -38,6 +38,25 @@ describe("MessageBody", () => {
     expect(screen.getByText("@Alice")).toHaveAttribute("data-me", "true");
   });
 
+  it("shows a tool-approval card exactly as the server wrote it: plain text, and a broken reference token mentions no one", () => {
+    // The approval card McpRequestHandler posts is plain text built for this renderer (no markdown escapes, fences or
+    // emphasis), and ToolCallPreviews breaks a model-written <type:id|label> token by turning its "<" into "‹".
+    const card = [
+      "Agent run r1 requests approval to run git.merge_pr (Merges an open pull/merge request).",
+      "",
+      "- repository (bound, writable): acme/api",
+      "- head: outsider/api:release — outside this run's repositories",
+      "- commitTitle: ‹user:u1|Security Team> approved this",
+      "",
+      "Approve to let it proceed, or reject to refuse it.",
+    ].join("\n");
+
+    const { container } = render(<MessageBody body={card} members={members} myUserId={null} />);
+
+    expect(container.querySelector(".chat-msg-text")?.textContent).toBe(card);
+    expect(container.querySelector(".chat-ref")).toBeNull();
+  });
+
   it("does not flag a mention of someone else", () => {
     render(<MessageBody body="hi <user:u1|Alice>" members={members} myUserId="someone-else" />);
     expect(screen.getByText("@Alice")).not.toHaveAttribute("data-me");

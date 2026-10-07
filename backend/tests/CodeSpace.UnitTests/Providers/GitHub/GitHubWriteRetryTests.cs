@@ -118,7 +118,7 @@ public sealed class GitHubWriteRetryTests : IDisposable
         var reviews = new ForgeCollection(scenario, ReviewJson);
         _github.Answer("POST", "/repos/acme/api/pulls/7/reviews", reviews.Create).Answer("GET", "/repos/acme/api/pulls/7/reviews", reviews.List);
 
-        var review = await Provider().SubmitReviewAsync(Context(), Repository, 7, PullRequestReviewVerdict.RequestChanges, "Please add a test.", CancellationToken.None);
+        var review = await Provider().SubmitReviewAsync(Context(), Repository, 7, new SubmitPullRequestReviewInput { Verdict = PullRequestReviewVerdict.RequestChanges, Body = "Please add a test." }, CancellationToken.None);
 
         var landed = reviews.Stored.ShouldHaveSingleItem("a review that landed must not be submitted again");
         review.ExternalId.ShouldBe(landed.Id.ToString());

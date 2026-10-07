@@ -62,6 +62,15 @@ public interface IAgentTool
     /// </summary>
     Task<string?> RefusalAsync(AgentToolCall call, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
 
+    /// <summary>
+    /// What this call will do, resolved server-side for the human asked to approve it — the lines its approval card shows,
+    /// the target a rejection sticks to, and any input pinned to what the card showed. Consulted only for a call the gate
+    /// parks for approval, after <see cref="RefusalAsync"/> admitted it; the MCP handler redacts and bounds it. Throws
+    /// <c>ToolCallPreviewException</c> when what the card must show cannot be read, so the call is answered instead of
+    /// parked. Default: the arguments as given, the whole call its target.
+    /// </summary>
+    Task<ToolCallPreview> PreviewAsync(AgentToolCall call, CancellationToken cancellationToken) => Task.FromResult(ToolCallPreviews.FromArguments(call.Input));
+
     /// <summary>Execute the (already-validated, already-permitted) call to a structured result. Errors come back as a typed <see cref="AgentToolResult"/>, not a thrown exception.</summary>
     Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken cancellationToken);
 }

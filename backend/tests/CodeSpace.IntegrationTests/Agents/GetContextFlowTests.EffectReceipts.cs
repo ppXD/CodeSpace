@@ -196,7 +196,7 @@ public partial class GetContextFlowTests
         var ledgerId = (await ledger.TryClaimAsync(runId, teamId, "git.open_pr", $"git.open_pr:{Guid.NewGuid():N}", new string('0', 64), 0, CancellationToken.None)).LedgerId;
         var token = $"tok-{Guid.NewGuid():N}";
 
-        (await ledger.TryBeginApprovalAsync(ledgerId, teamId, token, DateTimeOffset.UtcNow.AddMinutes(10), CancellationToken.None)).ShouldBeTrue();
+        (await ledger.TryBeginApprovalAsync(ledgerId, teamId, new ToolCallApprovalPark { Token = token, DeadlineAt = DateTimeOffset.UtcNow.AddMinutes(10) }, CancellationToken.None)).ShouldBeTrue();
         (await scope.Resolve<IToolCallApprovalResolver>().ResolveByTokenAsync(token, "reject", reviewerId, teamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);
     }
 

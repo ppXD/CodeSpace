@@ -25,6 +25,10 @@ namespace CodeSpace.Core.Services.Agents.Tools;
 /// a ref of read-only context only at its bound or default branch, and a write also meets the repository's publish
 /// policy (<see cref="IAgentRepositoryPolicy"/>). The same check answers <see cref="RefusalAsync"/>, so the MCP layer
 /// refuses such a call before it parks it for a human's approval, and runs again when the call executes.</para>
+///
+/// <para>A call names only the inputs the node's schema declares (the advertised schema says so with
+/// <c>additionalProperties: false</c>): an undeclared key reaches no node, so it can neither carry hidden meaning nor make
+/// a rejected call look new. A call parked for approval is previewed from the manifest by <see cref="IAgentToolPreviewer"/>.</para>
 /// </summary>
 public sealed class NodeAgentTool : IAgentTool
 {
@@ -33,19 +37,27 @@ public sealed class NodeAgentTool : IAgentTool
     private readonly INodeRuntime _node;
     private readonly INodeInvocationExecutor _invocations;
     private readonly IAgentRepositoryPolicy _repositoryPolicy;
+    private readonly IAgentToolPreviewer _previewer;
     private readonly ILogger _logger;
+    private readonly IReadOnlyList<string> _declaredInputs;
 
-    public NodeAgentTool(INodeRuntime node, INodeInvocationExecutor invocations, IAgentRepositoryPolicy repositoryPolicy, ILogger logger)
+    public NodeAgentTool(INodeRuntime node, INodeInvocationExecutor invocations, IAgentRepositoryPolicy repositoryPolicy, IAgentToolPreviewer previewer, ILogger logger)
     {
         _node = node;
         _invocations = invocations;
         _repositoryPolicy = repositoryPolicy;
+        _previewer = previewer;
         _logger = logger;
+        _declaredInputs = AgentToolInputs.Declared(node.Manifest.InputSchema);
+        InputSchema = ClosedSchema(node.Manifest.InputSchema);
     }
 
     public string Kind => _node.TypeKey;
     public string Description => _node.Manifest.Description ?? _node.Manifest.DisplayName;
-    public JsonElement InputSchema => _node.Manifest.InputSchema;
+
+    /// <summary>The node's input schema, closed to the keys it declares — what <see cref="ValidateInput"/> enforces.</summary>
+    public JsonElement InputSchema { get; }
+
     public JsonElement OutputSchema => _node.Manifest.OutputSchema;
 
     // Fail-closed via the node's side-effect flag: a read-only node is safe + needs no approval; a side-effecting
@@ -58,24 +70,22 @@ public sealed class NodeAgentTool : IAgentTool
     // Unleashed's Allow → RequireApproval. Default false leaves every reversible write Allow-able at Unleashed.
     public bool AlwaysRequiresApproval => _node.Manifest.AlwaysRequiresApproval;
 
-    public AgentToolValidation ValidateInput(JsonElement input) =>
-        input.ValueKind == JsonValueKind.Object ? AgentToolValidation.Valid : AgentToolValidation.Invalid("Tool input must be a JSON object.");
+    public AgentToolValidation ValidateInput(JsonElement input)
+    {
+        if (input.ValueKind != JsonValueKind.Object) return AgentToolValidation.Invalid("Tool input must be a JSON object.");
 
-    public Task<string?> RefusalAsync(AgentToolCall call, CancellationToken cancellationToken) => RepositoryRefusalAsync(call, ReadInputs(call), cancellationToken);
+        var undeclared = input.EnumerateObject().Select(property => property.Name).Where(name => !_declaredInputs.Contains(name, StringComparer.Ordinal)).ToList();
+
+        return undeclared.Count == 0 ? AgentToolValidation.Valid : AgentToolValidation.Invalid(UndeclaredInputs(undeclared));
+    }
+
+    public Task<string?> RefusalAsync(AgentToolCall call, CancellationToken cancellationToken) => RepositoryRefusalAsync(call, ToolInputs(call), cancellationToken);
+
+    public Task<ToolCallPreview> PreviewAsync(AgentToolCall call, CancellationToken cancellationToken) => _previewer.PreviewAsync(_node.Manifest, call, ToolInputs(call), cancellationToken);
 
     public async Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken cancellationToken)
     {
-        var inputs = ReadInputs(call);
-
-        // Strip the act-as-user actor key from model-controlled input. ActsAsUser ("act as this CodeSpace user's
-        // own linked provider identity", Model B) is an ENGINE-RESPOND-PATH feature: it is only safe because
-        // WorkflowResumeService runs ActorIdentityRequirementGate first, proving the AUTHENTICATED responder IS
-        // that user before the node spends their stored OAuth token. No such gate runs on this synthetic tool path,
-        // so honoring a model-supplied actor id would let the model author a PR — or forge an APPROVE review — as
-        // ANY team member who linked an identity (per-user impersonation). Dropping it forces actAsUserId → null in
-        // the node, so a tool-invoked write acts as the repo CONNECTION credential, never a specific user. Generic
-        // via the manifest, so every present + future act-as-user node is covered without naming a key here.
-        if (_node.Manifest.ActsAsUser is { } actsAsUser) inputs.Remove(actsAsUser.ActorInputKey);
+        var inputs = ToolInputs(call);
 
         if (await RepositoryRefusalAsync(call, inputs, cancellationToken).ConfigureAwait(false) is { } refusal) return AgentToolResult.Fail(refusal);
 
@@ -110,10 +120,41 @@ public sealed class NodeAgentTool : IAgentTool
         };
     }
 
-    private static Dictionary<string, JsonElement> ReadInputs(AgentToolCall call) =>
-        call.Input.ValueKind == JsonValueKind.Object
+    /// <summary>
+    /// The inputs the node is given: the model's, without the act-as-user actor key. ActsAsUser ("act as this CodeSpace
+    /// user's own linked provider identity", Model B) is an ENGINE-RESPOND-PATH feature: it is only safe because
+    /// WorkflowResumeService runs ActorIdentityRequirementGate first, proving the AUTHENTICATED responder IS that user
+    /// before the node spends their stored OAuth token. No such gate runs on this synthetic tool path, so honoring a
+    /// model-supplied actor id would let the model author a PR — or forge an APPROVE review — as ANY team member who
+    /// linked an identity (per-user impersonation). Dropping it forces actAsUserId → null in the node, so a tool-invoked
+    /// write acts as the repo CONNECTION credential, never a specific user — and the approval card, built from the same
+    /// inputs, never shows an identity the call will not act as. Generic via the manifest, so every present + future
+    /// act-as-user node is covered without naming a key here.
+    /// </summary>
+    private Dictionary<string, JsonElement> ToolInputs(AgentToolCall call)
+    {
+        var inputs = call.Input.ValueKind == JsonValueKind.Object
             ? call.Input.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone())
             : new Dictionary<string, JsonElement>();
+
+        if (_node.Manifest.ActsAsUser is { } actsAsUser) inputs.Remove(actsAsUser.ActorInputKey);
+
+        return inputs;
+    }
+
+    private string UndeclaredInputs(IReadOnlyList<string> undeclared) =>
+        $"Tool '{_node.TypeKey}' does not take {string.Join(", ", undeclared.Select(name => $"'{name}'"))}. It takes only: {(_declaredInputs.Count == 0 ? "no inputs" : string.Join(", ", _declaredInputs))}.";
+
+    /// <summary><paramref name="schema"/> with <c>additionalProperties: false</c>, so the model is told up front what <see cref="ValidateInput"/> refuses. A schema that is not an object is advertised as it is.</summary>
+    private static JsonElement ClosedSchema(JsonElement schema)
+    {
+        if (schema.ValueKind != JsonValueKind.Object) return schema;
+
+        var closed = schema.EnumerateObject().ToDictionary(property => property.Name, property => property.Value);
+        closed["additionalProperties"] = JsonSerializer.SerializeToElement(false);
+
+        return JsonSerializer.SerializeToElement(closed);
+    }
 
     /// <summary>
     /// The calling run's hold on the repository the model named in the node's declared repository input. A repository the

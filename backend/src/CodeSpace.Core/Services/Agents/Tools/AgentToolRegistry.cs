@@ -17,11 +17,11 @@ public sealed class AgentToolRegistry : IAgentToolRegistry, IScopedDependency
 {
     private readonly IReadOnlyDictionary<string, IAgentTool> _byKind;
 
-    public AgentToolRegistry(IEnumerable<INodeRuntime> nodes, IEnumerable<IAgentTool> firstPartyTools, INodeInvocationExecutor nodeInvocations, IAgentRepositoryPolicy repositoryPolicy, ILoggerFactory loggerFactory)
+    public AgentToolRegistry(IEnumerable<INodeRuntime> nodes, IEnumerable<IAgentTool> firstPartyTools, INodeInvocationExecutor nodeInvocations, IAgentRepositoryPolicy repositoryPolicy, IAgentToolPreviewer previewer, ILoggerFactory loggerFactory)
     {
         var nodeTools = nodes
             .Where(n => n.Manifest.IsAgentToolEligible)
-            .Select(IAgentTool (n) => new NodeAgentTool(n, nodeInvocations, repositoryPolicy, loggerFactory.CreateLogger($"AgentTool.{n.TypeKey}")));
+            .Select(IAgentTool (n) => new NodeAgentTool(n, nodeInvocations, repositoryPolicy, previewer, loggerFactory.CreateLogger($"AgentTool.{n.TypeKey}")));
 
         var tools = nodeTools.Concat(firstPartyTools).ToList();
 

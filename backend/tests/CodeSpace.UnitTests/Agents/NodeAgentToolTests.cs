@@ -67,7 +67,19 @@ public class NodeAgentToolTests
         }
     }
 
-    private static NodeAgentTool Tool(INodeRuntime node, IAgentRepositoryPolicy? repositoryPolicy = null) => new(node, new TestNodeInvocations(node), repositoryPolicy ?? new RecordingRepositoryPolicy(refusal: null), NullLogger.Instance);
+    private static NodeAgentTool Tool(INodeRuntime node, IAgentRepositoryPolicy? repositoryPolicy = null, IAgentToolPreviewer? previewer = null) => new(node, new TestNodeInvocations(node), repositoryPolicy ?? new RecordingRepositoryPolicy(refusal: null), previewer ?? new RecordingPreviewer(), NullLogger.Instance);
+
+    /// <summary>Records what the tool hands the previewer — the manifest and the inputs as the node reads them — and answers with an empty preview.</summary>
+    private sealed class RecordingPreviewer : IAgentToolPreviewer
+    {
+        public List<(NodeManifest Manifest, AgentToolCall Call, IReadOnlyDictionary<string, JsonElement> Inputs)> Asked { get; } = new();
+
+        public Task<ToolCallPreview> PreviewAsync(NodeManifest manifest, AgentToolCall call, IReadOnlyDictionary<string, JsonElement> inputs, CancellationToken cancellationToken)
+        {
+            Asked.Add((manifest, call, inputs));
+            return Task.FromResult(new ToolCallPreview());
+        }
+    }
 
     /// <summary>A node that declares a repository input (<see cref="NodeManifest.RepositoryInput"/>) and records whether it ran — the shape every repository-taking builtin node has.</summary>
     private sealed class RepositoryNode : INodeRuntime
@@ -170,6 +182,56 @@ public class NodeAgentToolTests
 
         tool.ValidateInput(EmptyObject).IsValid.ShouldBeTrue();
         tool.ValidateInput(JsonSerializer.SerializeToElement("a string")).IsValid.ShouldBeFalse();
+    }
+
+    [Theory]
+    [InlineData("""{"zz":1}""", "'zz'")]                                   // an inert key that would make a rejected call look new
+    [InlineData("""{"number":7,"note":"x","Number":8}""", "'note', 'Number'")]   // keys are matched exactly, as the node reads them
+    public void An_input_the_schema_does_not_declare_is_refused_naming_what_the_tool_takes(string inputJson, string named)
+    {
+        var tool = Tool(new GitMergePullRequestNode(null!));
+
+        var validation = tool.ValidateInput(JsonDocument.Parse(inputJson).RootElement);
+
+        validation.IsValid.ShouldBeFalse();
+        validation.Error.ShouldBe($"Tool 'git.merge_pr' does not take {named}. It takes only: repositoryId, number, method, commitTitle, commitMessage, deleteSourceBranch, expectedHeadSha, expectedBaseBranch, actAsUserId.");
+    }
+
+    [Fact]
+    public void Every_declared_input_is_accepted()
+    {
+        var tool = Tool(new GitMergePullRequestNode(null!));
+        var input = JsonSerializer.SerializeToElement(new { repositoryId = Guid.NewGuid().ToString(), number = 7, method = "squash", commitTitle = "t", commitMessage = "m", deleteSourceBranch = true, expectedHeadSha = "0a1b", expectedBaseBranch = "main", actAsUserId = Guid.NewGuid().ToString() });
+
+        tool.ValidateInput(input).IsValid.ShouldBeTrue(tool.ValidateInput(input).Error);
+    }
+
+    [Fact]
+    public void The_advertised_schema_is_the_nodes_own_closed_to_its_declared_inputs()
+    {
+        var node = new GitMergePullRequestNode(null!);
+
+        var schema = Tool(node).InputSchema;
+
+        schema.GetProperty("additionalProperties").GetBoolean().ShouldBeFalse("the model is told up front that only declared inputs are taken");
+        JsonElement.DeepEquals(schema.GetProperty("properties"), node.Manifest.InputSchema.GetProperty("properties")).ShouldBeTrue("every declared input is advertised as the node declares it");
+        JsonElement.DeepEquals(schema.GetProperty("required"), node.Manifest.InputSchema.GetProperty("required")).ShouldBeTrue();
+        node.Manifest.InputSchema.TryGetProperty("additionalProperties", out _).ShouldBeFalse("the workflow editor's manifest is not changed");
+    }
+
+    [Fact]
+    public async Task The_preview_is_resolved_from_the_manifest_over_the_inputs_the_node_would_read()
+    {
+        var previewer = new RecordingPreviewer();
+        var node = new GitMergePullRequestNode(null!);
+        var call = new AgentToolCall { Input = JsonSerializer.SerializeToElement(new { repositoryId = BoundRepository.ToString(), number = 7, actAsUserId = Guid.NewGuid().ToString() }), TeamId = Guid.NewGuid(), CallerPosture = BoundTo(BoundRepository) };
+
+        await Tool(node, previewer: previewer).PreviewAsync(call, CancellationToken.None);
+
+        var asked = previewer.Asked.ShouldHaveSingleItem();
+        asked.Manifest.ShouldBeSameAs(node.Manifest);
+        asked.Call.ShouldBeSameAs(call);
+        asked.Inputs.Keys.ShouldBe(["repositoryId", "number"], ignoreOrder: true, "the actor key is stripped as the call strips it, so the card never shows an identity the call will not act as");
     }
 
     [Fact]
@@ -488,7 +550,7 @@ public class NodeAgentToolTests
         public Task<RemotePullRequestCounts> GetCountsAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<IReadOnlyList<RemotePullRequestCheck>> ListChecksAsync(Guid repositoryId, Guid teamId, int number, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<RemotePullRequestComment> PostCommentAsync(Guid repositoryId, Guid teamId, int number, string body, CancellationToken cancellationToken) => throw Reached("git.post_pr_comment", repositoryId);
-        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, PullRequestReviewVerdict verdict, string? body, Guid? actorUserId, CancellationToken cancellationToken) => throw Reached("git.pr_review", repositoryId);
+        public Task<RemotePullRequestReview> SubmitReviewAsync(Guid repositoryId, Guid teamId, int number, SubmitPullRequestReviewInput input, Guid? actorUserId, CancellationToken cancellationToken) => throw Reached("git.pr_review", repositoryId);
         public Task<RemotePullRequest> OpenPullRequestAsync(Guid repositoryId, Guid teamId, OpenPullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken) => throw Reached("git.open_pr", repositoryId);
         public Task<RemotePullRequestMergeResult> MergePullRequestAsync(Guid repositoryId, Guid teamId, int number, MergePullRequestInput input, Guid? actorUserId, CancellationToken cancellationToken) => throw Reached("git.merge_pr", repositoryId);
     }

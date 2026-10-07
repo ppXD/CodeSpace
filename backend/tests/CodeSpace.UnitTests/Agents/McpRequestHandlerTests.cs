@@ -37,8 +37,20 @@ public class McpRequestHandlerTests
         public Func<JsonElement, AgentToolValidation>? OnValidate { get; init; }
         public Func<AgentToolCall, CancellationToken, Task<AgentToolResult>>? OnCall { get; init; }
         public Func<AgentToolCall, string?>? OnRefusal { get; init; }
+
+        /// <summary>When set, the preview the tool resolves for a call parked for approval; unset keeps the interface default (the arguments as given).</summary>
+        public Func<AgentToolCall, ToolCallPreview>? OnPreview { get; init; }
+
         public int CallCount { get; private set; }
         public List<AgentToolCall> RefusalChecks { get; } = new();
+        public List<AgentToolCall> Calls { get; } = new();
+        public List<AgentToolCall> Previews { get; } = new();
+
+        public Task<ToolCallPreview> PreviewAsync(AgentToolCall call, CancellationToken cancellationToken)
+        {
+            Previews.Add(call);
+            return Task.FromResult(OnPreview?.Invoke(call) ?? ToolCallPreviews.FromArguments(call.Input));
+        }
 
         public AgentToolValidation ValidateInput(JsonElement input) => OnValidate?.Invoke(input) ?? AgentToolValidation.Valid;
 
@@ -51,6 +63,7 @@ public class McpRequestHandlerTests
         public Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken cancellationToken)
         {
             CallCount++;
+            Calls.Add(call);
             return OnCall?.Invoke(call, cancellationToken) ?? Task.FromResult(AgentToolResult.Ok(Parse("""{"ok":true}"""), 11));
         }
     }
@@ -927,15 +940,38 @@ public class McpRequestHandlerTests
         public Func<bool>? BeginApprovalResult { get; init; }
 
         /// <summary>The approval token the park stamped on the row — what a card for that row must carry.</summary>
-        public string? BegunApprovalToken { get; private set; }
+        public string? BegunApprovalToken => BegunPark?.Token;
 
-        public Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, string approvalToken, DateTimeOffset deadlineAt, CancellationToken ct)
+        /// <summary>Everything the park stamped on the row: token, deadline, preview and target.</summary>
+        public ToolCallApprovalPark? BegunPark { get; private set; }
+
+        public Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, ToolCallApprovalPark park, CancellationToken ct)
         {
             if (OnBeginApprovalThrow is { } make) throw make();
 
-            BegunApprovalToken = approvalToken;
+            BegunPark = park;
 
             return Task.FromResult(BeginApprovalResult?.Invoke() ?? false);
+        }
+
+        /// <summary>The targets a reviewer rejected earlier in the run; every lookup is recorded.</summary>
+        public HashSet<string> RejectedTargets { get; } = new();
+        public List<string> TargetLookups { get; } = new();
+
+        public Task<bool> WasTargetRejectedAsync(Guid agentRunId, Guid teamId, string approvalTarget, CancellationToken ct)
+        {
+            TargetLookups.Add(approvalTarget);
+            return Task.FromResult(RejectedTargets.Contains(approvalTarget));
+        }
+
+        /// <summary>The targets another call of the run is awaiting a reviewer on; every lookup is recorded with the row it excludes.</summary>
+        public HashSet<string> AwaitingTargets { get; } = new();
+        public List<(string Target, Guid Excluded)> AwaitingLookups { get; } = new();
+
+        public Task<bool> IsTargetAwaitingApprovalAsync(Guid agentRunId, Guid teamId, string approvalTarget, Guid excludeLedgerId, CancellationToken ct)
+        {
+            AwaitingLookups.Add((approvalTarget, excludeLedgerId));
+            return Task.FromResult(AwaitingTargets.Contains(approvalTarget));
         }
 
         /// <summary>Every card id recorded on a row.</summary>
@@ -1345,6 +1381,9 @@ public class McpRequestHandlerTests
         /// <summary>Every card actually posted: its message id and the interaction it carried.</summary>
         public List<(Guid Id, Messages.Dtos.Chat.Interactions.MessageInteraction? Interaction)> Posted { get; } = new();
 
+        /// <summary>The body of every card posted, in order.</summary>
+        public List<string> PostedBodies { get; } = new();
+
         public Task<Guid> GetOrCreateTeamBotAsync(Guid teamId, CancellationToken ct) => Task.FromResult(Guid.NewGuid());
         public Task<bool> ConversationBelongsToTeamAsync(Guid conversationId, Guid teamId, CancellationToken ct) => Task.FromResult(ConversationInTeam);
 
@@ -1358,6 +1397,7 @@ public class McpRequestHandlerTests
 
             var id = Guid.NewGuid();
             Posted.Add((id, interaction));
+            PostedBodies.Add(body);
             return Task.FromResult(new Messages.Dtos.Chat.MessageView { Id = id, ConversationId = conversationId, AuthorUserId = Guid.NewGuid(), Body = body, CreatedDate = DateTimeOffset.UnixEpoch, IsDeleted = false, References = Array.Empty<Messages.Dtos.Chat.MessageReferenceView>() });
         }
 
@@ -1678,5 +1718,176 @@ public class McpRequestHandlerTests
         var terminal = ledger.Terminals.ShouldHaveSingleItem();
         terminal.ResultJson!.ShouldNotContain(secret, customMessage: "the ledger must store the ALREADY-REDACTED result — no raw secret at rest");
         terminal.ResultJson!.ShouldContain(SecretRedactor.Placeholder);
+    }
+
+    // ── an informed approval: the card shows what the call will do, and a rejection sticks to its target ──
+
+    private const string PreviewSecret = "sk-live-preview-123";
+
+    /// <summary>What a merge's tool resolves for its card: the repository, the commit title (carrying a secret the run's redactor knows), a fork head, and the head it pins.</summary>
+    private static ToolCallPreview MergePreview(string commitTitle = $"Ship {PreviewSecret}") => new()
+    {
+        Target = Parse("""{"number":7,"repositoryId":"5f0c3a4e-0000-4000-8000-000000000007"}"""),
+        Lines =
+        [
+            new ToolCallPreviewLine { Label = "repository (bound, writable)", Value = "acme/api" },
+            new ToolCallPreviewLine { Label = "commitTitle", Value = commitTitle },
+            new ToolCallPreviewLine { Label = "head", Value = "outsider/api:release", OutsideRun = true },
+        ],
+        Pins = new Dictionary<string, string> { ["expectedHeadSha"] = "0a1b2c3d" },
+    };
+
+    private static string MergeTargetKey() => ToolCallKey.For("git.merge_pr", ToolCallKey.InputHash(MergePreview().Target));
+
+    private static McpRequestHandler PreviewingHandler(SpyLedger ledger, StubBot bot, IAgentTool tool) =>
+        new(new FakeRegistry(tool), AgentAutonomyLevel.Standard, Guid.NewGuid(), new SecretRedactor([PreviewSecret]), Guid.NewGuid(), ledger, fenceEpoch: 1, governanceEnabled: true,
+            approvalConversationId: Guid.NewGuid(), bot, new ArmedButNeverSignalledWaiters(), new StubComponents());
+
+    private static readonly ToolCallApprovalState RejectedRow = new() { Status = ToolCallLedgerStatus.Failed, Error = ToolCallApprovalResolver.RejectedError };
+
+    [Fact]
+    public async Task A_parked_calls_card_shows_what_it_will_do_and_the_row_keeps_the_same_redacted_preview_pins_and_target()
+    {
+        var ledger = new SpyLedger { BeginApprovalResult = () => true, ApprovalState = () => RejectedRow };   // parked, then a reviewer rejects
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, AlwaysApprove = true, OnPreview = _ => MergePreview() };
+
+        await WithinArmRaceBudgetAsync(PreviewingHandler(ledger, bot, tool).HandleAsync(Parse(Call("git.merge_pr", """{"number":7}""")), CancellationToken.None), "a parked merge");
+
+        var card = bot.PostedBodies.ShouldHaveSingleItem();
+        card.ShouldStartWith("Agent run ");
+        card.ShouldContain(" requests approval to run git.merge_pr (", customMessage: "plain text: the chat shows a body as typed, so no markdown emphasis");
+        card.ShouldContain("- repository (bound, writable): acme/api", customMessage: $"the card names the repository the call acts on:\n{card}");
+        card.ShouldContain($"- commitTitle: Ship {SecretRedactor.Placeholder}", customMessage: "the commit text is shown, redacted");
+        card.ShouldContain($"- head: outsider/api:release — {ToolCallPreviews.OutsideRunNote}", customMessage: "a head outside the run's repositories is flagged");
+        card.ShouldNotContain(PreviewSecret);
+        card.ShouldNotContain("`", customMessage: "no code fences");
+        card.ShouldNotContain("**git.merge_pr**", customMessage: "no markdown emphasis");
+
+        var park = ledger.BegunPark.ShouldNotBeNull();
+        park.Target.ShouldBe(MergeTargetKey(), "the row records the call's target, keyed server-side");
+        park.PreviewJson.ShouldNotBeNull().ShouldNotContain(PreviewSecret, customMessage: "the row is a leak surface too: the stored preview is the redacted one");
+        var stored = ToolCallPreviews.Parse(park.PreviewJson).ShouldNotBeNull();
+        stored.Lines.Select(line => line.Value).ShouldBe(["acme/api", $"Ship {SecretRedactor.Placeholder}", "outsider/api:release"], "the row keeps exactly what the card showed");
+        stored.Pins.ShouldBe(new Dictionary<string, string> { ["expectedHeadSha"] = "0a1b2c3d" }, "and the head the card showed, which the approved call runs with");
+        tool.Previews.ShouldHaveSingleItem().CallerPosture.ShouldNotBeNull("the tool resolves its preview knowing the calling run's binding");
+    }
+
+    [Fact]
+    public async Task A_call_whose_preview_cannot_be_resolved_is_answered_with_no_row_and_no_card()
+    {
+        var ledger = new SpyLedger();
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, AlwaysApprove = true, OnPreview = _ => throw new Core.Services.Agents.Exceptions.ToolCallPreviewException($"Couldn't read pull request #7: {PreviewSecret} refused") };
+
+        var result = (await Respond(PreviewingHandler(ledger, bot, tool), Call("git.merge_pr", """{"number":7}"""))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe($"Couldn't read pull request #7: {SecretRedactor.Placeholder} refused", "the reason reaches the model, through the redacting choke point");
+        ledger.Claims.ShouldBeEmpty("nothing is claimed for a call no reviewer could be shown");
+        bot.PostCount.ShouldBe(0);
+        tool.CallCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_call_on_a_target_a_reviewer_already_rejected_is_denied_without_a_card_however_its_other_arguments_differ()
+    {
+        var ledgerId = Guid.NewGuid();
+        var ledger = new SpyLedger { ClaimResult = () => ToolCallClaim.Proceed(ledgerId) };   // a new key: the agent changed the commit title
+        ledger.RejectedTargets.Add(MergeTargetKey());
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, AlwaysApprove = true, OnPreview = _ => MergePreview(commitTitle: "A different title") };
+
+        var result = (await Respond(PreviewingHandler(ledger, bot, tool), Call("git.merge_pr", """{"number":7,"commitTitle":"A different title"}"""))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe(McpRequestHandler.RejectedTargetError);
+        ledger.TargetLookups.ShouldBe([MergeTargetKey()], "the target is looked up by its server-derived key");
+        var terminal = ledger.Terminals.ShouldHaveSingleItem();
+        (terminal.LedgerId, terminal.Status, terminal.Error).ShouldBe((ledgerId, ToolCallLedgerStatus.Denied, McpRequestHandler.RejectedTargetError), "the fresh row is Denied, so an identical re-call replays the denial");
+        ledger.BegunPark.ShouldBeNull("it is never parked");
+        bot.PostCount.ShouldBe(0, "no reviewer is asked again for a target they rejected");
+        tool.CallCount.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_call_on_a_target_another_call_of_the_run_awaits_a_reviewer_on_is_denied_without_a_second_card()
+    {
+        var ledgerId = Guid.NewGuid();
+        var ledger = new SpyLedger { ClaimResult = () => ToolCallClaim.Proceed(ledgerId) };   // a new key: another connection asks to merge the same pull request another way
+        ledger.AwaitingTargets.Add(MergeTargetKey());
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, AlwaysApprove = true, OnPreview = _ => MergePreview(commitTitle: "Another way") };
+
+        var result = (await Respond(PreviewingHandler(ledger, bot, tool), Call("git.merge_pr", """{"number":7,"method":"rebase"}"""))).GetProperty("result");
+
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe(McpRequestHandler.AwaitingTargetError);
+        ledger.AwaitingLookups.ShouldBe([(MergeTargetKey(), ledgerId)], "the lookup excludes the fresh row itself");
+        var terminal = ledger.Terminals.ShouldHaveSingleItem();
+        (terminal.LedgerId, terminal.Status, terminal.Error).ShouldBe((ledgerId, ToolCallLedgerStatus.Denied, McpRequestHandler.AwaitingTargetError), "an identical re-call replays the denial");
+        ledger.BegunPark.ShouldBeNull("a target holds at most one live card");
+        bot.PostCount.ShouldBe(0);
+        tool.CallCount.ShouldBe(0);
+    }
+
+    [Theory]
+    [InlineData(true, 0, ToolCallLedgerStatus.Failed)]       // a reviewer rejected the target since this row was parked: the rejection outranks the approval
+    [InlineData(false, 1, ToolCallLedgerStatus.Succeeded)]   // nothing rejected it: the approved call runs, as before
+    public async Task An_approved_call_runs_only_while_its_target_stands_unrejected(bool targetRejected, int expectedRuns, ToolCallLedgerStatus expectedTerminal)
+    {
+        var ledgerId = Guid.NewGuid();
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ToolCallClaim.InFlight(ledgerId),
+            ApprovalState = () => new ToolCallApprovalState { Status = ToolCallLedgerStatus.AwaitingApproval, ApprovedAt = DateTimeOffset.UtcNow, ApprovalMessageId = Guid.NewGuid(), PreviewJson = ToolCallPreviews.Serialize(MergePreview()), ApprovalTarget = MergeTargetKey() },
+        };
+        if (targetRejected) ledger.RejectedTargets.Add(MergeTargetKey());
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, AlwaysApprove = true, OnPreview = _ => MergePreview() };
+
+        var result = (await Respond(PreviewingHandler(ledger, new StubBot { ConversationInTeam = true }, tool), Call("git.merge_pr", """{"number":7}"""))).GetProperty("result");
+
+        tool.CallCount.ShouldBe(expectedRuns);
+        ledger.ExecutionClaims.Count.ShouldBe(expectedRuns, "a refused row is never claimed for execution");
+        ledger.Terminals.ShouldHaveSingleItem().Status.ShouldBe(expectedTerminal);
+        if (targetRejected) result.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe(ToolCallApprovalResolver.RejectedError, "nothing ran because a reviewer rejected this target");
+    }
+
+    [Theory]
+    [InlineData(true, "0a1b2c3d")]   // the row's preview pins the head its card showed
+    [InlineData(false, "ffff")]      // a row parked with no preview runs with its own arguments, as before
+    public async Task An_approved_call_executes_with_the_pins_its_row_recorded_over_its_own_arguments(bool rowHasPreview, string expectedHead)
+    {
+        var ledgerId = Guid.NewGuid();
+        var ledger = new SpyLedger
+        {
+            ClaimResult = () => ToolCallClaim.InFlight(ledgerId),
+            ApprovalState = () => new ToolCallApprovalState { Status = ToolCallLedgerStatus.AwaitingApproval, ApprovedAt = DateTimeOffset.UtcNow, ApprovalMessageId = Guid.NewGuid(), PreviewJson = rowHasPreview ? ToolCallPreviews.Serialize(MergePreview()) : null },
+        };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, AlwaysApprove = true, OnPreview = _ => MergePreview() with { Pins = new Dictionary<string, string> { ["expectedHeadSha"] = "a-fresh-read" } } };
+
+        await Respond(PreviewingHandler(ledger, new StubBot { ConversationInTeam = true }, tool), Call("git.merge_pr", """{"number":7,"expectedHeadSha":"ffff"}"""));
+
+        var input = tool.Calls.ShouldHaveSingleItem().Input;
+        input.GetProperty("expectedHeadSha").GetString().ShouldBe(expectedHead, "the approved call runs at the head the reviewer saw — the row's pin, never a fresh read or the model's own value");
+        input.GetProperty("number").GetInt32().ShouldBe(7);
+    }
+
+    [Fact]
+    public async Task A_re_posted_card_shows_the_preview_its_row_was_parked_with()
+    {
+        var ledgerId = Guid.NewGuid();
+        var parked = ToolCallPreviews.Serialize(MergePreview(commitTitle: "as parked"));
+        var ledger = new SpyLedger { ClaimResult = () => ToolCallClaim.InFlight(ledgerId) };
+        ledger.ApprovalState = () => ledger.ApprovalMessages.Count == 0   // parked with no card, until the re-post records one; then a reviewer rejects
+            ? new ToolCallApprovalState { Status = ToolCallLedgerStatus.AwaitingApproval, ApprovalToken = "parked-token", PreviewJson = parked }
+            : RejectedRow;
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true, AlwaysApprove = true, OnPreview = _ => MergePreview(commitTitle: "as read now") };
+
+        await WithinCardlessBudgetAsync(PreviewingHandler(ledger, bot, tool).HandleAsync(Parse(Call("git.merge_pr", "{}")), CancellationToken.None));
+
+        var card = bot.PostedBodies.ShouldHaveSingleItem();
+        card.ShouldContain("- commitTitle: as parked", customMessage: "the card a reviewer approves is the one the row's pins were stamped from");
+        card.ShouldNotContain("as read now");
     }
 }

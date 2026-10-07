@@ -28,8 +28,8 @@ function ev(sequence: number, kind: string, text: string): AgentRunEventDto {
 }
 
 /** A governed tool call parked awaiting a human decision. */
-function pendingTool(toolKind: string): ToolCallView {
-  return { toolKind, status: "AwaitingApproval", createdDate: "2026-07-13T00:00:00.000Z", lastModifiedDate: "2026-07-13T00:00:00.000Z", error: null, approvedByUserId: null, approvedAt: null };
+function pendingTool(toolKind: string, preview: ToolCallView["preview"] = null): ToolCallView {
+  return { toolKind, status: "AwaitingApproval", createdDate: "2026-07-13T00:00:00.000Z", lastModifiedDate: "2026-07-13T00:00:00.000Z", error: null, approvedByUserId: null, approvedAt: null, preview };
 }
 
 /** A run row for the node — an agent.run row carries an agentRunId by default; override to drop it. */
@@ -139,6 +139,27 @@ describe("AgentFeedFooter — awaiting approval", () => {
     // Inline decision affordances render (wiring deferred — see the ApprovalBar TODO).
     expect(getByRole("button", { name: "Approve" })).not.toBeNull();
     expect(getByRole("button", { name: "Deny" })).not.toBeNull();
+  });
+});
+
+describe("AgentFeedFooter — what the pending call will do", () => {
+  it("shows the first lines of the parked call's preview under the approval title, counting the rest", () => {
+    agentState.status = "Running";
+    const lines = ["repository", "number", "method", "pull request", "head", "base"].map((label) => ({ label, value: `${label}-value`, outsideRun: label === "head" }));
+    agentState.tools = [pendingTool("git.merge_pr", { lines, pins: {} })];
+    const { container } = renderFooter("Suspended", [agentRow()]);
+
+    const preview = container.querySelector(".wf-rf-feed[data-approval] .tc-preview");
+    expect(Array.from(preview?.querySelectorAll("dt") ?? []).map((dt) => dt.textContent)).toEqual(["repository", "number", "method", "pull request"]);
+    expect(preview?.querySelector(".tc-preview-more")?.textContent).toBe("+2 more");
+  });
+
+  it("shows no preview for a pending call parked without one", () => {
+    agentState.status = "Running";
+    agentState.tools = [pendingTool("git.push")];
+    const { container } = renderFooter("Suspended", [agentRow()]);
+
+    expect(container.querySelector(".tc-preview")).toBeNull();
   });
 });
 

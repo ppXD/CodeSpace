@@ -258,8 +258,27 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             var projectId = int.Parse(repository.ExternalId);
             var labelColors = TryFetchProjectLabelColors(client, projectId);
             var mr = await client.GetMergeRequest(projectId).GetByIidAsync(number, new SingleMergeRequestQuery(), _).ConfigureAwait(false);
-            return ToRemotePullRequestDetail(mr, labelColors);
+            return ToRemotePullRequestDetail(mr, labelColors) with { HeadRepositoryFullPath = await SourceProjectPathAsync(client, mr, repository, _).ConfigureAwait(false) };
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The path of the project a merge request's source branch lives in: this repository's own, or a fork's, read by id.
+    /// Null when the fork cannot be read with this connection (deleted, or private to its owner) — a head that is not named
+    /// is not this repository either.
+    /// </summary>
+    private static async Task<string?> SourceProjectPathAsync(GitLabClient client, MergeRequest mr, RemoteRepository repository, CancellationToken cancellationToken)
+    {
+        if (mr.SourceProjectId == mr.TargetProjectId) return repository.FullPath;
+
+        try
+        {
+            return (await client.Projects.GetByIdAsync(mr.SourceProjectId, new SingleProjectQuery(), cancellationToken).ConfigureAwait(false)).PathWithNamespace;
+        }
+        catch (GitLabException)
+        {
+            return null;
+        }
     }
 
     public async Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken)
@@ -328,6 +347,8 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             Squash = input.Method == PullRequestMergeMethod.Squash,
             ShouldRemoveSourceBranch = input.DeleteSourceBranch,
             MergeCommitMessage = input.CommitMessage,
+            // GitLab refuses with 409 when the source branch's head is no longer this commit, so a pinned merge never takes commits pushed after it was approved.
+            Sha = input.ExpectedHeadSha,
         };
 
         // A merge is one-way: re-sent after it landed, GitLab answers 405 and fails a merge that succeeded. So a
@@ -908,10 +929,12 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         };
     }
 
-    public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, PullRequestReviewVerdict verdict, string? body, CancellationToken cancellationToken)
+    public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, SubmitPullRequestReviewInput input, CancellationToken cancellationToken)
     {
         var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
+        var verdict = input.Verdict;
+        var body = input.Body;
         var action = GitLabReviewPlan.ActionFor(verdict);
 
         // request_changes → retract any existing approval first. Raw call (NGitLab has no unapprove),
@@ -931,9 +954,10 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             throw new ProviderApiException(ProviderKind.GitLab, 403, nameof(SubmitReviewAsync), $"You can't approve merge request !{number} — you may be its author, or your role is below Developer.", new InvalidOperationException("UserCanApprove=false"));
 
         // approve → native GitLab approval (green badge, counts toward required approvals). Skipped
-        // when already approved — re-running the node is then an idempotent no-op, not a 401.
+        // when already approved — re-running the node is then an idempotent no-op, not a 401. A pinned head
+        // is sent as the approval's sha: GitLab refuses with 409 when the source branch moved, before the note.
         if (approveDecision == GitLabApproveDecision.Approve)
-            await ApproveOnceAsync(context.Instance, client.GetMergeRequest(projectId), number, cancellationToken).ConfigureAwait(false);
+            await ApproveOnceAsync(context.Instance, client.GetMergeRequest(projectId), number, input.ExpectedHeadSha, cancellationToken).ConfigureAwait(false);
 
         return await _resilience.ExecuteAsync(context.Instance, nameof(SubmitReviewAsync), _ =>
         {
@@ -960,10 +984,10 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// as done. A step of its own, so a retry of the review note can never re-send it. The approve's answer is not
     /// read — only that exactly one approve is in place — hence the untyped result.
     /// </summary>
-    private async Task ApproveOnceAsync(ProviderInstance instance, IMergeRequestClient mergeRequest, int iid, CancellationToken cancellationToken)
+    private async Task ApproveOnceAsync(ProviderInstance instance, IMergeRequestClient mergeRequest, int iid, string? expectedHeadSha, CancellationToken cancellationToken)
     {
         await _resilience.ExecuteNonIdempotentAsync<object>(instance, nameof(SubmitReviewAsync) + "/approve",
-            _ => Task.FromResult<object>(mergeRequest.Approve(iid, new MergeRequestApprove())),
+            _ => Task.FromResult<object>(mergeRequest.Approve(iid, new MergeRequestApprove { Sha = expectedHeadSha })),
             _ => Task.FromResult<object?>(mergeRequest.ApprovalClient(iid).Approvals is { UserHasApproved: true } approvals ? approvals : null),
             cancellationToken).ConfigureAwait(false);
     }
@@ -1888,6 +1912,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         var baseline = ToRemotePullRequest(mr, labelColors);
         return baseline with
         {
+            HeadSha = mr.Sha,
             Body = mr.Description,
             Assignees = mr.Assignees?.Select(a => a.Username).Where(u => !string.IsNullOrEmpty(u)).ToList() ?? new List<string>(),
             RequestedReviewers = mr.Reviewers?.Select(r => r.Username).Where(u => !string.IsNullOrEmpty(u)).ToList() ?? new List<string>(),

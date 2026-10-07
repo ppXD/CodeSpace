@@ -90,6 +90,20 @@ public class ToolCallLedger : IEntity<Guid>, IAuditable
     /// <summary>When the call was approved (item D). NULL distinguishes a not-yet-decided AwaitingApproval row from an approved-but-not-yet-executed one — the D3 reaper only expires <c>approved_at IS NULL</c> rows.</summary>
     public DateTimeOffset? ApprovedAt { get; set; }
 
+    /// <summary>
+    /// The redacted, bounded <c>ToolCallPreview</c> its approval card was built from, stamped by the park CAS: what the
+    /// reviewer saw, and the pins (a merge's head commit) the approved call executes with. jsonb. NULL on a row that never
+    /// parked for approval, and on a decision row.
+    /// </summary>
+    public string? ApprovalPreviewJson { get; set; }
+
+    /// <summary>
+    /// Server-derived key of what a reviewer approves or rejects — <c>toolKind:SHA-256(canonical(target))</c>, the call's
+    /// target as its tool reads it (a merge: its repository and pull request). Stamped by the park CAS; a target a reviewer
+    /// rejected is not asked again in the same run. Never read from the wire, never operator-facing.
+    /// </summary>
+    public string? ApprovalTarget { get; set; }
+
     /// <summary>The <see cref="AgentRun.FenceEpoch"/> of the attempt responsible for the row: stamped at claim, re-stamped when an approved call begins executing. A Pending / Running row older than a live caller's epoch was left by a lost attempt.</summary>
     public long FenceEpoch { get; set; }
 

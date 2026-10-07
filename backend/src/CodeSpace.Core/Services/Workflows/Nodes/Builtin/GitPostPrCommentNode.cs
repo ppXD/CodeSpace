@@ -44,7 +44,8 @@ public sealed class GitPostPrCommentNode : INodeRuntime
         // agent_run_id provides traceability.
         IsAgentToolEligible = true,
         // Called by an agent, only a repository its run is bound to — and a write, so a patch-only repository refuses it.
-        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true },
+        // Its approval card shows the pull request it acts on: title, head and base.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true, PullRequestInputKey = "number" },
         // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
         // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
         ConfigSchema = SchemaBuilder.Parse("""

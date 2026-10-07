@@ -22,6 +22,16 @@ public sealed record RemotePullRequest
     public required string SourceBranch { get; init; }
     public required string TargetBranch { get; init; }
 
+    /// <summary>The commit the head branch points at. Detail fetch only; null when the provider did not report it.</summary>
+    public string? HeadSha { get; init; }
+
+    /// <summary>
+    /// The full path of the repository the head branch lives in — this repository's own path, or a fork's. Detail fetch
+    /// only; null when the provider names no head repository (a fork deleted since the request was opened, or one the
+    /// connection cannot read).
+    /// </summary>
+    public string? HeadRepositoryFullPath { get; init; }
+
     public string? AuthorLogin { get; init; }
     public string? AuthorAvatarUrl { get; init; }
 

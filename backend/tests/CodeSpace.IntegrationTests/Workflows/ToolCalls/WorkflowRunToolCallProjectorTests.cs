@@ -385,7 +385,7 @@ public sealed class WorkflowRunToolCallProjectorTests
         }
 
         var token = $"tok-{Guid.NewGuid():N}";
-        (await ledger.TryBeginApprovalAsync(ledgerId, world.TeamId, token, DateTimeOffset.UtcNow.AddMinutes(10), CancellationToken.None)).ShouldBeTrue();
+        (await ledger.TryBeginApprovalAsync(ledgerId, world.TeamId, new ToolCallApprovalPark { Token = token, DeadlineAt = DateTimeOffset.UtcNow.AddMinutes(10) }, CancellationToken.None)).ShouldBeTrue();
 
         var verdict = path == FailurePath.RejectedByReviewer ? "reject" : "approve";
         (await scope.Resolve<IToolCallApprovalResolver>().ResolveByTokenAsync(token, verdict, SystemUsers.SeederId, world.TeamId, CancellationToken.None)).ShouldBe(ActionResumeResult.Resumed);

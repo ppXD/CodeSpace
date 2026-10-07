@@ -67,6 +67,7 @@ public sealed class AuthorityCheckedToolRegistry : IAgentToolRegistry
         public bool AlwaysRequiresApproval => _inner.AlwaysRequiresApproval;
         public AgentToolValidation ValidateInput(JsonElement input) => _inner.ValidateInput(input);
         public Task<string?> RefusalAsync(AgentToolCall call, CancellationToken cancellationToken) => _inner.RefusalAsync(call with { RunId = _context.AgentRunId, TeamId = _context.TeamId }, cancellationToken);
+        public Task<ToolCallPreview> PreviewAsync(AgentToolCall call, CancellationToken cancellationToken) => _inner.PreviewAsync(call with { RunId = _context.AgentRunId, TeamId = _context.TeamId }, cancellationToken);
         public async Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken cancellationToken)
         {
             if (await _context.Guard.CheckAsync(_context.AgentRunId, _context.TeamId, Kind, cancellationToken).ConfigureAwait(false) is { } failure) return AgentToolResult.Fail($"{failure.Code}: {failure.Message}");

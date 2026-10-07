@@ -292,6 +292,20 @@ export type ToolCallLedgerStatus =
   | "Running"
   | "Expired";
 
+/** One line of what a governed tool call was shown to do on its approval card — redacted and bounded server-side. */
+export interface ToolCallPreviewLine {
+  label: string;
+  value: string;
+  /** The value names something outside the repositories the run is bound to (a fork's head, say). */
+  outsideRun: boolean;
+}
+
+/** What a governed tool call was shown to do when it was put to a human: its lines, and the inputs pinned to what was shown (a merge's head commit). */
+export interface ToolCallPreview {
+  lines: ToolCallPreviewLine[];
+  pins: Record<string, string>;
+}
+
 /**
  * Mirrors backend `ToolCallView` — one audit row of a side-effecting MCP tool call an agent run made:
  * what tool, the outcome, when, and the approval trail. Read-only + team-scoped at the source (the API
@@ -306,6 +320,8 @@ export interface ToolCallView {
   error: string | null;
   approvedByUserId: string | null;
   approvedAt: string | null;
+  /** Null (or absent from an older server) for a call that never asked a human. */
+  preview?: ToolCallPreview | null;
 }
 
 export type ToolCallPageMode = "Tail" | "Older";
