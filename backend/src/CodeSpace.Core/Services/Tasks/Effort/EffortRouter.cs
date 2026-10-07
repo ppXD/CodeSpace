@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Bounds;
 using CodeSpace.Core.Services.Tasks.Capabilities;
+using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Tasks;
@@ -15,8 +16,9 @@ namespace CodeSpace.Core.Services.Tasks.Effort;
 /// type: every branch point is a registry lookup, so a new classification / recipe / bounds / capability
 /// strategy needs zero edit here (the fake-probe + fake-recipe contract test proves it). The pipeline: resolve
 /// the decision (operator short-circuit vs the default classifier) → policy-decide the effort mode → resolve the
-/// recipe (fail-open) → resolve the projection → DEGRADE if the recipe's required capability is unavailable →
-/// resolve the bounds preset + merge any caps override → assemble the RoutePlan + a derived confirm card.
+/// recipe (fail-open) → keep an auto route with an operator acceptance floor on a projection that grades it → resolve
+/// the projection → DEGRADE if the recipe's required capability is unavailable → resolve the bounds preset + merge any
+/// caps override → assemble the RoutePlan + a derived confirm card.
 /// </summary>
 public sealed class EffortRouter : IEffortRouter, IScopedDependency
 {
@@ -24,13 +26,15 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
     private readonly ITaskRecipeRegistry _recipes;
     private readonly IBoundsPresetRegistry _bounds;
     private readonly ICapabilityProbeRegistry _capabilities;
+    private readonly ITaskProjectionRegistry _projections;
 
-    public EffortRouter(IEffortClassifierRegistry classifiers, ITaskRecipeRegistry recipes, IBoundsPresetRegistry bounds, ICapabilityProbeRegistry capabilities)
+    public EffortRouter(IEffortClassifierRegistry classifiers, ITaskRecipeRegistry recipes, IBoundsPresetRegistry bounds, ICapabilityProbeRegistry capabilities, ITaskProjectionRegistry projections)
     {
         _classifiers = classifiers;
         _recipes = recipes;
         _bounds = bounds;
         _capabilities = capabilities;
+        _projections = projections;
     }
 
     public async Task<RoutePlan> RouteAsync(EffortRouteRequest request, CancellationToken ct)
@@ -41,23 +45,59 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
 
         var recipe = ResolveRecipe(request, decision);
 
+        (effortMode, recipe, var floorReason) = KeepOperatorFloorGradable(request, wasAutoClassified, decision.Signals, effortMode, recipe);
+
         var projectionKind = request.RequestedProjection ?? recipe.DefaultProjectionKind;
 
         var (effectiveRecipe, effectiveProjection, degradedReason) = DegradeIfCapabilityUnavailable(request, recipe, projectionKind);
 
         var (preset, caps) = ResolveCaps(request, effortMode, effectiveRecipe);
 
-        // A risky / irreversible task ALWAYS surfaces the confirm card regardless of the model's self-confidence — the
-        // classifier emits the risk signal, but the ROUTER (not the model's confidence) decides the human gate, so an
-        // over-confident model can't suppress the operator's escalation affordance on destructive work. This restores the
-        // pre-LLM always-confirm floor for risk while keeping the confident-routing win for ordinary tasks (model emits
-        // data, policy decides — the same tighten-only convention as the autonomy ceiling).
-        var needsConfirmCard = wasAutoClassified && (decision.Confidence < EffortPolicy.ConfirmConfidenceFloor || decision.Signals.RiskySideEffects);
+        var needsConfirmCard = NeedsConfirmCard(decision, wasAutoClassified);
 
         var confirm = needsConfirmCard ? BuildConfirmCard(decision) : null;
 
-        return BuildPlan(decision, wasAutoClassified, effortMode, effectiveRecipe, effectiveProjection, preset, caps, needsConfirmCard, confirm, degradedReason);
+        return BuildPlan(decision, wasAutoClassified, effortMode, effectiveRecipe, effectiveProjection, preset, caps, needsConfirmCard, confirm, JoinReasons(floorReason, degradedReason));
     }
+
+    /// <summary>
+    /// Whether an auto route must be confirmed by the operator before it runs: a confidence below the floor, a risky /
+    /// irreversible task, or an AMBIGUOUS one. The classifier emits the signals, but the ROUTER (not the model's
+    /// confidence) decides the human gate, so an over-confident model can't suppress the operator's escalation affordance
+    /// on destructive work, or route an under-specified goal as though it were understood — the confirm card says
+    /// exactly that. Model emits data, policy decides — the same tighten-only convention as the autonomy ceiling. An
+    /// explicit operator tier is already a decision and never confirms.
+    /// </summary>
+    private static bool NeedsConfirmCard(EffortDecision decision, bool wasAutoClassified) =>
+        wasAutoClassified && (decision.Confidence < EffortPolicy.ConfirmConfidenceFloor || decision.Signals.RiskySideEffects || decision.Signals.Ambiguous);
+
+    /// <summary>
+    /// An operator acceptance floor is a routing signal. When the AUTO path's classified shape lands on a projection whose
+    /// builder does not grade an operator command, re-decide the tier with every such tier set aside — the policy's next
+    /// matching row — and say so on the route. An explicit tier, a pinned recipe or a pinned projection is the operator's
+    /// own choice and stays where it is: the launch refuses that combination with its reason instead of moving it.
+    /// </summary>
+    private (string EffortMode, ITaskRecipe Recipe, string? Reason) KeepOperatorFloorGradable(EffortRouteRequest request, bool wasAutoClassified, EffortSignals signals, string effortMode, ITaskRecipe recipe)
+    {
+        if (!request.HasOperatorFloor || !wasAutoClassified || request.RequestedRecipe is not null || request.RequestedProjection is not null) return (effortMode, recipe, null);
+        if (GradesOperatorFloor(recipe.DefaultProjectionKind)) return (effortMode, recipe, null);
+
+        var admitted = EffortPolicy.Decide(signals, requestedEffort: null, mode => GradesOperatorFloor(_recipes.RecipeForEffort(mode).DefaultProjectionKind));
+        var rerouted = _recipes.RecipeForEffort(admitted);
+
+        // No tier the policy admits grades the floor either: leave the route as classified — the launch refuses it by name.
+        if (!GradesOperatorFloor(rerouted.DefaultProjectionKind)) return (effortMode, recipe, null);
+
+        return (admitted, rerouted, $"the operator's acceptance check needs a route that grades it, and '{recipe.DefaultProjectionKind}' does not; moved from {effortMode} to {admitted} ('{rerouted.DefaultProjectionKind}')");
+    }
+
+    /// <summary>Whether <paramref name="projectionKind"/>'s builder advertises that it grades an operator command — the same advertisement the route preview's acceptance verdict and the launch's floor disposition read.</summary>
+    private bool GradesOperatorFloor(string projectionKind) =>
+        _projections.TryResolve(projectionKind, out var builder) && builder.OperatorAcceptance.AcceptsCommand == true;
+
+    /// <summary>Every reason the route moved off what was asked for, in the order the moves happened — each is named, none is dropped.</summary>
+    private static string? JoinReasons(string? first, string? second) =>
+        first is null ? second : second is null ? first : $"{first}; {second}";
 
     /// <summary>
     /// When the resolved recipe DECLARES a required capability (<c>ITaskRecipe.RequiresCapability</c>) that the
@@ -244,7 +284,7 @@ public sealed class EffortRouter : IEffortRouter, IScopedDependency
         NeedsPlanReview = recipe.RequiresPlanReview,
         WasAutoClassified = wasAutoClassified,
         ClassifierConfidence = decision.Confidence,
-        DegradedReason = degradedReason,             // set (non-null) when a capability degrade fired, null otherwise — never silent
+        DegradedReason = degradedReason,             // set (non-null) when the route moved — an operator floor it could not grade, a capability degrade — null otherwise; never silent
         Decision = decision,
         Confirm = confirm,
     };

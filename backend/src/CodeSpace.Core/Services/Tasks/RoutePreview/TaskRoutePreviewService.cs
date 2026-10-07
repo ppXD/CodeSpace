@@ -17,14 +17,16 @@ public sealed class TaskRoutePreviewService : ITaskRoutePreviewService, IScopedD
     private readonly ITaskRouteSnapshotService _snapshots;
     private readonly ITaskProjectionRegistry _projections;
     private readonly IModeProfileRegistry _modeProfiles;
+    private readonly ILaunchControlResolver _controls;
 
-    public TaskRoutePreviewService(ITaskLaunchSeedProviderRegistry seedProviders, ILaunchRepositoryScopeGuard repositoryScope, ITaskRouteSnapshotService snapshots, ITaskProjectionRegistry projections, IModeProfileRegistry modeProfiles)
+    public TaskRoutePreviewService(ITaskLaunchSeedProviderRegistry seedProviders, ILaunchRepositoryScopeGuard repositoryScope, ITaskRouteSnapshotService snapshots, ITaskProjectionRegistry projections, IModeProfileRegistry modeProfiles, ILaunchControlResolver controls)
     {
         _seedProviders = seedProviders;
         _repositoryScope = repositoryScope;
         _snapshots = snapshots;
         _projections = projections;
         _modeProfiles = modeProfiles;
+        _controls = controls;
     }
 
     public async Task<TaskRoutePreviewResult> PreviewAsync(TaskLaunchRequest request, CancellationToken cancellationToken)
@@ -35,10 +37,14 @@ public sealed class TaskRoutePreviewService : ITaskRoutePreviewService, IScopedD
 
         var preview = await _snapshots.CreateAsync(request, seed, cancellationToken).ConfigureAwait(false);
 
+        // The SAME resolution the launch refuses and clamps on — a preview cannot report a disposition the launch would not reach.
+        var controls = await _controls.ResolveAsync(request, preview.Route, cancellationToken).ConfigureAwait(false);
+
         return preview with
         {
             AcceptanceCompatibility = DescribeAcceptance(preview.Route, request.RepositoryId ?? seed.RepositoryId),
             Posture = DescribePosture(request, seed, preview.Route),
+            ControlDispositions = controls.Dispositions,
         };
     }
 
@@ -79,7 +85,7 @@ public sealed class TaskRoutePreviewService : ITaskRoutePreviewService, IScopedD
         var unknown = new TaskAcceptanceCompatibility { ProjectionKind = route.ProjectionKind, Detail = "The resolved route has not advertised an operator-command acceptance adapter; compatibility is unknown." };
         if (!_projections.TryResolve(route.ProjectionKind, out var builder) || builder.OperatorAcceptance.AcceptsCommand is null) return unknown;
         var adapter = builder.OperatorAcceptance;
-        if (adapter.AcceptsCommand == false) return unknown with { State = TaskAcceptanceCompatibilityState.Incompatible, Detail = "The resolved route does not consume an operator-command acceptance floor. Its plan items use separate acceptance contracts." };
+        if (adapter.AcceptsCommand == false) return unknown with { State = TaskAcceptanceCompatibilityState.Incompatible, Detail = LaunchControlResolver.FloorNotGradedReason };
         if (adapter.GradingKind != BenchmarkGradingKind.TestsPass) return unknown with { Detail = "The resolved acceptance adapter does not advertise the proposed argv input format." };
         var requiresRepository = !AgentAcceptanceContract.GradesFromDeliverables(new SupervisorAcceptanceSpec { Kind = adapter.GradingKind, Command = [] });
         var compatible = !requiresRepository || repositoryId is not null;

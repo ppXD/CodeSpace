@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Tasks.RoutePreview;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -142,6 +143,44 @@ public class TaskRoutePreviewFlowTests
         persisted.ClassifierConfidence.ShouldBe(result.Route.ClassifierConfidence);
         persisted.Caps.MaxParallelism.ShouldBe(result.Route.Caps.MaxParallelism, "the bounds the run actually runs under are part of the provenance");
         persisted.Decision!.ClassifierKind.ShouldBe(result.Route.Decision!.ClassifierKind, "who decided the tier is the whole point of recording it");
+    }
+
+    [Fact]
+    public async Task The_preview_reports_the_same_control_dispositions_the_launch_then_applies()
+    {
+        // One resolver, two callers: a Quick launch that pins a model outside its own pool (Clamped), sends a delivery
+        // spec and a plan critic Quick has no lane for (NotApplicable) — previewed, then launched on that very preview.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var pooled = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pooled-model");
+        var outside = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "outside-model");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        using var manual = jobClient.ManualExecution();
+
+        var request = Request(teamId, userId, "Fix the typo in the README", TaskEffortModes.Quick) with
+        {
+            Autonomy = "Confined",
+            AllowedModelIds = [pooled.RowId],
+            DeliverySpec = new DeliverySpec { OpenPullRequest = true },
+            PlannerReviewMode = ReviewMode.Gate,
+            Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local", ModelCredentialModelId = outside.RowId },
+        };
+
+        TaskRoutePreviewResult preview;
+        using (var scope = _fixture.BeginScope()) preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(request, CancellationToken.None);
+
+        var launched = await LaunchAsync(request with { RouteSnapshotId = preview.RouteSnapshotId });
+
+        preview.ControlDispositions.ShouldNotBeNull();
+        preview.ControlDispositions.Select(d => (d.Control, d.Outcome)).ShouldBe(new[]
+        {
+            (LaunchControls.AllowedModelIds, LaunchControlOutcome.Clamped),
+            (LaunchControls.DeliverySpec, LaunchControlOutcome.NotApplicable),
+            (LaunchControls.PlannerReviewMode, LaunchControlOutcome.NotApplicable),
+        });
+        JsonSerializer.Serialize(launched.ControlDispositions, Json).ShouldBe(JsonSerializer.Serialize(preview.ControlDispositions, Json),
+            customMessage: "the launch applied a different disposition than its own preview promised — they must share one resolver");
     }
 
     // ─── Helpers ─────────────────────────────────────────────────────────────

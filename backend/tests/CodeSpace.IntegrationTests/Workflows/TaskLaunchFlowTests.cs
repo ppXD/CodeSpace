@@ -5,7 +5,11 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks;
+using CodeSpace.Core.Services.Tasks.Effort;
+using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Heuristic;
+using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Llm;
 using CodeSpace.Core.Services.Tasks.Launch;
+using CodeSpace.Core.Services.Tasks.Launch.Exceptions;
 using CodeSpace.Core.Services.Tasks.RoutePreview;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
@@ -15,6 +19,7 @@ using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using MediatR;
@@ -984,28 +989,24 @@ public class TaskLaunchFlowTests
     }
 
     [Fact]
-    public async Task A_quick_launch_at_delivery_quality_is_never_rejected_for_a_missing_acceptance_check()
+    public async Task A_quick_launch_at_delivery_quality_without_an_acceptance_check_is_rejected_before_any_run_is_created()
     {
-        // AcceptanceChecks is inert on a non-supervisor projection today — the mandate doesn't invent new
-        // acceptance-floor plumbing for single-agent launches, so it stays inert there too.
-        if (OperatingSystem.IsWindows()) return;
-
-        using var cli = new SubtaskAwareFakeCli();
-
+        // Quick grades its single agent with the operator's argv (the builder advertises the adapter), so a Delivery
+        // claim there without one is the same unverified claim the Deep mandate refuses — it used to launch, because the
+        // mandate asked "is this the supervisor?" instead of "does this route grade a floor?".
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
 
-        var jobClient = ResolveJobClient();
-        jobClient.Clear();
-        jobClient.AutoExecute = true;
-
-        var result = await LaunchAsync(new TaskLaunchRequest
+        var request = new TaskLaunchRequest
         {
             TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
             TaskText = "Touch nothing important", RequestedEffort = TaskEffortModes.Quick,
             Tier = QualityTier.Delivery,
-        });
+        };
 
-        result.RunId.ShouldNotBe(Guid.Empty, "a Quick/single-agent Delivery launch is never rejected for the missing acceptance floor — the mandate is inert there");
+        var ex = await Should.ThrowAsync<ArgumentException>(() => LaunchAsync(request));
+
+        ex.Message.ShouldContain("acceptanceChecks", Case.Insensitive, "the operator needs an actionable name for the missing lever");
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0, "the mandate rejects BEFORE any run/session is created — no orphan");
     }
 
     [Fact]
@@ -1505,6 +1506,204 @@ public class TaskLaunchFlowTests
         finally
         {
             jobClient.AutoExecute = true;
+        }
+    }
+
+    // ── 3.3: Auto's controls are applied, clamped, named not-applicable, or refused on every lane — never dropped ──
+    //
+    // The auto path below is answered by a CONFIDENT classification (the structured-LLM classifier's slot) — the one case
+    // the composer's confirm card never sees, where a route to a non-supervisor lane used to drop these controls silently.
+
+    [Fact]
+    public async Task An_auto_route_to_quick_clamps_a_pinned_model_outside_the_allowed_pool_and_says_so()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var pooled = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pooled-model");
+        var outside = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "outside-model");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        using var manual = jobClient.ManualExecution();   // the frozen snapshot is the evidence; dispatch is pinned in AgentRunExecutorTests
+
+        var request = AutoRequest(teamId, userId, "Fix the typo in the README") with
+        {
+            AllowedModelIds = [pooled.RowId],
+            Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local", ModelCredentialModelId = outside.RowId },
+        };
+
+        var result = await LaunchOnConfidentAutoAsync(request, new ConfidentClassifier(QuickSignals, TaskRecipeKinds.SingleAgent));
+
+        result.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent);
+        var models = result.ControlDispositions.Single(d => d.Control == LaunchControls.AllowedModelIds);
+        models.Outcome.ShouldBe(LaunchControlOutcome.Clamped, "the operator pinned a model their own pool excludes — the pool wins, and the result says so");
+        models.Reason.ShouldContain("pooled-model");
+
+        var config = FrozenAgentConfig((await LoadRunAsync(result.RunId)).DefinitionSnapshotJson!);
+        config.GetProperty("model").GetString().ShouldBe("pooled-model", "the frozen agent runs the pool's default row, not the pin outside it");
+        config.GetProperty("modelCredentialId").GetString().ShouldBe(pooled.CredentialId.ToString(), "…on that row's own credential — names repeat across credentials, so the row decides");
+        config.TryGetProperty("modelCredentialModelId", out _).ShouldBeFalse("the excluded row pin is gone from the frozen config");
+        config.GetProperty("allowedModelIds").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { pooled.RowId.ToString() }, "the pool rides the node too, holding a persona-supplied model to it at dispatch");
+    }
+
+    [Fact]
+    public async Task An_auto_route_to_quick_refuses_a_persona_the_allowed_pool_excludes_before_any_run()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var admitted = await SeedPersonaAsync(teamId);
+        var excluded = await SeedPersonaAsync(teamId);
+
+        var request = AutoRequest(teamId, userId, "Fix the typo in the README") with
+        {
+            AllowedAgentDefinitionIds = [admitted],
+            Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local", AgentDefinitionId = excluded },
+        };
+
+        var ex = await Should.ThrowAsync<TaskLaunchControlRefusedException>(() => LaunchOnConfidentAutoAsync(request, new ConfidentClassifier(QuickSignals, TaskRecipeKinds.SingleAgent)));
+
+        ex.Code.ShouldBe(FailureCodes.TaskLaunchControlRefused);
+        var refused = (IReadOnlyList<LaunchControlDisposition>)ex.Details["controls"]!;
+        refused.ShouldHaveSingleItem().Control.ShouldBe(LaunchControls.AllowedAgentDefinitionIds);
+        ex.Message.ShouldContain(excluded.ToString(), customMessage: "the refusal names the persona the operator excluded");
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0, "a refused control stops the launch before any session or run exists");
+    }
+
+    [Fact]
+    public async Task An_explicit_standard_launch_with_an_operator_floor_is_refused_with_the_reason_its_preview_gives()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Refactor the parser across modules", RequestedEffort = TaskEffortModes.Standard,
+            AcceptanceChecks = ["sh", "verify.sh"],
+        };
+
+        TaskRoutePreviewResult preview;
+        using (var scope = _fixture.BeginScope()) preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(request, CancellationToken.None);
+
+        preview.AcceptanceCompatibility!.State.ShouldBe(TaskAcceptanceCompatibilityState.Incompatible);
+        var previewed = preview.ControlDispositions!.Single(d => d.Control == LaunchControls.AcceptanceChecks);
+        previewed.Outcome.ShouldBe(LaunchControlOutcome.Refused);
+
+        var ex = await Should.ThrowAsync<TaskLaunchControlRefusedException>(() => LaunchAsync(request with { RouteSnapshotId = preview.RouteSnapshotId }));
+
+        var refused = ((IReadOnlyList<LaunchControlDisposition>)ex.Details["controls"]!).ShouldHaveSingleItem();
+        refused.Reason.ShouldBe(preview.AcceptanceCompatibility.Detail, "the launch refuses with the very reason its preview gave — preview and launch can no longer disagree");
+        refused.ShouldBe(previewed);
+        (await CountRunsForTeamAsync(teamId)).ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task An_auto_route_with_an_operator_floor_never_lands_on_plan_map_and_grades_the_floor_instead()
+    {
+        // The UI dead-end this closes: Auto + Delivery required a check, but an Auto route to plan-map was Incompatible
+        // with one. A confidently Standard-classified task with a floor now routes to a lane that grades it.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedRepositoryAsync(teamId);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        using var manual = jobClient.ManualExecution();
+
+        var request = AutoRequest(teamId, userId, "Refactor the parser across modules and keep the tests green") with { RepositoryId = repoId, AcceptanceChecks = ["sh", "verify.sh"], Tier = QualityTier.Delivery };
+        var classifier = new ConfidentClassifier(StandardSignals, TaskRecipeKinds.MapFanout);
+
+        var preview = await PreviewOnConfidentAutoAsync(request, classifier);
+        var result = await LaunchOnConfidentAutoAsync(request, classifier);
+
+        preview.Route.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "the preview predicts the floor-grading lane");
+        preview.AcceptanceCompatibility!.State.ShouldBe(TaskAcceptanceCompatibilityState.Compatible, "Auto + Delivery + a check is launchable again — no dead-end");
+        result.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "an operator floor keeps an auto route off a lane that cannot grade it");
+        result.Route.EffortMode.ShouldBe(TaskEffortModes.Quick, "the Standard row is set aside for the policy's next matching row");
+        result.Route.DegradedReason.ShouldNotBeNull().ShouldContain(TaskProjectionKinds.PlanMapSynth, customMessage: "the move is named on the route, never silent");
+        result.ControlDispositions.Single(d => d.Control == LaunchControls.AcceptanceChecks).Outcome.ShouldBe(LaunchControlOutcome.Applied);
+
+        var acceptance = FrozenAgentConfig((await LoadRunAsync(result.RunId)).DefinitionSnapshotJson!).GetProperty("acceptance");
+        acceptance.GetProperty("kind").GetString().ShouldBe("TestsPass");
+        acceptance.GetProperty("command").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "sh", "verify.sh" }, "the operator's floor grades the agent that runs");
+    }
+
+    [Fact]
+    public async Task A_continue_is_routed_on_the_threads_grounding_by_both_the_preview_and_the_launch()
+    {
+        // Grounding used to be resolved AFTER routing, so the classifier read "a fresh task" for every chat follow-up.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        using var manual = jobClient.ManualExecution();
+
+        var first = await LaunchAsync(new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Map every caller of the legacy billing client", RequestedEffort = TaskEffortModes.Quick,
+        });
+
+        var followUp = AutoRequest(teamId, userId, "and now migrate them") with { ContinueSessionId = first.SessionId };
+        var previewClassifier = new ConfidentClassifier(QuickSignals, TaskRecipeKinds.SingleAgent);
+        var launchClassifier = new ConfidentClassifier(QuickSignals, TaskRecipeKinds.SingleAgent);
+
+        await PreviewOnConfidentAutoAsync(followUp, previewClassifier);
+        await LaunchOnConfidentAutoAsync(followUp, launchClassifier);
+
+        foreach (var (surface, classifier) in new[] { ("preview", previewClassifier), ("launch", launchClassifier) })
+        {
+            var seen = classifier.LastRequest.ShouldNotBeNull($"the {surface} never classified the follow-up");
+            seen.Seed.GroundingContext.ShouldNotBeNull($"the {surface} classified the follow-up with no thread grounding — it read as a fresh task")
+                .ShouldContain("Map every caller of the legacy billing client", customMessage: $"the {surface}'s classifier must see the prior turn it is continuing");
+            LlmEffortClassifier.BuildUserPrompt(seen).ShouldContain("This is a follow-up turn continuing earlier work: yes");
+        }
+    }
+
+    /// <summary>Signals the policy routes to the quick tier (a localized code change).</summary>
+    private static readonly EffortSignals QuickSignals = new() { NeedsCodeChange = true };
+
+    /// <summary>Signals the policy routes to the standard tier (a code change across files needing tests).</summary>
+    private static readonly EffortSignals StandardSignals = new() { NeedsCodeChange = true, CrossFile = true, NeedsTestsOrCi = true };
+
+    private static TaskLaunchRequest AutoRequest(Guid teamId, Guid userId, string taskText) => new()
+    {
+        TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat, TaskText = taskText,
+        RequestedEffort = TaskEffortModes.Auto, Autonomy = "Confined",
+        Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
+    };
+
+    /// <summary>The production launch graph with only the AUTO classification swapped for <paramref name="classifier"/> — the router, snapshot store, preview and launch services are rebuilt in the scope so they pick it up; everything else is real.</summary>
+    private ILifetimeScope ConfidentAutoScope(IEffortClassifier classifier) => _fixture.BeginScope(b =>
+    {
+        b.RegisterInstance(new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier(), classifier })).As<IEffortClassifierRegistry>();
+        b.RegisterType<EffortRouter>().As<IEffortRouter>().InstancePerLifetimeScope();
+        b.RegisterType<TaskRouteSnapshotService>().As<ITaskRouteSnapshotService>().InstancePerLifetimeScope();
+        b.RegisterType<TaskRoutePreviewService>().As<ITaskRoutePreviewService>().InstancePerLifetimeScope();
+        b.RegisterType<TaskLaunchService>().As<ITaskLaunchService>().InstancePerLifetimeScope();
+    });
+
+    private async Task<LaunchTaskResult> LaunchOnConfidentAutoAsync(TaskLaunchRequest request, IEffortClassifier classifier)
+    {
+        using var scope = ConfidentAutoScope(classifier);
+        return await scope.Resolve<ITaskLaunchService>().LaunchAsync(request, CancellationToken.None);
+    }
+
+    private async Task<TaskRoutePreviewResult> PreviewOnConfidentAutoAsync(TaskLaunchRequest request, IEffortClassifier classifier)
+    {
+        using var scope = ConfidentAutoScope(classifier);
+        return await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(request, CancellationToken.None);
+    }
+
+    private static JsonElement FrozenAgentConfig(string definitionSnapshotJson) =>
+        JsonDocument.Parse(definitionSnapshotJson).RootElement.GetProperty("nodes").EnumerateArray().Single(n => n.GetProperty("id").GetString() == "agent").GetProperty("config").Clone();
+
+    /// <summary>A confident auto classification in the structured-LLM classifier's slot (its kind, so the registry's Auto resolves it): fixed signals at 0.9, the policy's tier, a caller-named recipe — and the route request it was asked about, recorded.</summary>
+    private sealed class ConfidentClassifier(EffortSignals signals, string suggestedRecipe) : IEffortClassifier
+    {
+        public EffortRouteRequest? LastRequest { get; private set; }
+
+        public string Kind => LlmEffortClassifier.ClassifierKind;
+
+        public Task<EffortDecision> ClassifyAsync(EffortRouteRequest request, CancellationToken ct)
+        {
+            LastRequest = request;
+            return Task.FromResult(new EffortDecision { Signals = signals, SuggestedEffort = EffortPolicy.Decide(signals, requestedEffort: null), SuggestedRecipe = suggestedRecipe, Confidence = 0.9, Rationale = "Scripted confident classification.", ClassifierKind = Kind });
         }
     }
 

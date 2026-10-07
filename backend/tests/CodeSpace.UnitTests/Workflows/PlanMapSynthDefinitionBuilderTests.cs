@@ -68,6 +68,24 @@ public class PlanMapSynthDefinitionBuilderTests
     }
 
     [Fact]
+    public void The_allowed_model_pool_bounds_the_planners_catalog_and_rides_every_branch()
+    {
+        // The planner allocates each subtask a model from the catalog it is shown, and the branch body is where a
+        // planner-authored {{item.model}} outside the pool is held to it at dispatch — both must carry the pool.
+        var pool = new[] { Guid.NewGuid(), Guid.NewGuid() };
+
+        var bounded = Builder.Build(Context() with { AllowedModelIds = pool });
+        var unbounded = Builder.Build(Context());
+
+        var plannerConfig = bounded.Nodes.Single(n => n.Id == "planner").Config.Deserialize<Dictionary<string, JsonElement>>()!;
+        PlanAuthorNode.BuildPlanRequest(plannerConfig, Guid.NewGuid(), new PlanAuthorNode.PlanPromptParts("goal", [], "", "")).AllowedModelIds.ShouldBe(pool, "the planner request the plan.author node builds from this very config carries the pool");
+        bounded.Nodes.Single(n => n.Id == "agent").Config.GetProperty("allowedModelIds").EnumerateArray().Select(e => Guid.Parse(e.GetString()!)).ShouldBe(pool);
+        RealValidator().Validate(bounded).IsValid.ShouldBeTrue();
+
+        unbounded.Nodes.ShouldAllBe(n => !n.Config.GetRawText().Contains("allowedModelIds"), "no pool ⇒ no node carries the key — byte-identical");
+    }
+
+    [Fact]
     public void Emits_the_planner_map_agent_synth_graph()
     {
         var def = Builder.Build(Context());

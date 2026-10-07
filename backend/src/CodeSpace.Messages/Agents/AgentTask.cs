@@ -67,6 +67,16 @@ public sealed record AgentTask
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public IReadOnlyList<string>? AllowedHarnessKinds { get; init; }
 
+    /// <summary>
+    /// The credentialed-model ROW ids this run's model must come from — the model analogue of <see cref="AllowedHarnessKinds"/>.
+    /// At dispatch <c>HarnessModelReconciler</c> runs the named model on its pooled row, and a model outside the pool (or
+    /// none at all) on the pool's default row, naming the move on the run; the run then uses that row's credential.
+    /// <para>Null / empty (the default, and every task envelope persisted before this field) = UNBOUNDED, byte-identical.
+    /// The task-launch projections stamp it from the operator's allowed model pool; the supervisor gates its own spawns.</para>
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
+
     /// <summary>Model id within the chosen harness's <see cref="IAgentHarness.Models"/> catalog, or null/blank to let the harness pick its own default (the Model=empty rule).</summary>
     public string? Model { get; init; }
 

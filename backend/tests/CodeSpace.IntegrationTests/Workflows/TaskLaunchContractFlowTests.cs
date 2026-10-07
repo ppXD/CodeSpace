@@ -4,6 +4,8 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Tasks.Contracts;
+using CodeSpace.Core.Services.Tasks.Launch;
+using CodeSpace.Core.Services.Tasks.Launch.Exceptions;
 using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows;
@@ -42,10 +44,10 @@ public class TaskLaunchContractFlowTests : IDisposable
     public void Dispose() => _manualExecution.Dispose();
 
     [Theory]
-    [InlineData(TaskEffortModes.Quick, TaskProjectionKinds.SingleAgent)]
-    [InlineData(TaskEffortModes.Standard, TaskProjectionKinds.PlanMapSynth)]
-    [InlineData(TaskEffortModes.Deep, TaskProjectionKinds.Supervisor)]
-    public async Task Every_launch_lane_records_original_controls_in_the_frozen_run_detail(string effort, string projectionKind)
+    [InlineData(TaskEffortModes.Quick, TaskProjectionKinds.SingleAgent, true)]
+    [InlineData(TaskEffortModes.Standard, TaskProjectionKinds.PlanMapSynth, false)]   // plan-map grades no operator floor: sending one is refused (pinned below)
+    [InlineData(TaskEffortModes.Deep, TaskProjectionKinds.Supervisor, true)]
+    public async Task Every_launch_lane_records_original_controls_in_the_frozen_run_detail(string effort, string projectionKind, bool gradesOperatorFloor)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         using var scope = _fixture.BeginScope();
@@ -54,7 +56,7 @@ public class TaskLaunchContractFlowTests : IDisposable
             TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
             TaskText = "Preserve the original delivery obligations", RequestedEffort = effort, Autonomy = "Unleashed",
             CapsOverride = new() { MaxCostUsd = 3.25m, AutonomyCeiling = "Standard" },
-            AcceptanceCriteria = ["Use original inputs", "Explain limitations"], AcceptanceChecks = ["sh", "verify.sh"],
+            AcceptanceCriteria = ["Use original inputs", "Explain limitations"], AcceptanceChecks = gradesOperatorFloor ? ["sh", "verify.sh"] : null,
             DeliverySpec = new() { OpenPullRequest = false, TargetBranch = "review" },
             AllowedModelIds = [], AllowedAgentDefinitionIds = [], RequirePlanConfirmation = false,
             Overrides = new() { Harness = "codex-cli", AllowedTools = ["Read", "Grep"], PushBranch = false, EnableMcp = false },
@@ -105,6 +107,26 @@ public class TaskLaunchContractFlowTests : IDisposable
         JsonElement.DeepEquals(JsonSerializer.SerializeToElement(contract.ResolvedRoute.Caps, WorkflowJson.Options), JsonSerializer.SerializeToElement(launched.Route.Caps, WorkflowJson.Options)).ShouldBeTrue();
         DefinitionHash.Compute(detail.Definition).ShouldBe(run.DefinitionSnapshotHash, "Postgres jsonb normalization cannot detach the contract from the frozen hash");
         (await scope.Resolve<CodeSpaceDbContext>().AgentRun.CountAsync(r => r.WorkflowRunId == launched.RunId)).ShouldBe(0, "this verifies persistence, not model execution or control enforcement");
+    }
+
+    [Fact]
+    public async Task A_standard_launch_carrying_an_operator_floor_is_refused_and_records_nothing()
+    {
+        // The plan-map lane grades no operator floor, so the floor is refused by name before a session or run exists —
+        // it used to be recorded in the contract and silently never graded.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var scope = _fixture.BeginScope();
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Preserve the original delivery obligations", RequestedEffort = TaskEffortModes.Standard,
+            AcceptanceChecks = ["sh", "verify.sh"],
+        };
+
+        var ex = await Should.ThrowAsync<TaskLaunchControlRefusedException>(() => scope.Resolve<ITaskLaunchService>().LaunchAsync(request, CancellationToken.None));
+
+        ex.Message.ShouldContain(LaunchControlResolver.FloorNotGradedReason);
+        (await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.CountAsync(r => r.TeamId == teamId)).ShouldBe(0, "no run, no contract — nothing records a floor nothing would grade");
     }
 
     [Theory]
