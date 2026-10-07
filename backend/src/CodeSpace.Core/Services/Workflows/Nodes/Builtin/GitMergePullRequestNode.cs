@@ -14,7 +14,7 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// completion half of the Git write surface (open → review → merge). Inputs: <c>repositoryId</c>,
 /// <c>number</c>, optional <c>method</c> (merge / squash / rebase) / <c>commitTitle</c> /
 /// <c>commitMessage</c> / <c>deleteSourceBranch</c> / <c>actAsUserId</c>. Outputs <c>merged</c>, <c>sha</c>,
-/// <c>message</c>.
+/// <c>message</c>, and what became of the source branch (<c>sourceBranchDeletion</c>, <c>sourceBranchDetail</c>).
 ///
 /// Wire <c>number</c> from upstream (e.g. an auto-merge-after-approval workflow). The provider translates
 /// the neutral input to its own API (GitHub merge; GitLab accept).
@@ -71,7 +71,7 @@ public sealed class GitMergePullRequestNode : INodeRuntime
                 "method": { "type": "string", "enum": ["merge","squash","rebase"], "x-control": "segmented", "x-enumLabels": { "merge": "Merge commit", "squash": "Squash", "rebase": "Rebase" }, "description": "How to integrate the commits. Default: merge commit.", "x-spotlight": 2 },
                 "commitTitle": { "type": "string", "description": "Optional merge-commit title (squash/merge). Provider default when empty." },
                 "commitMessage": { "type": "string", "x-long": true, "description": "Optional merge-commit message body." },
-                "deleteSourceBranch": { "type": "boolean", "description": "Delete the source branch after a successful merge.", "x-spotlight": 3 },
+                "deleteSourceBranch": { "type": "boolean", "description": "Delete the source branch after a successful merge, only from the pull request's own repository: a fork's branch is never matched to a same-named branch of the base. The sourceBranchDeletion output says what happened.", "x-spotlight": 3 },
                 "actAsUserId": { "type": "string", "format": "uuid", "x-selector": "actorUser", "description": "Merge AS this CodeSpace user's own linked GitHub/GitLab identity. Omit to use the repository's connection credential." }
               },
               "required": ["repositoryId","number"]
@@ -83,7 +83,9 @@ public sealed class GitMergePullRequestNode : INodeRuntime
               "properties": {
                 "merged": { "type": "boolean" },
                 "sha": { "type": ["string","null"] },
-                "message": { "type": ["string","null"] }
+                "message": { "type": ["string","null"] },
+                "sourceBranchDeletion": { "type": "string", "enum": ["NotRequested","Deleted","Requested","SkippedFork","Failed"], "description": "What became of the source branch. Requested: left to the provider (GitLab). SkippedFork: the head lives in a fork, so nothing was deleted. Failed: the merge stands but the branch was not deleted, or its delete was cancelled before it was confirmed." },
+                "sourceBranchDetail": { "type": ["string","null"], "description": "The same in words: which branch, where, and why it was kept or not deleted." }
               }
             }
             """)
@@ -115,20 +117,22 @@ public sealed class GitMergePullRequestNode : INodeRuntime
                 action: ct => _prService.MergePullRequestAsync(repoId, teamId, number, input, actAsUserId, ct),
                 completionExtractor: r => new ExternalCallCompletion
                 {
-                    ResponsePayload = JsonSerializer.SerializeToElement(new { merged = r.Merged, sha = r.Sha })
+                    ResponsePayload = JsonSerializer.SerializeToElement(new { merged = r.Merged, sha = r.Sha, source_branch_deletion = r.SourceBranchDeletion.ToString() })
                 },
                 cancellationToken: cancellationToken).ConfigureAwait(false);
         }
         catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number)); }
         catch (ProviderApiException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number)); }
 
-        context.Logger.LogInformation("Merged PR #{Num} on repo {RepoId} (merged={Merged}, method {Method})", number, repoId, result.Merged, method);
+        context.Logger.LogInformation("Merged PR #{Num} on repo {RepoId} (merged={Merged}, method {Method}, source branch {SourceBranchDeletion})", number, repoId, result.Merged, method, result.SourceBranchDeletion);
 
         var outputs = new Dictionary<string, JsonElement>
         {
             ["merged"] = JsonSerializer.SerializeToElement(result.Merged),
             ["sha"] = JsonSerializer.SerializeToElement(result.Sha),
-            ["message"] = JsonSerializer.SerializeToElement(result.Message)
+            ["message"] = JsonSerializer.SerializeToElement(result.Message),
+            ["sourceBranchDeletion"] = JsonSerializer.SerializeToElement(result.SourceBranchDeletion.ToString()),
+            ["sourceBranchDetail"] = JsonSerializer.SerializeToElement(result.SourceBranchDetail)
         };
 
         return NodeResult.Ok(outputs);

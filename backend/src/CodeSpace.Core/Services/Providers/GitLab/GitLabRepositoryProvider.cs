@@ -338,8 +338,16 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             cancellationToken).ConfigureAwait(false);
 
         var merged = string.Equals(accepted.State, "merged", StringComparison.OrdinalIgnoreCase) || accepted.MergeCommitSha != null;
-        return new RemotePullRequestMergeResult { Merged = merged, Sha = accepted.MergeCommitSha };
+        var result = new RemotePullRequestMergeResult { Merged = merged, Sha = accepted.MergeCommitSha };
+
+        if (!input.DeleteSourceBranch || !merged) return result;
+
+        return result with { SourceBranchDeletion = SourceBranchDeletion.Requested, SourceBranchDetail = SourceBranchRequestedDetail(accepted) };
     }
+
+    /// <summary>GitLab deletes the source branch itself, from the merge request's own source project (a fork's branch in the fork, never a same-named branch of the target), and only when the merging identity may push there.</summary>
+    private static string SourceBranchRequestedDetail(MergeRequest accepted) =>
+        $"Asked GitLab to delete '{accepted.SourceBranch}' from the merge request's own source project once the merge completes; GitLab does so when the merging identity may push there.";
 
     /// <summary>The merge an earlier attempt landed, read back from the merge request.</summary>
     private static async Task<MergeRequest?> FindMergedAsync(IMergeRequestClient mergeRequests, int iid, CancellationToken cancellationToken)

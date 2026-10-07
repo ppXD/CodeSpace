@@ -15,7 +15,7 @@ namespace CodeSpace.UnitTests.Workflows;
 /// <c>git.merge_pr</c> — drives the real node against a stub <see cref="IPullRequestService"/> that records the
 /// <see cref="MergePullRequestInput"/> it was called with and returns a canned result (or throws), so input
 /// parsing (required repositoryId/number, method default + parse, commit title/message, deleteSourceBranch,
-/// actAsUserId), the output shape (merged/sha/message), and the typed-provider-failure → actionable-message
+/// actAsUserId), the output shape (merged/sha/message/sourceBranchDeletion/sourceBranchDetail), and the typed-provider-failure → actionable-message
 /// mapping (scope, 403, 404, 405, 409, 422) are all pinned.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -167,6 +167,32 @@ public class GitMergePullRequestNodeTests
         result.Status.ShouldBe(NodeStatus.Success, "a clean 'not merged' answer from the provider is a successful node run with merged=false");
         result.Outputs["merged"].GetBoolean().ShouldBeFalse();
         result.Outputs["sha"].ValueKind.ShouldBe(JsonValueKind.Null);
+    }
+
+    [Theory]
+    [InlineData(SourceBranchDeletion.NotRequested, null)]
+    [InlineData(SourceBranchDeletion.Deleted, "Deleted 'feature/retry' from acme/api.")]
+    [InlineData(SourceBranchDeletion.Requested, "Asked GitLab to delete 'feature/retry' from the merge request's own source project once the merge completes; GitLab does so when the merging identity may push there.")]
+    [InlineData(SourceBranchDeletion.SkippedFork, "Kept 'release': the pull request's head is in outsider/api, not acme/api, and a source branch is deleted only from its own repository.")]
+    [InlineData(SourceBranchDeletion.Failed, "The merge stands, but its source branch was not deleted: GitHub returned HTTP 422 for MergePullRequestAsync/delete-source-branch: Cannot delete this protected branch")]
+    public async Task Outputs_what_became_of_the_source_branch(SourceBranchDeletion deletion, string? detail)
+    {
+        var stub = new StubPrService { Result = new() { Merged = true, Sha = "deadbeef", SourceBranchDeletion = deletion, SourceBranchDetail = detail } };
+
+        var result = await new GitMergePullRequestNode(stub).RunAsync(Context(), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success, "the merge stands whatever became of its source branch");
+        result.Outputs["merged"].GetBoolean().ShouldBeTrue();
+        result.Outputs["sourceBranchDeletion"].GetString().ShouldBe(deletion.ToString());
+        result.Outputs["sourceBranchDetail"].Deserialize<string?>().ShouldBe(detail);
+    }
+
+    [Fact]
+    public void Output_schema_declares_every_source_branch_outcome()
+    {
+        var declared = new GitMergePullRequestNode(new StubPrService()).Manifest.OutputSchema.GetProperty("properties").GetProperty("sourceBranchDeletion").GetProperty("enum").EnumerateArray().Select(e => e.GetString());
+
+        declared.ShouldBe(Enum.GetNames<SourceBranchDeletion>(), "a workflow or a model branching on the output reads the vocabulary from the schema");
     }
 
     [Fact]

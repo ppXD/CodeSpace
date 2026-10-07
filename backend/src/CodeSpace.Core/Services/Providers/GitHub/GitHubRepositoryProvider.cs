@@ -377,10 +377,11 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
 
         // GitHub doesn't delete the head branch on merge — do it as a follow-up when asked, whether this attempt
         // merged or an earlier one did.
-        if (input.DeleteSourceBranch && result.Merged)
-            await DeleteSourceBranchAsync(context, client, repository, number, cancellationToken).ConfigureAwait(false);
+        if (!input.DeleteSourceBranch || !result.Merged) return result;
 
-        return result;
+        var (deletion, detail) = await DeleteSourceBranchAsync(context, client, repository, number, cancellationToken).ConfigureAwait(false);
+
+        return result with { SourceBranchDeletion = deletion, SourceBranchDetail = detail };
     }
 
     private static RemotePullRequestMergeResult ToMergeResult(PullRequestMerge merge) => new() { Merged = merge.Merged, Sha = merge.Sha, Message = merge.Message };
@@ -393,18 +394,73 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         return pr.Merged ? new RemotePullRequestMergeResult { Merged = true, Sha = pr.MergeCommitSha } : null;
     }
 
-    /// <summary>Its own retried step, so a blip here re-runs the cleanup — never the merge. Needs the PR's head ref, so fetch it; a delete failure (already gone / protected) is swallowed so it never fails an otherwise-successful merge.</summary>
-    private async Task DeleteSourceBranchAsync(ProviderContext context, GitHubClient client, RemoteRepository repository, int number, CancellationToken cancellationToken)
+    /// <summary>
+    /// Its own retried step, so a blip here re-runs the cleanup — never the merge. The merge already stands, so a cleanup
+    /// that cannot be done — refused, failed, or cancelled — is reported in the result, never thrown: a throw would read
+    /// as a failed merge. A cancel stops the cleanup at its next wait; a delete in flight then is not confirmed either way.
+    /// </summary>
+    private async Task<(SourceBranchDeletion Deletion, string Detail)> DeleteSourceBranchAsync(ProviderContext context, GitHubClient client, RemoteRepository repository, int number, CancellationToken cancellationToken)
     {
-        await _resilience.ExecuteAsync(context.Instance, nameof(MergePullRequestAsync) + "/delete-source-branch", async _ =>
+        try
         {
-            var pr = await client.PullRequest.Get(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
+            return await _resilience.ExecuteAsync(context.Instance, nameof(MergePullRequestAsync) + "/delete-source-branch", _ => DeleteOwnHeadBranchAsync(client, repository, number), cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            return (SourceBranchDeletion.Failed, "The merge stands, but deleting its source branch was cancelled before GitHub confirmed it.");
+        }
+        catch (Exception ex)
+        {
+            return (SourceBranchDeletion.Failed, $"The merge stands, but its source branch was not deleted: {ex.Message}");
+        }
+    }
 
-            if (string.IsNullOrEmpty(pr.Head?.Ref)) return;
+    /// <summary>
+    /// The credential is the base repository's, and <c>heads/{head.ref}</c> names a branch in the base repository. That is
+    /// the pull request's branch only when the head lives here: a fork's head names a branch in the fork, and the base's
+    /// branch of the same name belongs to someone else, so a fork's head is kept.
+    /// </summary>
+    private static async Task<(SourceBranchDeletion Deletion, string Detail)> DeleteOwnHeadBranchAsync(GitHubClient client, RemoteRepository repository, int number)
+    {
+        var pr = await client.PullRequest.Get(repository.NamespacePath, repository.Name, number).ConfigureAwait(false);
 
-            try { await client.Git.Reference.Delete(repository.NamespacePath, repository.Name, $"heads/{pr.Head.Ref}").ConfigureAwait(false); }
-            catch (ApiException) { /* branch already deleted / protected — the merge still succeeded */ }
-        }, cancellationToken).ConfigureAwait(false);
+        if (!IsHeadInBaseRepository(pr)) return (SourceBranchDeletion.SkippedFork, ForkHeadKeptDetail(pr, repository));
+
+        await DeleteBranchAsync(client, repository, pr.Head.Ref).ConfigureAwait(false);
+
+        return (SourceBranchDeletion.Deleted, $"Deleted '{pr.Head.Ref}' from {repository.FullPath}.");
+    }
+
+    /// <summary>One repository = one GitHub repository id on both ends. GitHub reports a fork deleted since the pull request was opened as no head repository, which is not this one either.</summary>
+    private static bool IsHeadInBaseRepository(PullRequest pr) => pr.Head?.Repository is { } head && pr.Base?.Repository is { } baseRepository && head.Id == baseRepository.Id;
+
+    private static string ForkHeadKeptDetail(PullRequest pr, RemoteRepository repository) =>
+        $"Kept '{pr.Head?.Ref}': the pull request's head is in {pr.Head?.Repository?.FullName ?? "a repository GitHub no longer reports"}, not {repository.FullPath}, and a source branch is deleted only from its own repository.";
+
+    /// <summary>A refused delete of a branch that is already gone (an earlier attempt's delete landed and its answer was lost, or the repository deletes head branches itself) leaves what was asked for; a refusal while the branch is still there stands.</summary>
+    private static async Task DeleteBranchAsync(GitHubClient client, RemoteRepository repository, string branch)
+    {
+        try
+        {
+            await client.Git.Reference.Delete(repository.NamespacePath, repository.Name, $"heads/{branch}").ConfigureAwait(false);
+        }
+        catch (ApiException)
+        {
+            if (await BranchExistsAsync(client, repository, branch).ConfigureAwait(false)) throw;
+        }
+    }
+
+    private static async Task<bool> BranchExistsAsync(GitHubClient client, RemoteRepository repository, string branch)
+    {
+        try
+        {
+            await client.Repository.Branch.Get(repository.NamespacePath, repository.Name, branch).ConfigureAwait(false);
+            return true;
+        }
+        catch (NotFoundException)
+        {
+            return false;
+        }
     }
 
     public async Task<IReadOnlyList<RemoteIssue>> ListIssuesAsync(ProviderContext context, RemoteRepository repository, IssueState? stateFilter, int page, int perPage, CancellationToken cancellationToken)
