@@ -25,8 +25,14 @@ public class Pack : IEntity<Guid>, IAuditable
     /// <summary>Human-readable library name (e.g. the repo name) — what the UI groups skills under.</summary>
     public string Name { get; set; } = default!;
 
-    /// <summary>The source location: <c>owner/repo</c> for <see cref="PackKind.Github"/> or a clone URL for <see cref="PackKind.GitUrl"/>. NULL for the <see cref="PackKind.Custom"/> pack.</summary>
+    /// <summary>The source location: <c>owner/repo</c> for <see cref="PackKind.Github"/> or a clone URL for <see cref="PackKind.GitUrl"/>. NULL for the <see cref="PackKind.Custom"/> pack. Never carries a credential: it is shown to every team member and is the pack's identity, so a pasted URL's userinfo lives sealed in <see cref="EncryptedCloneUrl"/>.</summary>
     public string? Url { get; set; }
+
+    /// <summary>The URL the last successful import cloned, sealed with <c>IPayloadEncryptor</c> — present only when that URL carried userinfo (a pasted token). Sync and import-from-pack clone from it; nothing returns it. Read and written only through <c>IPackCloneUrlProtector</c>.</summary>
+    public string? EncryptedCloneUrl { get; set; }
+
+    /// <summary>The pack that holds this pack's source identity, when an earlier import forked the same repository into two packs (one with a token and one without, or with two tokens). A duplicate keeps syncing from its own source; a new import resolves to the holder. NULL for every other pack.</summary>
+    public Guid? DuplicateOfPackId { get; set; }
 
     /// <summary>The git ref synced (branch / tag / commit). NULL → the source's default branch.</summary>
     public string? Reference { get; set; }

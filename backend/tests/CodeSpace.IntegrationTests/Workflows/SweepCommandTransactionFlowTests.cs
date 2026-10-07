@@ -110,7 +110,7 @@ public class SweepCommandTransactionFlowTests
 
     /// <summary>
     /// Every sweep marked <see cref="INonTransactionalCommand"/>, dispatched through the real pipeline. The cases
-    /// differ only by which command is sent, so they are one Theory rather than nineteen copies of one fact.
+    /// differ only by which command is sent, so they are one Theory rather than twenty copies of one fact.
     ///
     /// <para>Completing is the whole assertion, and it is not a weak one: three of these commands do NOT complete
     /// without the marker. Two of them open their own transaction on the scoped DbContext, which EF refuses while
@@ -120,6 +120,7 @@ public class SweepCommandTransactionFlowTests
     /// can be seeded; this one measures only that the tick survives its own pipeline.</para>
     /// </summary>
     [Theory]
+    [InlineData(typeof(BackfillPackCloneUrlsCommand))]
     [InlineData(typeof(BackfillRunScorecardsCommand))]
     [InlineData(typeof(DistillLessonsCommand))]
     [InlineData(typeof(MaterializeWorkflowRunModelCallBodiesCommand))]

@@ -95,6 +95,21 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
         _accept = AcceptAsync();
     }
 
+    /// <summary>Commit <paramref name="files"/> (repo-relative path → content) on top of main and publish it — content a test clones back through the remote, such as a pack's agents and skills.</summary>
+    public async Task CommitFilesAsync(string message, IReadOnlyDictionary<string, string> files)
+    {
+        foreach (var (path, content) in files)
+        {
+            var full = Path.Combine(Seed, path.Replace('/', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(Path.GetDirectoryName(full)!);
+            await File.WriteAllTextAsync(full, content);
+        }
+
+        await GitAsync(Seed, new[] { "add", "." });
+        await GitAsync(Seed, new[] { "commit", "-m", message });
+        await PublishSeedAsync();
+    }
+
     /// <summary>The number of objects in the remote's LFS store that match <paramref name="oid"/>.</summary>
     public bool HasLfsObject(string oid) => File.Exists(Path.Combine(LfsStore, oid));
 

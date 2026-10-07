@@ -7,8 +7,9 @@ using Microsoft.EntityFrameworkCore;
 namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
-/// The SYNC half of <see cref="PackImportService"/> — the store's Sync button. Re-clones the pack's SAVED url+ref
-/// (the same allowlist-guarded fetch the import uses), re-walks it, and REFRESHES every already-imported artifact
+/// The SYNC half of <see cref="PackImportService"/> — the store's Sync button. Re-clones the pack's SAVED source+ref
+/// (the same allowlist-guarded fetch the import uses; a private pack's sealed URL is decrypted just for the clone and
+/// never leaves this call), re-walks it, and REFRESHES every already-imported artifact
 /// in place: its content is re-applied only when a projected field actually changed (so the result honestly
 /// splits up-to-date vs updated), and the handle never moves. Discovered artifacts NOT yet imported are returned
 /// as a <see cref="PackPreview"/> for the operator to select + add — a sync never auto-imports anything new.
@@ -27,13 +28,9 @@ public sealed partial class PackImportService
 {
     public async Task<PackSyncResult> SyncAsync(Guid teamId, Guid packId, Guid actorUserId, CancellationToken cancellationToken)
     {
-        var pack = await _db.Pack.SingleOrDefaultAsync(p => p.Id == packId && p.TeamId == teamId && p.DeletedDate == null, cancellationToken).ConfigureAwait(false)
-            ?? throw new KeyNotFoundException($"Pack {packId} not found or not accessible.");
+        var pack = await LoadRemotePackAsync(teamId, packId, cancellationToken).ConfigureAwait(false);
 
-        if (string.IsNullOrWhiteSpace(pack.Url))
-            throw new PackImportException("This pack has no remote source to sync from.");
-
-        using var checkout = await _fetcher.FetchAsync(pack.Url, pack.Reference, cancellationToken).ConfigureAwait(false);
+        using var checkout = await _fetcher.FetchAsync(_protector.CloneUrlOf(pack), pack.Reference, cancellationToken).ConfigureAwait(false);
 
         var discovered = await _walker.WalkAsync(checkout.Directory, cancellationToken).ConfigureAwait(false);
 
@@ -91,6 +88,18 @@ public sealed partial class PackImportService
             Updated = updated,
             NewArtifacts = new PackPreview { Reference = pack.Reference, Agents = newAgents, Skills = newSkills },
         };
+    }
+
+    /// <summary>The team's active pack <paramref name="packId"/> (tracked), refusing one with no remote source — what Sync and import-from-pack clone. Another team's pack is not found, never leaked.</summary>
+    private async Task<Pack> LoadRemotePackAsync(Guid teamId, Guid packId, CancellationToken cancellationToken)
+    {
+        var pack = await _db.Pack.SingleOrDefaultAsync(p => p.Id == packId && p.TeamId == teamId && p.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Pack {packId} not found or not accessible.");
+
+        if (string.IsNullOrWhiteSpace(pack.Url))
+            throw new PackImportException("This pack has no remote source to sync from.");
+
+        return pack;
     }
 
     /// <summary>True when the persisted agent matches the parsed artifact on its PROJECTED fields, so re-applying would be a no-op. RawFrontmatter is excluded — jsonb round-trips reorder keys, so comparing it would falsely report "updated"; a refresh re-applies it anyway whenever a projected field changes.</summary>

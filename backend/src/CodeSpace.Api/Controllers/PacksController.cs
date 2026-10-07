@@ -48,4 +48,12 @@ public class PacksController : ControllerBase
         var result = await _mediator.Send(new SyncPackCommand { PackId = packId }, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
+
+    /// <summary>Add the selected artifacts a Sync discovered to this pack, cloned from the pack's saved source and ref — the body carries only <c>{ "sourcePaths": [...] }</c>, never a URL. The route's id is authoritative.</summary>
+    [HttpPost("{packId:guid}/import")]
+    public async Task<IActionResult> Import([FromRoute] Guid packId, [FromBody] ImportPackArtifactsCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command with { PackId = packId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
 }
