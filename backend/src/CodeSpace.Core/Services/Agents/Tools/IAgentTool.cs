@@ -54,6 +54,14 @@ public interface IAgentTool
     /// <summary>Pure, I/O-free validation of the input shape/values (e.g. a blocked-path check) — the first gate, before any permission check or side effect.</summary>
     AgentToolValidation ValidateInput(JsonElement input);
 
+    /// <summary>
+    /// The refusal for a call this tool will not run whatever a human decides — judged on its arguments and its calling
+    /// run (e.g. a repository outside the run's binding) — or null to admit it. Consulted before an approval-gated call is
+    /// parked, so no human is asked to approve a call that would only be refused; <see cref="CallAsync"/> still enforces
+    /// it, since what it judges can change while a card waits. Default: admit.
+    /// </summary>
+    Task<string?> RefusalAsync(AgentToolCall call, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
+
     /// <summary>Execute the (already-validated, already-permitted) call to a structured result. Errors come back as a typed <see cref="AgentToolResult"/>, not a thrown exception.</summary>
     Task<AgentToolResult> CallAsync(AgentToolCall call, CancellationToken cancellationToken);
 }

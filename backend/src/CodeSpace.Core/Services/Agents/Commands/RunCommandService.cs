@@ -44,7 +44,7 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
         // Repo-scoped → clone into a fresh per-run workspace the command runs in; ephemeral → no checkout.
         // The same runnerKind selects the matching workspace provider, so a future docker/k8s pair composes here.
         var workspace = request.RepositoryId is { } repositoryId
-            ? await _workspaces.Resolve(runnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(await BuildWorkspaceRequestAsync(repositoryId, request.Ref, request.TeamId, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false)
+            ? await _workspaces.Resolve(runnerKind).PrepareAsync(WorkspaceProvisionRequest.FromSingle(await BuildWorkspaceRequestAsync(repositoryId, request, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false)
             : null;
 
         try
@@ -161,13 +161,15 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
     /// token through the same provider auth layer the resolver uses, and reuse its provider→username table so
     /// there's one source of truth. A repo with no bound credential clones anonymously (public / local repo).
     /// </summary>
-    private async Task<WorkspaceRequest> BuildWorkspaceRequestAsync(Guid repositoryId, string? gitRef, Guid? teamId, CancellationToken cancellationToken)
+    private async Task<WorkspaceRequest> BuildWorkspaceRequestAsync(Guid repositoryId, RunCommandRequest request, CancellationToken cancellationToken)
     {
         // Fail-closed tenant scope: the repo is resolved ONLY within the run's team, so a model-supplied /
         // untrusted repositoryId can never clone another tenant's repo. No team context with a repo requested is
         // refused outright. A repo in another team falls out of the filter → the same non-leaking "not found".
-        if (teamId is not { } team)
+        if (request.TeamId is not { } team)
             throw new WorkspaceException("Cannot clone a repository without a team context for the run.");
+
+        var bound = CallerBinding(request.CallerPosture, repositoryId);
 
         var repo = await _db.Repository
             .Include(r => r.ProviderInstance)
@@ -178,15 +180,45 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
         if (string.IsNullOrWhiteSpace(repo.CloneUrlHttps))
             throw new WorkspaceException($"Repository {repositoryId} has no HTTPS clone URL to clone from.");
 
+        EnsureRefWithinBinding(bound, request.Ref, repo);
+
         var token = await ResolveTokenAsync(repo, cancellationToken).ConfigureAwait(false);
 
         return new WorkspaceRequest
         {
             RepositoryUrl = repo.CloneUrlHttps,
-            Ref = string.IsNullOrWhiteSpace(gitRef) ? repo.DefaultBranch : gitRef,
+            Ref = string.IsNullOrWhiteSpace(request.Ref) ? repo.DefaultBranch : request.Ref,
             Token = token,
             TokenUsername = token is null ? null : RepositoryWorkspaceResolver.TokenUsernameFor(repo.ProviderInstance.Provider),
         };
+    }
+
+    /// <summary>
+    /// The calling run's binding of the repository an agent's command names — null for a workflow node's command, which
+    /// has no calling run and resolves its authored repository within its team as before. A repository the run is not
+    /// bound to is refused with the same "not found" the tenant filter gives, before it is ever loaded.
+    /// </summary>
+    private static WorkspaceRepositorySpec? CallerBinding(AgentRunPosture? caller, Guid repositoryId)
+    {
+        if (caller is null) return null;
+
+        return AgentRepositoryBinding.Find(caller, repositoryId) ?? throw new WorkspaceException(AgentRepositoryBinding.NotFound(repositoryId));
+    }
+
+    /// <summary>
+    /// An agent's command checks out read-only context only at its bound branch or its default branch, so the tree it
+    /// builds and runs is the content the operator bound, never a branch the agent named (what the pin does and does not
+    /// cover is on <see cref="AgentRepositoryBinding"/>). A refusal rather than an approval card: the binding is the
+    /// operator's own narrowing, which a single approver's click should not widen mid-run, and the card cannot show the
+    /// ref it would be consenting to. The agent tool refuses it before the call is ever parked for approval too
+    /// (<c>NodeAgentTool</c>); this holds a caller that reaches the service directly. A writable repository, and a
+    /// workflow node's command (<paramref name="bound"/> null), take any ref.
+    /// </summary>
+    private static void EnsureRefWithinBinding(WorkspaceRepositorySpec? bound, string? requestedRef, Repository repo)
+    {
+        if (bound is null || AgentRepositoryBinding.AllowsRef(bound, requestedRef, repo.DefaultBranch)) return;
+
+        throw new WorkspaceException(AgentRepositoryBinding.RefOutsideBinding(repo.Id, bound, requestedRef, repo.DefaultBranch));
     }
 
     private async Task<string?> ResolveTokenAsync(Repository repo, CancellationToken cancellationToken)

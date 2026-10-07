@@ -44,10 +44,20 @@ public static class SupervisorRepoClamp
         // S1: the launch base pin is SERVER truth, never a model authoring — each granted entry takes the BOUND
         // spec's pin (a dispatched agent's mounts materialize the same base as its homogeneous siblings), and a
         // model-authored pinnedSha on the subset is discarded outright (a dispatch must not point a bound mount at
-        // an arbitrary commit).
+        // an arbitrary commit). The clone ref is the same kind of truth: it is what the child checks out, and for
+        // read-only context it is the ref its tool calls are then pinned to, so it is the operator's binding too — a
+        // model-authored ref, soft fallback or recovery anchor is discarded for the bound spec's own.
         var boundPins = boundRelated.Where(b => !string.IsNullOrWhiteSpace(b.PinnedSha)).ToDictionary(b => b.RepositoryId, b => b.PinnedSha);
 
-        return authored.Select(repo => repo with { PinnedSha = boundPins.TryGetValue(repo.RepositoryId, out var pin) ? pin : null }).ToList();
+        return authored.Select(repo => WithBoundRef(repo, boundRelated) with { PinnedSha = boundPins.TryGetValue(repo.RepositoryId, out var pin) ? pin : null }).ToList();
+    }
+
+    /// <summary>The authored entry carrying the operator's bound ref for its repository — none (the default branch) when the operator bound none, as for its primary.</summary>
+    private static WorkspaceRepositorySpec WithBoundRef(WorkspaceRepositorySpec authored, IReadOnlyList<WorkspaceRepositorySpec> boundRelated)
+    {
+        var bound = boundRelated.FirstOrDefault(b => b.RepositoryId == authored.RepositoryId);
+
+        return authored with { Ref = bound?.Ref, RefSoftFallback = bound?.RefSoftFallback ?? false, RefRecoverySha = bound?.RefRecoverySha };
     }
 
     /// <summary>

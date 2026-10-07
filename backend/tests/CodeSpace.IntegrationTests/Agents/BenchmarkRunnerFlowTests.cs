@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 using CodeSpace.Core.Services.Agents.Harnesses.Codex;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -89,6 +90,22 @@ public sealed class BenchmarkRunnerFlowTests
         // The honest twist on the scorecard: a Succeeded-but-unsolved run scores a 0 solve rate.
         var card = BenchmarkScorecard.Compute(new[] { result });
         card.Harnesses.Single().SuccessRate.ShouldBe(0.0);
+    }
+
+    [Fact]
+    public async Task A_cli_mcp_cell_whose_write_scope_is_read_only_is_not_recorded_as_served_the_full_catalog()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // A Confined cell derives a read-only write scope, and a read-only run is served only the tools that do not write
+        // even when its mode opts into the fabric. The row's label must follow what the executor served, never the opt-in.
+        using var cli = new FakeBenchmarkCli();
+        using var workspace = BenchmarkFixture.StageSolved();
+        var teamId = await SeedTeamAsync();
+
+        var run = await RunAsync(TestsPassTask(), BenchmarkMode.HarnessCliWithMcp, workspace.Directory, teamId, new BenchmarkAgentSelection { Autonomy = AgentAutonomyLevel.Confined });
+
+        run.McpFullCatalog.ShouldBeFalse("the executor withheld every write from this read-only cell, so the row must not claim the full fabric");
     }
 
     [Fact]
@@ -369,10 +386,10 @@ public sealed class BenchmarkRunnerFlowTests
     private static CorpusCellState CellStateOf(BenchmarkTask task, BenchmarkResult result) =>
         EvalSuite.Classify(EvalSuite.ManifestFor(new[] { task }), new[] { result }, Array.Empty<CorpusBenchmarkError>()).Single().State;
 
-    private async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDir, Guid teamId)
+    private async Task<BenchmarkResult> RunAsync(BenchmarkTask task, BenchmarkMode mode, string workspaceDir, Guid teamId, BenchmarkAgentSelection? selection = null)
     {
         using var scope = _fixture.BeginScopeAs(_operators[teamId], teamId);
-        return await scope.Resolve<IBenchmarkRunner>().RunAsync(task, mode, new BenchmarkExecutionContext { WorkspaceDirectory = workspaceDir, TeamId = teamId }, CancellationToken.None);
+        return await scope.Resolve<IBenchmarkRunner>().RunAsync(task, mode, new BenchmarkExecutionContext { WorkspaceDirectory = workspaceDir, TeamId = teamId, Selection = selection }, CancellationToken.None);
     }
 
     private async Task AssertRealRunRecordedAsync(BenchmarkResult result, Guid teamId)

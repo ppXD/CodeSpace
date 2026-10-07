@@ -2,6 +2,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Tools;
@@ -44,7 +45,7 @@ public class McpToolTeamScopeFlowTests
         var repoId = await SeedRepositoryAsync(teamA, new Uri(origin.Path).AbsoluteUri, "main");
 
         using var scope = _fixture.BeginScope();
-        var handler = new McpRequestHandler(scope.Resolve<IAgentToolRegistry>(), AgentAutonomyLevel.Unleashed, teamA);
+        var handler = new McpRequestHandler(scope.Resolve<IAgentToolRegistry>(), AgentAutonomyLevel.Unleashed, teamA, repositories: [BoundTo(repoId)]);
 
         // `cat README.md` only reads the file if the handler's team reached the node, the node resolved team A's
         // repo, cloned it, and ran with the clone as cwd. Proves teamId travels handler → call → Sys → node.
@@ -67,13 +68,18 @@ public class McpToolTeamScopeFlowTests
         var repoId = await SeedRepositoryAsync(teamB, new Uri(origin.Path).AbsoluteUri, "main");
 
         using var scope = _fixture.BeginScope();
-        var handler = new McpRequestHandler(scope.Resolve<IAgentToolRegistry>(), AgentAutonomyLevel.Unleashed, teamA);
+        // The handler's run is bound to team B's repository and to an id nobody owns — as no admitted run could be — so
+        // both calls get past the binding and the tenant filter alone stands between team A's run and team B's repository.
+        var missing = Guid.NewGuid();
+        var handler = new McpRequestHandler(scope.Resolve<IAgentToolRegistry>(), AgentAutonomyLevel.Unleashed, teamA, repositories: [BoundTo(repoId), BoundTo(missing) with { Alias = "missing" }]);
 
         // The repo belongs to team B; a handler bound to team A names it → the tenant filter resolves nothing.
         var result = await CallToolAsync(handler, "agent.run_command", new { repositoryId = repoId.ToString(), command = "cat", args = new[] { "README.md" } });
+        var absent = await CallToolAsync(handler, "agent.run_command", new { repositoryId = missing.ToString(), command = "cat", args = new[] { "README.md" } });
 
         result.GetProperty("isError").GetBoolean().ShouldBeTrue(customMessage: "a cross-team repo id must fail closed, never clone");
-        Text(result).ShouldContain("not found", customMessage: "a cross-team repo is indistinguishable from a missing one (no existence leak)");
+        Text(result).ShouldContain(AgentRepositoryBinding.NotFound(repoId), customMessage: "the tenant filter's own miss — the sentence the binding's refusal repeats");
+        Text(result).Replace(repoId.ToString(), "id").ShouldBe(Text(absent).Replace(missing.ToString(), "id"), "a cross-team repo is indistinguishable from a missing one (no existence leak)");
         Text(result).ShouldNotContain("secret-of-team-b");
     }
 
@@ -89,9 +95,10 @@ public class McpToolTeamScopeFlowTests
         var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, "main");
 
         using var scope = _fixture.BeginScope();
-        var handler = new McpRequestHandler(scope.Resolve<IAgentToolRegistry>(), AgentAutonomyLevel.Unleashed);   // no teamId → null
+        var handler = new McpRequestHandler(scope.Resolve<IAgentToolRegistry>(), AgentAutonomyLevel.Unleashed, repositories: [BoundTo(repoId)]);   // no teamId → null
 
-        // No team on the handler → no sys.team_id → the node can't resolve a repo (today's fail-closed default).
+        // No team on the handler → no sys.team_id → the node can't resolve a repo (today's fail-closed default). The run
+        // is bound to the repository, so the call gets past the binding and fails at the team check itself.
         var result = await CallToolAsync(handler, "agent.run_command", new { repositoryId = repoId.ToString(), command = "true" });
 
         result.GetProperty("isError").GetBoolean().ShouldBeTrue();
@@ -131,6 +138,8 @@ public class McpToolTeamScopeFlowTests
     }
 
     private static string Text(JsonElement toolResult) => toolResult.GetProperty("content")[0].GetProperty("text").GetString() ?? "";
+
+    private static WorkspaceRepositorySpec BoundTo(Guid repositoryId) => new() { Alias = "repo", RepositoryId = repositoryId };
 
     private async Task<Guid> SeedRepositoryAsync(Guid teamId, string cloneUrlHttps, string defaultBranch)
     {

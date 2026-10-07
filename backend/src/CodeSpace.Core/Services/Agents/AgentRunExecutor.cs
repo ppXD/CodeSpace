@@ -3601,9 +3601,18 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// selects <see cref="McpCatalogMode.Full"/> — the whole registry incl. the side-effecting fabric, byte-identical to
     /// before. OFF (the default) selects <see cref="McpCatalogMode.ReadOnly"/> — only read-only tools (e.g.
     /// <c>get_context</c> + the git reads) are served, so a default run still reaches the safe read tools without
-    /// exposing any side effect. Pure + internal so it's unit-pinned.
+    /// exposing any side effect. An opted-in run whose write scope is not <see cref="AgentWriteScope.Workspace"/> — an
+    /// author's <c>readOnly</c>, a Confined tier, or a scope this code does not know, read as read-only like
+    /// <see cref="ApplyWriteScope"/> reads it — is served <see cref="McpCatalogMode.NonDestructive"/>: "analysis-only (no
+    /// writes)" must hold for the tools it is handed, not only for its own sandbox, yet it keeps every tool that does not
+    /// write, the ask (<c>decision.request</c>) among them. Pure + internal so it's unit-pinned.
     /// </summary>
-    internal static McpCatalogMode ResolveMcpCatalogMode(AgentTask task) => UsesFullToolCatalog(task) ? McpCatalogMode.Full : McpCatalogMode.ReadOnly;
+    internal static McpCatalogMode ResolveMcpCatalogMode(AgentTask task)
+    {
+        if (!UsesFullToolCatalog(task)) return McpCatalogMode.ReadOnly;
+
+        return task.Permissions.WriteScope == AgentWriteScope.Workspace ? McpCatalogMode.Full : McpCatalogMode.NonDestructive;
+    }
 
     /// <summary>
     /// A BOOT diagnostic the worker host calls once at startup so a mis-configured tool fabric is VISIBLE at deploy time,
@@ -3672,9 +3681,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // tools by default and the whole fabric only when the run opted in.
         var catalogMode = ResolveMcpCatalogMode(task);
 
+        // The repositories the admitted task bound the run to — the workspace it cloned — are the only ones its tool calls
+        // may name, stamped server-side here and never read from the model's arguments. A no-repository run binds none.
+        var repositories = RepositoryWorkspaceResolver.CanonicalWorkspace(task)?.Repositories ?? [];
+
         try
         {
-            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, redactor, socketPath, token, connects, scope, ct, _logger, fenceEpoch, governanceEnabled, approvalConversationId, catalogMode, task.Permissions);
+            return new AgentMcpEndpoint(runId, registry, autonomy, teamId, redactor, socketPath, token, connects, scope, ct, _logger, fenceEpoch, governanceEnabled, approvalConversationId, catalogMode, task.Permissions, repositories);
         }
         // An over-length socket path throws ArgumentOutOfRangeException (UDS endpoint ctor); CreateDirectory can throw
         // IOException / UnauthorizedAccessException. The endpoint is optional infra, not the run, so any of these is a

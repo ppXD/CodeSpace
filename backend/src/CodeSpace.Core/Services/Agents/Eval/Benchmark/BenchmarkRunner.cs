@@ -20,7 +20,7 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 /// are GENUINELY differentiated within a SINGLE process: the runner stamps the per-run opt-in
 /// <c>AgentTask.EnableMcpEndpoint</c> from the mode, so the cli-mcp run opens the run-scoped MCP tool-fabric endpoint
 /// while the cli run does not — they execute observably differently, not merely under different scorecard labels. The
-/// resolved gate state (the SAME <c>AgentRunExecutor.UsesFullToolCatalog</c> the executor consults) is recorded on
+/// resolved gate state (the SAME <c>AgentRunExecutor.ResolveMcpCatalogMode</c> the executor consults) is recorded on
 /// <see cref="BenchmarkResult.McpFullCatalog"/>, so a row can never be mislabeled relative to what the executor did.
 /// <see cref="BenchmarkMode.WorkflowMap"/> is RESERVED, not wired in this slice: it would run through the composed
 /// planner→<c>flow.map</c>→synthesizer ENGINE path (a workflow, not a single agent run), which this single-run runner
@@ -67,9 +67,10 @@ public sealed class BenchmarkRunner : IBenchmarkRunner, IScopedDependency
 
         var agentTask = BuildAgentTask(task, mode, workspaceDirectory, selection);
 
-        // The SAME gate the executor will consult to decide whether to open the run's MCP endpoint — recorded on the
-        // result so the cli vs cli-mcp rows can never be mislabeled relative to what the run actually did.
-        var mcpFullCatalog = AgentRunExecutor.UsesFullToolCatalog(agentTask);
+        // The SAME gate the executor will consult to decide which slice of the catalog the run's MCP endpoint serves —
+        // recorded on the result so the cli vs cli-mcp rows can never be mislabeled relative to what the run actually did
+        // (a read-only cell is served only the tools that do not write, even when its mode opts into the fabric).
+        var mcpFullCatalog = AgentRunExecutor.ResolveMcpCatalogMode(agentTask) == McpCatalogMode.Full;
 
         var attempts = await RunWithFormatFaultRespawnAsync(task, agentTask, context, cancellationToken).ConfigureAwait(false);
 

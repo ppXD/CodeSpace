@@ -41,6 +41,8 @@ public sealed class GitFetchPrChecksNode : INodeRuntime
         Description = "Fetches a pull/merge request's CI checks and a green/pending/failed summary — wire allPassed into an If/else to gate on CI.",
         // Synchronous + read-only → exposable as an agent tool (a non-destructive one).
         IsAgentToolEligible = true,
+        // Called by an agent, only a repository its run is bound to.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId" },
         // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
         // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
         ConfigSchema = SchemaBuilder.Parse("""

@@ -43,6 +43,8 @@ public sealed class GitPostPrCommentNode : INodeRuntime
         // tool-invoked comment acts as the repo CONNECTION credential, not a specific user. The ledger's
         // agent_run_id provides traceability.
         IsAgentToolEligible = true,
+        // Called by an agent, only a repository its run is bound to — and a write, so a patch-only repository refuses it.
+        RepositoryInput = new RepositoryInputSpec { InputKey = "repositoryId", WritesRepository = true },
         // x-intent: always-first plain-language summary composed from the live inputs (repositoryId → repo
         // NAME; a bound {{ref}} → chip; unset → the x-intentPlaceholders prompt). Display-only metadata.
         ConfigSchema = SchemaBuilder.Parse("""

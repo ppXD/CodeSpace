@@ -10,6 +10,10 @@ namespace CodeSpace.Messages.Agents;
 ///   <item><see cref="Full"/> — the whole registry, exactly as before. Selected only by the existing opt-in
 ///   (the per-run <c>AgentTask.EnableMcpEndpoint</c>, else the committed default), so a
 ///   run that opted into the side-effecting fabric is byte-identical to the pre-default-read-only behavior.</item>
+///   <item><see cref="NonDestructive"/> — every tool that does not write: the read-only tools plus an ask
+///   (<c>decision.request</c>). Selected for a run that opted into the fabric but whose write scope is read-only (an
+///   <c>agent.run</c> with <c>readOnly</c>, or a Confined tier): "analysis only, no writes" holds for the tools it is
+///   handed, while it can still ask a human.</item>
 /// </list>
 /// The split is purely about WHICH tools the catalog serves; the per-call autonomy gate + governance still apply on
 /// top (a side-effecting tool in <see cref="Full"/> mode is still tier-gated and ledger-tracked as before).
@@ -18,4 +22,5 @@ public enum McpCatalogMode
 {
     ReadOnly = 0,
     Full = 1,
+    NonDestructive = 2,
 }

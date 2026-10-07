@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Agents.ModelCredentials;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
+using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -89,9 +90,9 @@ public class AgentMcpEndpointFlowTests
         await SeedLocalRepoAsync(origin.Path, "README.md", "hello-from-team-a");
         var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, "main");
 
-        // A run with team A's autonomy at Unleashed (so the destructive agent.run_command is gated-Allow), sleeping so
-        // the endpoint stays open while we drive JSON-RPC over it.
-        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+        // A run with team A's autonomy at Unleashed (so the destructive agent.run_command is gated-Allow), bound to the
+        // repository it reads, sleeping so the endpoint stays open while we drive JSON-RPC over it.
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, workspace: WorkspaceSpec.FromRepository(repoId));
 
         using var connects = ConnectRegistryFromFixture();
         var run = RunExecutorInBackground(runId, new ScriptedHarness("sleep 6"));
@@ -150,10 +151,10 @@ public class AgentMcpEndpointFlowTests
         await SeedLocalRepoAsync(originB.Path, "README.md", "secret-of-team-b");
         var teamBRepoId = await SeedRepositoryAsync(teamB, new Uri(originB.Path).AbsoluteUri, "main");
 
-        // Unleashed so the destructive agent.run_command is gated-Allow. A LONG-sleeping harness keeps the endpoint open;
-        // we cancel the worker the instant the session asserts pass (the cancel-decouple pattern), so the test is bounded
-        // by the choreography, not the sleep.
-        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+        // Unleashed so the destructive agent.run_command is gated-Allow; bound to team A's repository, the one it reads.
+        // A LONG-sleeping harness keeps the endpoint open; we cancel the worker the instant the session asserts pass (the
+        // cancel-decouple pattern), so the test is bounded by the choreography, not the sleep.
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, workspace: WorkspaceSpec.FromRepository(repoId));
 
         using var connects = ConnectRegistryFromFixture();
         using var workerCts = new CancellationTokenSource();
@@ -420,10 +421,11 @@ public class AgentMcpEndpointFlowTests
         var connect = await WaitForConnectAsync(connects, runId);
         await using var client = await McpClient.ConnectAsync(connect);
 
-        // agent.run_command is destructive → gated. At Confined the autonomy gate denies it before any clone is tried.
+        // agent.run_command is destructive. A Confined run is admitted with a read-only write scope, so the endpoint does
+        // not even serve it — refused before the gate, before any clone is tried.
         var call = await client.CallToolAsync(1, "agent.run_command", new { command = "true" });
         call.GetProperty("isError").GetBoolean().ShouldBeTrue();
-        Text(call).ShouldContain("not permitted", customMessage: "a destructive tool at Confined is denied before execution");
+        Text(call).ShouldContain("served no tool that writes", customMessage: "a destructive tool at Confined is refused before execution");
 
         await run;
     }
@@ -471,6 +473,9 @@ public class AgentMcpEndpointFlowTests
         await SeedLocalRepoAsync(origin.Path, "README.md", "secret-of-team-b");
         var teamBRepoId = await SeedRepositoryAsync(teamB, new Uri(origin.Path).AbsoluteUri, "main");
 
+        // No admitted run can be bound to another team's repository (its workspace would not even clone), so what refuses
+        // team B's id over a real endpoint is the run's binding. The tenant filter behind it is pinned where a binding can
+        // be forced: McpToolTeamScopeFlowTests (through the handler) and AgentToolRepositoryBindingFlowTests (the service).
         var runId = await CreateRunAsync(teamA, AgentAutonomyLevel.Unleashed);
 
         using var connects = ConnectRegistryFromFixture();
@@ -481,8 +486,113 @@ public class AgentMcpEndpointFlowTests
 
         var call = await client.CallToolAsync(1, "agent.run_command", new { repositoryId = teamBRepoId.ToString(), command = "cat", args = new[] { "README.md" } });
         call.GetProperty("isError").GetBoolean().ShouldBeTrue(customMessage: "a cross-team repo id must fail closed, never clone");
-        Text(call).ShouldContain("not found", customMessage: "a cross-team repo is indistinguishable from a missing one");
+        Text(call).ShouldBe(AgentRepositoryBinding.NotFound(teamBRepoId), "a cross-team repo is indistinguishable from a missing or unbound one");
         Text(call).ShouldNotContain("secret-of-team-b");
+
+        await run;
+    }
+
+    // ── The run's repository binding, end to end (Tier 🟢 high-fidelity) ───────────────────────────────────────────
+    //
+    // The audit probe's chain, driven from the producer: the bound set is stamped by the REAL executor from the run's
+    // ADMITTED task (OpenMcpEndpoint), served over the real per-run socket, held by the real NodeAgentTool, and the
+    // command clones through the real RunCommandService → LocalGitWorkspaceProvider → LocalProcessRunner from file://
+    // remotes on real Postgres. A handler built by hand would prove nothing about what production stamps.
+
+    [Fact]
+    public async Task A_runs_own_endpoint_reaches_only_the_repositories_its_task_bound_at_the_refs_it_bound_them()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+        if (!await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        using var primaryOrigin = new TempDir();
+        using var contextOrigin = new TempDir();
+        using var unboundOrigin = new TempDir();
+        await SeedLocalRepoAsync(primaryOrigin.Path, "README.md", "primary-readme");
+        await SeedLocalRepoAsync(contextOrigin.Path, "README.md", "context-readme");
+        await SeedUnmergedBranchAsync(contextOrigin.Path, "SECRET.txt", "CONTEXT-UNMERGED-SECRET");
+        await SeedLocalRepoAsync(unboundOrigin.Path, "README.md", "unbound-readme");
+        await SeedUnmergedBranchAsync(unboundOrigin.Path, "SECRET.txt", "UNBOUND-UNMERGED-SECRET");
+        var primary = await SeedRepositoryAsync(teamId, new Uri(primaryOrigin.Path).AbsoluteUri, "main");
+        var context = await SeedRepositoryAsync(teamId, new Uri(contextOrigin.Path).AbsoluteUri, "main");
+        var unbound = await SeedRepositoryAsync(teamId, new Uri(unboundOrigin.Path).AbsoluteUri, "main");   // SAME team, never bound
+
+        // Network off and write scope read-only would not have stopped the audit's read; only the binding does. The run
+        // works in `primary` and reads `context` as read-only context at its default branch.
+        var workspace = WorkspaceSpec.FromAuthoredRepos(primary, null, [new WorkspaceRepositorySpec { Alias = "ctx", RepositoryId = context, Access = WorkspaceAccess.Read }]);
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, permissions: new AgentPermissions { Network = AgentNetworkAccess.Off }, workspace: workspace);
+
+        using var connects = ConnectRegistryFromFixture();
+        using var workerCts = new CancellationTokenSource();
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 120"), cancellationToken: workerCts.Token));
+
+        try
+        {
+            var connect = await WaitForConnectAsync(connects, runId, run);
+            await using var client = await McpClient.ConnectAsync(connect);
+
+            var own = await client.CallToolAsync(1, "agent.run_command", new { repositoryId = primary.ToString(), command = "cat", args = new[] { "README.md" } });
+            var contextDefault = await client.CallToolAsync(2, "agent.run_command", new { repositoryId = context.ToString(), command = "cat", args = new[] { "README.md" } });
+            var contextUnmerged = await client.CallToolAsync(3, "agent.run_command", new { repositoryId = context.ToString(), branch = "secret-branch", command = "cat", args = new[] { "SECRET.txt" } });
+            var unboundUnmerged = await client.CallToolAsync(4, "agent.run_command", new { repositoryId = unbound.ToString(), branch = "secret-branch", command = "cat", args = new[] { "SECRET.txt" } });
+            var unboundDiff = await client.CallToolAsync(5, "git.fetch_pr_diff", new { repositoryId = unbound.ToString(), number = 1 });
+
+            Text(own).ShouldContain("primary-readme", customMessage: $"the run's own repository is reachable: {own.GetRawText()}");
+            Text(contextDefault).ShouldContain("context-readme", customMessage: $"read-only context at its bound (default) branch is reachable: {contextDefault.GetRawText()}");
+
+            contextUnmerged.GetProperty("isError").GetBoolean().ShouldBeTrue(customMessage: "read-only context is pinned to its bound or default branch");
+            contextUnmerged.GetRawText().ShouldNotContain("CONTEXT-UNMERGED-SECRET");
+
+            foreach (var refused in new[] { unboundUnmerged, unboundDiff })
+            {
+                refused.GetProperty("isError").GetBoolean().ShouldBeTrue(customMessage: $"a same-team repository the task never bound must be refused: {refused.GetRawText()}");
+                Text(refused).ShouldBe(AgentRepositoryBinding.NotFound(unbound), "refused as not found — the same answer a missing or foreign repository gets");
+                refused.GetRawText().ShouldNotContain("UNBOUND-UNMERGED-SECRET");
+            }
+        }
+        finally
+        {
+            workerCts.Cancel();
+            try { await run; } catch (OperationCanceledException) { /* worker death — expected, decouples from the 120s sleep */ }
+        }
+    }
+
+    [Theory]
+    [InlineData(AgentAutonomyLevel.Unleashed, AgentWriteScope.ReadOnly)]    // readOnly=true on an agent.run node: only the write scope can withhold the writes
+    [InlineData(AgentAutonomyLevel.Confined, AgentWriteScope.Workspace)]    // a Confined tier is admitted with a read-only write scope whatever it asked for
+    public async Task A_read_only_run_is_served_no_side_effecting_tool_over_its_endpoint_yet_can_still_ask_a_human(AgentAutonomyLevel autonomy, AgentWriteScope requestedScope)
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        // "Analysis-only (no writes), regardless of the autonomy level" — but an ask is not a write, and a Confined tier
+        // must never be denied a question: decision.request is the run's only way to ask a human mid-run.
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, autonomy, permissions: new AgentPermissions { Network = AgentNetworkAccess.Off, WriteScope = requestedScope });
+
+        using var connects = ConnectRegistryFromFixture();
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness("sleep 6")));
+
+        var connect = await WaitForConnectAsync(connects, runId, run);
+        await using var client = await McpClient.ConnectAsync(connect);
+
+        var tools = ToolNames(await client.ExchangeAsync(1, "tools/list"));
+        tools.ShouldContain("git.list_prs", customMessage: "a read-only run still reads");
+        tools.ShouldContain(DecisionRequestTool.ToolKind, customMessage: "a read-only run can still ask a human");
+        tools.ShouldNotContain("agent.run_command");
+        tools.ShouldNotContain("git.open_pr");
+        tools.ShouldNotContain("git.merge_pr", customMessage: "a read-only run must not be handed an irreversible write");
+
+        var merge = await client.CallToolAsync(2, "git.merge_pr", new { repositoryId = Guid.NewGuid().ToString(), number = 1 });
+        merge.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        Text(merge).ShouldContain("read-only", customMessage: "a guessed write name is refused before the gate could park it for approval");
+
+        // A question with no text is the cheapest call that proves the ask reached the decision flow — past the catalog and
+        // the decision substrate's own check — without parking a real decision and blocking this test on a human.
+        var ask = await client.CallToolAsync(3, DecisionRequestTool.ToolKind, new { });
+        Text(ask).ShouldBe("decision.request requires a non-empty 'question'.", "the ask is served and reaches the decision flow, not a read-only refusal");
 
         await run;
     }
@@ -898,8 +1008,9 @@ public class AgentMcpEndpointFlowTests
         await SeedLocalRepoAsync(origin.Path, "README.md", "hello-from-team-a");
         var repoId = await SeedRepositoryAsync(teamId, new Uri(origin.Path).AbsoluteUri, "main");
 
-        // Unleashed so the destructive agent.run_command is gated-Allow (runs once through the ledger, not parked).
-        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed);
+        // Unleashed so the destructive agent.run_command is gated-Allow (runs once through the ledger, not parked); bound to
+        // the repository both calls name.
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Unleashed, workspace: WorkspaceSpec.FromRepository(repoId));
 
         using var connects = ConnectRegistryFromFixture();
         // Endpoint AND governance ON → the side-effecting path routes through the exactly-once ToolCallLedger.
@@ -1504,12 +1615,12 @@ public class AgentMcpEndpointFlowTests
 
     // ── Seeding (mirrors McpToolTeamScopeFlowTests + AgentRunExecutorTests) ──
 
-    /// <summary><paramref name="enableMcp"/> is the per-run catalog choice — null takes the committed default (full), false narrows the run to the read-only slice. It replaced the ambient env flag the helpers used to set.</summary>
-    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null, bool? enableMcp = null, string harnessKind = "scripted", string? model = "test-model", AgentPermissions? permissions = null)
+    /// <summary><paramref name="enableMcp"/> is the per-run catalog choice — null takes the committed default (full), false narrows the run to the read-only slice. It replaced the ambient env flag the helpers used to set. <paramref name="workspace"/> is the repositories the run is bound to — the only ones its tools may reach.</summary>
+    private async Task<Guid> CreateRunAsync(Guid teamId, AgentAutonomyLevel autonomy, IReadOnlyList<string>? tools = null, bool? enableMcp = null, string harnessKind = "scripted", string? model = "test-model", AgentPermissions? permissions = null, WorkspaceSpec? workspace = null)
     {
         using var scope = _fixture.BeginScopeAs(_operators[teamId], teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "scripted", Harness = harnessKind, Model = model, TimeoutSeconds = 1800, Autonomy = autonomy, Permissions = permissions ?? new(), Tools = tools, EnableMcpEndpoint = enableMcp },
+            new AgentTask { Goal = "scripted", Harness = harnessKind, Model = model, TimeoutSeconds = 1800, Autonomy = autonomy, Permissions = permissions ?? new(), Tools = tools, EnableMcpEndpoint = enableMcp, Workspace = workspace },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }
@@ -1537,7 +1648,8 @@ public class AgentMcpEndpointFlowTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var instanceId = Guid.NewGuid();
-        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.Git, DisplayName = "local", BaseUrl = "https://local" });
+        // One instance per repository, so a team that holds several needs a distinct base URL for each (the instance is unique per team + provider + URL).
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.Git, DisplayName = "local", BaseUrl = $"https://local-{instanceId:N}" });
 
         var repoId = Guid.NewGuid();
         db.Repository.Add(new Repository
@@ -1566,6 +1678,16 @@ public class AgentMcpEndpointFlowTests
         await File.WriteAllTextAsync(Path.Combine(dir, file), content);
         await RunGitInAsync(dir, "add", ".");
         await RunGitInAsync(dir, "commit", "-m", "seed");
+    }
+
+    /// <summary>Commit <paramref name="file"/> on a <c>secret-branch</c> that is never merged, then return the origin to main.</summary>
+    private static async Task SeedUnmergedBranchAsync(string dir, string file, string content)
+    {
+        await RunGitInAsync(dir, "checkout", "-b", "secret-branch");
+        await File.WriteAllTextAsync(Path.Combine(dir, file), content);
+        await RunGitInAsync(dir, "add", ".");
+        await RunGitInAsync(dir, "commit", "-m", "unmerged work");
+        await RunGitInAsync(dir, "checkout", "main");
     }
 
     private static async Task RunGitInAsync(string workdir, params string[] args)
