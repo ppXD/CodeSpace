@@ -38,7 +38,9 @@ COPY --from=build /app/package.json   /usr/share/nginx/html/package.json
 
 COPY ./nginx.conf /etc/nginx/conf.d/default.conf
 
-RUN printf '#!/bin/sh\nset -e\ncd /usr/share/nginx/html\nnpx -y @import-meta-env/cli@0.7.4 -x .env -e .env -p dist/index.html\nnginx -g "daemon off;"\n' > /init.sh \
-    && chmod +x /init.sh
+# Container start: substitute the runtime env into dist/env.js, derive the CSP's API origin from it, then serve.
+COPY ./docker/csp-api-origin.mjs /usr/local/lib/codespace/csp-api-origin.mjs
+COPY ./docker/init.sh /init.sh
+RUN chmod +x /init.sh
 
 CMD ["/init.sh"]
