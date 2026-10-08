@@ -2,6 +2,10 @@ name: Frontend · Lint · Typecheck · Vitest
 
 # The frontend verify trio: ESLint, the tsc -b + vite build typecheck/bundle, and the vitest unit
 # suite. pnpm is the package manager (pnpm-lock.yaml is the authoritative lockfile).
+#
+# Beside it, the SPA image job builds frontend/Dockerfile and starts it the way the cluster does, proving over
+# HTTP that nginx serves the CSP with the API origin init.sh derives from the runtime env. It runs on every
+# frontend change: the image is built from all of frontend/, so no narrower path list would cover what breaks it.
 
 on:
   push:
@@ -58,3 +62,19 @@ jobs:
         run: pnpm run test
         env:
           VITE_API_URL: http://localhost:5099
+
+  spa-image:
+    name: SPA image serves its CSP (real nginx + init.sh)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # node reads the served /env.js the way the browser runs it; docker and curl ship on ubuntu-latest.
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: SPA image E2E
+        run: frontend/docker/e2e/run.sh

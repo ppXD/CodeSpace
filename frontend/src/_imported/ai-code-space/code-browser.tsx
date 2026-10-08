@@ -1,11 +1,12 @@
 import { useMemo, useState, type ReactNode } from "react";
 import ReactMarkdown from "react-markdown";
 import rehypeRaw from "rehype-raw";
-import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
+import rehypeSanitize from "rehype-sanitize";
 import remarkGfm from "remark-gfm";
 
 import { ApiError } from "@/api/request";
 import type { RemoteBranch, RemoteCommitSummary, RemoteFileContent, RemoteLanguage, RemoteRelease, RemoteRepositoryStats, RemoteTreeEntry, RepositoryDetail } from "@/api/types";
+import { MarkdownImage } from "@/components/markdown/MarkdownImage";
 import {
   useRenderMarkdown,
   useRepository,
@@ -20,6 +21,7 @@ import {
 } from "@/hooks/use-repositories";
 import { buildBreadcrumbs, formatBytes, formatCount, isMarkdownName, languageColor, parentPath, pickLicense, pickReadme, relativeTime, sortTreeEntries } from "@/lib/codeTree";
 import { prepareProviderHtml } from "@/lib/providerHtml";
+import { readmeSanitizeSchema } from "@/lib/readmeSanitizeSchema";
 import { blobUrl, resolveReadmeUrl } from "@/lib/repoUrls";
 
 import { Ic } from "./icons";
@@ -616,27 +618,6 @@ function LanguagesPanel({ languages }: { languages: RemoteLanguage[] | undefined
 // ── Shared bits ─────────────────────────────────────────────────────────────
 
 /**
- * Sanitize schema for rendering a README's embedded HTML safely. Starts from rehype-sanitize's
- * GitHub-based default (which already strips <script>, event handlers, and javascript: URLs) and adds
- * back the cosmetic bits real READMEs rely on: `align` for centering, image sizing, and <picture>/<source>.
- */
-const sanitizeSchema = {
-  ...defaultSchema,
-  tagNames: [...(defaultSchema.tagNames ?? []), "picture", "source"],
-  attributes: {
-    ...defaultSchema.attributes,
-    "*": [...(defaultSchema.attributes?.["*"] ?? []), "align"],
-    img: [...(defaultSchema.attributes?.img ?? []), "width", "height", "align", "loading"],
-    source: ["srcSet", "srcset", "media", "type", "sizes"],
-    div: [...(defaultSchema.attributes?.div ?? []), "align"],
-    p: [...(defaultSchema.attributes?.p ?? []), "align"],
-    h1: [...(defaultSchema.attributes?.h1 ?? []), "align"],
-    h2: [...(defaultSchema.attributes?.h2 ?? []), "align"],
-    h3: [...(defaultSchema.attributes?.h3 ?? []), "align"],
-  },
-};
-
-/**
  * Hybrid markdown render: ask the repo's provider to render it (so refs / relative links resolve exactly
  * as on the provider's site), falling back to the client-side <Markdown> while that's in flight or when
  * the provider can't render it (no capability, insufficient scope, error). Either way the user sees a
@@ -651,7 +632,7 @@ function MarkdownView({ repoId, source, webUrl, gitRef, dir }: { repoId: string;
   return <Markdown source={source} webUrl={webUrl} gitRef={gitRef} dir={dir} />;
 }
 
-/** Provider-rendered README HTML, post-processed (relative URLs resolved against the repo, unsafe bits stripped) then embedded. */
+/** Provider-rendered README HTML, cut to the README allowlist and its relative URLs resolved against the repo, then embedded. */
 function ProviderHtml({ html, webUrl, gitRef, dir }: { html: string; webUrl: string; gitRef: string; dir: string }) {
   const safe = useMemo(() => prepareProviderHtml(html, webUrl, gitRef, dir), [html, webUrl, gitRef, dir]);
 
@@ -668,12 +649,13 @@ function Markdown({ source, webUrl, gitRef, dir }: { source: string; webUrl: str
     <div className="prd-markdown">
       <ReactMarkdown
         remarkPlugins={[remarkGfm]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema]]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, readmeSanitizeSchema]]}
         urlTransform={(url, key) => resolveReadmeUrl(url, webUrl, gitRef, dir, key === "src" || key === "srcSet" || key === "poster")}
         components={{
           a: ({ href, children, ...rest }) => (
             <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a>
           ),
+          img: MarkdownImage,
         }}
       >
         {source}

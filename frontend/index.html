@@ -13,6 +13,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>CodeSpace</title>
     <meta name="theme-color" content="#1B1916" />
+    <!-- Runtime env (public/env.js, substituted at container start). Classic and blocking, so it has run before the
+         deferred module entry reads import.meta.env. -->
+    <script src="/env.js"></script>
   </head>
   <body>
     <div id="root"></div>
