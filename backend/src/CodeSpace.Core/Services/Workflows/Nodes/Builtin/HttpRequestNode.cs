@@ -2,6 +2,7 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using CodeSpace.Core.Services.OutboundHttp;
 using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
 
@@ -25,6 +26,13 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 ///   ok       — true iff 2xx
 ///   body     — response body (parsed JSON when parseJson and content-type matches, else string)
 ///   headers  — response headers as object
+///
+/// The URL is whatever its template resolves to — often trigger text or an upstream node's output — so the node's
+/// client is the guarded one (<see cref="GuardedHttpClientRegistration"/>): it reaches only public addresses or ones an
+/// operator committed to <c>OutboundHttp:AllowedInternalDestinations</c>, directly or through the worker's
+/// HTTP(S)_PROXY; it sends no cookies but the ones the author writes, and no author <c>Host</c> header; a redirect to
+/// another origin — an http→https move on the same host included — carries none of the author's headers; and a
+/// redirect that would carry the body to another origin is returned as the node's 3xx rather than followed.
 /// </summary>
 public sealed class HttpRequestNode : INodeRuntime
 {
@@ -43,7 +51,7 @@ public sealed class HttpRequestNode : INodeRuntime
         Category = "Tools",
         Kind = NodeKind.Regular,
         IconKey = "globe",
-        Description = "Make an HTTP request to any URL. Universal escape hatch when no bespoke node exists.",
+        Description = "Make an HTTP request to any public URL. Universal escape hatch when no bespoke node exists. Internal addresses (loopback, private, cloud metadata) are refused unless an operator allowlists them. A redirect to another origin, http→https included, arrives without your headers — write the final URL to keep them — and one that would send your body to another origin comes back as the 3xx.",
         // HTTP requests with mutating verbs (POST/PUT/PATCH/DELETE) are side-effecting. GET
         // is technically safe to retry, but the manifest is a node-level marker and the
         // operator can't promise which verb their template will pick. Mark the whole node
@@ -152,6 +160,11 @@ public sealed class HttpRequestNode : INodeRuntime
             // TaskCanceledException with our own token NOT triggered = client-side timeout.
             // (Observability already emitted external_call.failed; re-translate to NodeResult.Fail.)
             return NodeResult.Fail($"HTTP request timed out after {timeoutSeconds}s.");
+        }
+        catch (HttpRequestException ex) when (ex.InnerException is OutboundDestinationRefusedException)
+        {
+            // Refused by destination policy: deterministic, so a retry policy must not spend attempts on it.
+            return NodeResult.Fail($"HTTP request failed: {ex.Message}", retryable: false);
         }
         catch (HttpRequestException ex)
         {

@@ -84,6 +84,7 @@ public class FailureTaxonomyTests
         FailureCodes.RerunBlockedUnsupportedNode.ShouldBe("rerun_blocked_unsupported_node");
         FailureCodes.RerunUpstreamNotReusable.ShouldBe("rerun_upstream_not_reusable");
         FailureCodes.PackImportFailed.ShouldBe("pack_import_failed");
+        FailureCodes.OutboundDestinationRefused.ShouldBe("outbound_destination_refused");
         FailureCodes.WorkflowOutputsUnrecoverable.ShouldBe("workflow_outputs_unrecoverable");
         FailureCodes.StorageCredentialInvalid.ShouldBe("storage_credential_invalid");
         FailureCodes.StorageCredentialConflict.ShouldBe("storage_credential_conflict");
