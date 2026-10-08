@@ -24,8 +24,9 @@ public sealed record RunAgentWork(Guid AgentRunId, string? NodeId, string? Itera
 /// attempts are dropped here, at the INPUT: the integrator's sequential apply and set-level abort are correct
 /// fail-closed behaviour and stay untouched. Superseded DUPLICATES are what the REDUCTION drops — it is not an
 /// outcome filter, so a unit whose attempt merely ENDED badly (crashed, timed out, self-reported failure) but
-/// captured a diff still contributes. The ONE outcome that withholds work is a rejected definition-of-done, and
-/// that is a separate, explicit gate: <see cref="IsWithheldFromHead"/>.</para>
+/// captured a diff still contributes. The verdicts that withhold work — a rejected definition-of-done, and an output
+/// review that did not approve the work (which a configured review's failed attempt never got) — are a separate,
+/// explicit gate: <see cref="IsWithheldFromHead"/>.</para>
 ///
 /// <para>The LANE FENCE is load-bearing, because the (node, iteration) cell is not a unit everywhere. A supervisor
 /// stamps ONE turn cell (<c>&lt;nodeId&gt;#turn{N}</c>) on every agent it spawns in that turn, so those K rows are
@@ -52,10 +53,10 @@ public static class RunIntegrationContributions
 
         var produced = manifests
             .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId is not null && m.RepositoryId == repositoryId && m.PublishStateValue != PublishState.None)
-            .Where(m => !IsWithheldFromHead(m))
             .Select(m => (Manifest: m, Work: workByRunId.GetValueOrDefault(m.AgentRunId!.Value)))
             .Where(pair => pair.Work is not null)
-            .Select(pair => (pair.Manifest, Work: pair.Work!));
+            .Select(pair => (pair.Manifest, Work: pair.Work!))
+            .Where(pair => !IsWithheldFromHead(pair.Manifest, pair.Work));
 
         return LatestAttemptPerUnit(produced)
             .OrderBy(pair => pair.Work.CreatedDate).ThenBy(pair => pair.Work.AgentRunId)
@@ -88,9 +89,38 @@ public static class RunIntegrationContributions
     /// <para>SCOPE: an INFRA-classified failure is withheld too, because the row records only the tri-state verdict —
     /// the same coarseness the supervisor's own door accepts. Distinguishing "the check could not run" from "the
     /// check ran and said no" would need a new column on the manifest; deliberately out of scope here.</para>
+    ///
+    /// <para>The OUTPUT review is the other half, and the row cannot carry it: the executor upserts the manifest
+    /// before the review runs, so a branch the reviewer flagged — or one its configured review never examined — still
+    /// reads Pushed with an acceptance verdict of its own. The verdict is on the run's result instead, which this
+    /// source already holds, so the unit is withheld through the SAME predicate the supervisor's doors read
+    /// (<see cref="AgentOutputReviewHold"/>) — in its stricter form, because this source also holds the TASK: under a
+    /// configured review only an approval lets a pushed branch through. A result that says nothing is no approval —
+    /// none at all (the worker died after the push and the run was abandoned), or a fresh Failed one an executor fault
+    /// wrote over the review's verdict while this row still names the branch. With no review configured it integrates
+    /// exactly as before.</para>
     /// </summary>
-    private static bool IsWithheldFromHead(PublishManifest manifest) =>
-        manifest.AcceptanceState is PublishAcceptanceState.Failed or PublishAcceptanceState.Waived;
+    private static bool IsWithheldFromHead(PublishManifest manifest, RunAgentWork work) =>
+        manifest.AcceptanceState is PublishAcceptanceState.Failed or PublishAcceptanceState.Waived || OutputReviewWithholds(work);
+
+    /// <summary>Whether the run's configured output review did not approve its work: its result says so, or says nothing at all.</summary>
+    private static bool OutputReviewWithholds(RunAgentWork work) =>
+        AgentOutputReviewHold.Withholds(TryRead<AgentRunResult>(work.ResultJson), TryRead<AgentTask>(work.TaskJson)?.OutputReviewMode ?? Messages.Enums.ReviewMode.None);
+
+    /// <summary>The stored JSON as <typeparamref name="T"/>, or null when it is absent or unreadable.</summary>
+    private static T? TryRead<T>(string? json) where T : class
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+
+        try
+        {
+            return JsonSerializer.Deserialize<T>(json, AgentJson.Options);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
 
     /// <summary>Keep each unit's unsuperseded attempt, but ONLY in the lane where the (node, iteration) cell is the unit — a lane whose cell is a fan-out container (the supervisor's turn) passes through whole, so its K concurrent siblings all contribute. The caller re-orders, so the two lanes concatenate in any order.</summary>
     private static IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> LatestAttemptPerUnit(IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> produced)
@@ -105,21 +135,8 @@ public static class RunIntegrationContributions
     }
 
     /// <summary>Whether this row's (node, iteration) cell identifies ONE unit whose rows are attempts of each other. False for a supervisor-staked row — its cell is a whole turn shared by that turn's K agents, so the per-agent stamp (<c>WorkUnit</c>, or the <c>SubtaskId</c> that carries it on a plan-less spawn) is the unit, not the cell. False too when the envelope can't be read: an unknown lane must never be reduced.</summary>
-    private static bool CellIsTheUnit(string? taskJson)
-    {
-        if (string.IsNullOrWhiteSpace(taskJson)) return false;
-
-        try
-        {
-            var task = JsonSerializer.Deserialize<AgentTask>(taskJson, AgentJson.Options);
-
-            return task is not null && task.WorkUnit is null && string.IsNullOrEmpty(task.SubtaskId);
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
-    }
+    private static bool CellIsTheUnit(string? taskJson) =>
+        TryRead<AgentTask>(taskJson) is { } task && task.WorkUnit is null && string.IsNullOrEmpty(task.SubtaskId);
 
     /// <summary>The reduction keys on the ATTEMPT (the agent run), not the row — a surviving multi-repo attempt keeps every one of its own per-alias rows. Newest by agent-run creation, tie-broken on id so the pick is total and repeats across builds.</summary>
     private static IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> KeepLatestAttempt(IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> unit)

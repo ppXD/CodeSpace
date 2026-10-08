@@ -252,6 +252,16 @@ public sealed record AgentTask
     public IReadOnlyList<string>? WorkspaceRepositoryDirectories { get; init; }
 
     /// <summary>
+    /// Load NO repository instruction surface into the harness — no <c>CLAUDE.md</c> memory or rules for Claude Code,
+    /// no <c>AGENTS.md</c> project doc for Codex — while the files stay in the workspace as content to read. Set by the
+    /// OUTPUT reviewer, whose clone is the branch under review: that branch's instruction files were written by the
+    /// producer being judged, so loading them would let the reviewed party author its own reviewer's instructions.
+    /// <c>[JsonIgnore(WhenWritingDefault)]</c>, so every other task serializes byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)]
+    public bool ExcludeRepositoryInstructions { get; init; }
+
+    /// <summary>
     /// The single named autonomy tier chosen for this run — the one axis an operator sets. <see cref="Permissions"/>
     /// is DERIVED from it (via <c>AgentAutonomyPolicy</c>) and may then be overridden per-field. Carried as provenance
     /// so the run's intent is auditable independently of the concrete knobs.

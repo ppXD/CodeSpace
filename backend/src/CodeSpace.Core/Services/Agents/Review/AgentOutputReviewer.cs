@@ -10,7 +10,7 @@ namespace CodeSpace.Core.Services.Agents.Review;
 /// The real-agent OUTPUT reviewer (triad S8, now a thin facade over the shared <see cref="AgentReviewRunner"/>):
 /// a read-only review agent — distinct-first harness — cloned at the PRODUCED BRANCH, so it inspects the actual
 /// repository state the change created, not a diff string. Its verdict feeds the executor's ladder
-/// (agent → model critic → fail-open); its run lands on the producer's node cell under an iteration key the
+/// (agent → model critic → held unreviewed); its run lands on the producer's node cell under an iteration key the
 /// plan-map checklist's positional join deliberately cannot parse as a branch index.
 /// </summary>
 public sealed class AgentOutputReviewer : IAgentOutputReviewer, IScopedDependency
@@ -24,25 +24,55 @@ public sealed class AgentOutputReviewer : IAgentOutputReviewer, IScopedDependenc
 
     public async Task<CriticVerdict> ReviewAsync(AgentRunOwnerToken parentOwner, AgentTask producerTask, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
+        if (ChangedSecondaryRepository(producerTask, result) is { } alias)
+            return CriticVerdict.ReviewFailed(ReviewMode.Gate, $"agent-reviewer: repository '{alias}' changed too, and one review clone holds only the primary repository — the model critic reviews every repository's change instead");
+
         if (string.IsNullOrEmpty(result.ProducedBranch) || (producerTask.Workspace?.Primary?.RepositoryId ?? producerTask.RepositoryId) is not { } repositoryId)
             return CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: no produced branch to clone — nothing for an agent to inspect");
 
-        return await _runner.RunAsync(new AgentReviewSpec
-        {
-            ParentOwner = parentOwner,
-            ProducerTools = producerTask.Tools,
-            ProducerRunnerKind = producerTask.RunnerKind,
-            SubjectInstructions = BuildReviewInstructions(producerTask.Goal, result),
-            RepositoryId = repositoryId,
-            BaseRef = result.ProducedBranch,
-            TeamId = run.TeamId,
-            WorkflowRunId = run.WorkflowRunId,
-            NodeId = run.NodeId,
-            IterationKey = ReviewIterationKey(run.IterationKey),
-            ProducerHarness = producerTask.Harness,
-            ReviewerModelId = producerTask.ReviewerModelId,
-        }, cancellationToken).ConfigureAwait(false);
+        return await _runner.RunAsync(ReviewSpecFor(parentOwner, producerTask, result, run, repositoryId), cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The review run's spec. Its clone is the PRODUCED branch, so every instruction file in it — <c>CLAUDE.md</c>,
+    /// <c>.claude/</c> rules, <c>AGENTS.md</c> — may have been written by the producer under review: loading them would
+    /// let the reviewed party author its own reviewer's instructions. The reviewer reads them as content and loads none
+    /// of them (<see cref="AgentReviewSpec.ExcludeRepositoryInstructions"/>). Internal + static so the pin is direct.
+    /// </summary>
+    internal static AgentReviewSpec ReviewSpecFor(AgentRunOwnerToken parentOwner, AgentTask producerTask, AgentRunResult result, AgentRun run, Guid repositoryId) => new()
+    {
+        ParentOwner = parentOwner,
+        ProducerTools = producerTask.Tools,
+        ProducerRunnerKind = producerTask.RunnerKind,
+        SubjectInstructions = BuildReviewInstructions(producerTask.Goal, result),
+        RepositoryId = repositoryId,
+        BaseRef = result.ProducedBranch,
+        TeamId = run.TeamId,
+        WorkflowRunId = run.WorkflowRunId,
+        NodeId = run.NodeId,
+        IterationKey = ReviewIterationKey(run.IterationKey),
+        ProducerHarness = producerTask.Harness,
+        ReviewerModelId = producerTask.ReviewerModelId,
+        ExcludeRepositoryInstructions = true,
+    };
+
+    /// <summary>
+    /// The first writable repository OTHER than the primary that shows work — a change the reviewer's one clone (the
+    /// primary's produced branch) cannot hold. The agent rung then ladders down to the model critic, whose render shows
+    /// every repository's diff; reviewing the primary alone would approve a change set whose other half nobody read.
+    /// </summary>
+    private static string? ChangedSecondaryRepository(AgentTask producerTask, AgentRunResult result)
+    {
+        var primary = producerTask.Workspace?.Primary;
+
+        return result.RepositoryResults
+            .Where(r => !IsPrimary(r, primary) && (r.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(r.ProducedBranch) || r.CaptureError is not null))
+            .Select(r => r.Alias)
+            .FirstOrDefault();
+    }
+
+    private static bool IsPrimary(RepositoryRunResult repository, WorkspaceRepositorySpec? primary) =>
+        primary is not null && (string.Equals(repository.Alias, primary.Alias, StringComparison.Ordinal) || repository.RepositoryId == primary.RepositoryId);
 
     /// <summary>The review run's iteration key — the producer's key + the review suffix (a bare producer key means a bare "#review").</summary>
     internal static string ReviewIterationKey(string? producerIterationKey) =>

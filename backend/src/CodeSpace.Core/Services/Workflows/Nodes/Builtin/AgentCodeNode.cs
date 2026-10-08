@@ -411,6 +411,13 @@ public sealed class AgentCodeNode : INodeRuntime
             return NodeResult.Fail($"Agent run did not succeed: {(string.IsNullOrEmpty(error) ? status : error)}{FailureCauseSuffix(cause, mitigationSpent)}{UnpricedRetrySuffix(unpriced && !deterministic && retriesOnFailure, maxCostUsd)}", retryable: !deterministic && !unpriced);
         }
 
+        // The executor holds a result its configured output review never examined in full at NeedsReview (handled above);
+        // a Succeeded payload still naming one is an older row, or a path that re-graded the status past the hold. Either
+        // way its branch and change set are the work nobody reviewed, so no PR-open or change-set node downstream may get
+        // them — and a respawn reviews the same change the same way, so the refusal is not retryable.
+        if (ReadOptionalString(payload, "unreviewedReason") is { } unreviewed)
+            return NodeResult.Fail($"Agent run's configured output review never examined the whole result, so its branch is held for a human: {unreviewed}", retryable: false);
+
         var outputs = new Dictionary<string, JsonElement> { ["status"] = JsonSerializer.SerializeToElement(nameof(AgentRunStatus.Succeeded)) };
         CopyIfPresent(payload, "summary", outputs);
         CopyIfPresent(payload, "changedFiles", outputs);

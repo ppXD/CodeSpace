@@ -64,7 +64,7 @@ public class BenchmarkResultRecord : IEntity<Guid>, IAuditable
     /// <summary>Whether the run-scoped MCP endpoint served the FULL tool catalog (the load-bearing difference between the two harness-CLI modes).</summary>
     public bool McpFullCatalog { get; set; }
 
-    /// <summary>The run's terminal exit reason — scopes an intervention proxy to the critic-flag path (<c>output-flagged</c>). Null when the run recorded no result.</summary>
+    /// <summary>The run's terminal exit reason — scopes an intervention proxy to the critic-flag path (<c>output-flagged</c>), apart from a result held because its review could not examine it (<c>output-unreviewed</c>). Null when the run recorded no result.</summary>
     public string? ExitReason { get; set; }
 
     /// <summary>Priced USD over the cell's billed tokens; null when the run reported no usage (the fake CLI emits none) or the model is unpriceable.</summary>

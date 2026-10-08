@@ -198,6 +198,72 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
         }
     }
 
+    /// <summary>
+    /// The OUTPUT review's half of the head invariant, through the same whole loop: the agent profile configures a Gate
+    /// review, and the honest critic flags the item whose change carries the planted hack. The executor pushes that
+    /// item's branch BEFORE the review runs, and its manifest row was written before the review too — so it reads Pushed
+    /// with no failed verdict of its own, and <c>git.integrate_run</c> integrated it onto the reviewable candidate while
+    /// the supervisor lane withheld the very same unit (PROBE_R3). The flagged item's work must not be on the candidate;
+    /// the approved sibling's must.
+    /// </summary>
+    [Fact]
+    public async Task A_flagged_item_is_withheld_from_the_reviewable_candidate()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        const string clean = "do the first thing";
+        const string flagged = "do the second thing " + DeterministicCriticLlmClient.RejectMarker;
+
+        using (var knob = _fixture.BeginScope()) knob.Resolve<WorkPlanPlanScript>().Instructions = new[] { clean, flagged };
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+            var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+            var (_, criticRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "critic-model", provider: DeterministicCriticLlmClient.ProviderTag);
+
+            using var cli = new FileWritingFakeCli();
+
+            using var remote = new BareRemote();
+            await remote.SeedBaseAsync();
+            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+            var jobClient = ResolveJobClient();
+            jobClient.Clear();
+            jobClient.AutoExecute = true;
+
+            var runId = await ProjectAndStartAsync(teamId, userId, plannerRowId, repoId, review: (ReviewMode.Gate, criticRowId));
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+            run.Status.ShouldBe(WorkflowRunStatus.Success, $"one flagged item must not sink the fan-out — error: {run.Error}");
+
+            var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId && !r.IterationKey.EndsWith("#review")).ToListAsync();
+            var results = agentRuns.Where(r => r.ResultJson != null).Select(r => JsonSerializer.Deserialize<AgentRunResult>(r.ResultJson!, Core.Services.Agents.AgentJson.Options)!).ToList();
+
+            results.ShouldContain(r => r.ExitReason == "output-flagged" && r.ProducedBranch != null, "fixture check: the critic really flagged an item whose branch was already pushed");
+            results.ShouldContain(r => r.OutputReview == OutputReviewState.Approved, "fixture check: the sibling was really reviewed and approved");
+
+            var integrationBranch = $"codespace/integration/{runId:N}";
+            JsonDocument.Parse(run.OutputsJson!).RootElement.GetProperty("integratedBranch").GetString().ShouldBe(integrationBranch, "the integrate step ran past the flagged item");
+
+            (await remote.BranchFileContentAsync(integrationBranch, FileWritingFakeCli.FileFor(clean))).ShouldContain(clean, customMessage: "the approved item's work is on the candidate");
+            (await remote.BranchHasFileAsync(integrationBranch, FileWritingFakeCli.FileFor(flagged)))
+                .ShouldBeFalse(customMessage: "the reviewer flagged this item — its pushed branch must not reach the branch a human reviews as the run's candidate");
+        }
+        finally
+        {
+            using var reset = _fixture.BeginScope();
+            reset.Resolve<WorkPlanPlanScript>().Reset();
+        }
+    }
+
     [Fact]
     public async Task A_conflicted_candidate_parks_for_review_and_resumes_to_an_honest_finish()
     {
@@ -271,7 +337,7 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
 
     // ─── Projection (the production builder, planner pinned to the work-plan fake, synth retargeted) ───
 
-    private async Task<Guid> ProjectAndStartAsync(Guid teamId, Guid userId, Guid plannerRowId, Guid repoId)
+    private async Task<Guid> ProjectAndStartAsync(Guid teamId, Guid userId, Guid plannerRowId, Guid repoId, (ReviewMode Mode, Guid ReviewerRowId)? review = null)
     {
         using var scope = _fixture.BeginScope();
 
@@ -280,7 +346,7 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
             Seed = new TaskLaunchSeed { Goal = SeedGoal, SurfaceKind = "test", TeamId = teamId },
             Route = new RoutePlan { RecipeKind = TaskRecipeKinds.MapFanout, ProjectionKind = TaskProjectionKinds.PlanMapSynth, Caps = new RouteCaps() },
             // Standard, not Confined: each item WRITES a file for the integration to merge, and a Confined agent's workspace is mounted read-only wherever the sandbox confines.
-            AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Standard", RepositoryId = repoId },
+            AgentProfile = new ResolvedAgentProfile { Harness = "codex-cli", RunnerKind = "local", AutonomyLevel = "Standard", RepositoryId = repoId, OutputReviewMode = review?.Mode ?? ReviewMode.None, ReviewerModelId = review?.ReviewerRowId },
             PlannerModelRowId = plannerRowId,
         };
 

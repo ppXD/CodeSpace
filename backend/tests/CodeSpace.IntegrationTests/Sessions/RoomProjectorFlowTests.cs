@@ -928,6 +928,40 @@ public class RoomProjectorFlowTests
         result.VerificationNote.ShouldBeNull();
     }
 
+    [Fact]
+    public async Task An_approval_the_executor_voided_over_a_partial_render_is_NOT_verified()
+    {
+        // The critic's call SUCCEEDED and approved what it was shown, so the critic recorded no review.skipped beat; the
+        // executor voided the approval (part of the change was never shown) and held the result. With no beat on the
+        // ledger the Room read the call's own interaction row as an approval and painted the held result Verified. The
+        // REAL executor runs the review here — the real critic resolving a seeded reviewer row through the real pool,
+        // the real ledger writer — and the REAL projector reads what it wrote.
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Approved only what it was shown");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Ship the fix", resultSummary: null);
+        var (_, reviewerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "critic-model", provider: DeterministicCriticLlmClient.ProviderTag);
+
+        await SeedStopDecisionAsync(teamId, run, outcome: "completed", summary: "Shipped the fix.");
+
+        var task = new AgentTask { Goal = "ship the fix", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerRowId };
+        var owner = await SeedOwnedAgentRunAsync(teamId, run, task);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var padded = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "regenerated the lockfile", ChangedFiles = new[] { "vendor/lock.json" }, Patch = "diff --git a/vendor/lock.json b/vendor/lock.json\n" + new string('a', AgentRunExecutor.MaxReviewedChars + 10_000) };
+            var agentRun = await scope.Resolve<IAgentRunService>().GetAsync(owner.RunId, CancellationToken.None);
+
+            var reviewed = await ((AgentRunExecutor)scope.Resolve<IAgentRunExecutor>()).ReviewOutputIfEnabledAsync(owner, task, padded, agentRun, CancellationToken.None);
+
+            reviewed.ExitReason.ShouldBe(AgentRunExecutor.OutputUnreviewedExitReason, "fixture check: the executor held the result its reviewer approved only in part");
+        }
+
+        var result = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single(t => t.TurnIndex == 1).Blocks.OfType<FinalAnswerBlock>().Single();
+
+        result.Verified.ShouldBe(false, "a result held unreviewed is not verified, whatever the reviewer said about the part it read");
+        result.VerificationNote.ShouldNotBeNull().ShouldStartWith("Unverified — the output review could not run: The reviewer approved what it was shown, but part of the result was never shown to the reviewer");
+    }
+
     [Theory]
     [InlineData(CriticArtifactKinds.WorkflowPlan)]
     [InlineData(CriticArtifactKinds.SupervisorDecision)]
@@ -2342,6 +2376,26 @@ public class RoomProjectorFlowTests
             PayloadJson = JsonSerializer.Serialize(new { kind = LlmStructuredCritic.SkippedCallKind, mode = "Gate", artifact_kind = artifactKind, reason, agentRunId }),
         });
         await db.SaveChangesAsync();
+    }
+
+    /// <summary>A Running agent run of the turn's workflow run, owned at epoch 1 by the returned token — the state the executor holds a run in while it reviews the run's output.</summary>
+    private async Task<AgentRunOwnerToken> SeedOwnedAgentRunAsync(Guid teamId, Guid runId, AgentTask task)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var owner = new AgentRunOwnerToken(Guid.NewGuid(), Guid.NewGuid(), 1);
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = owner.RunId, TeamId = teamId, WorkflowRunId = runId, NodeId = "agent", IterationKey = "", Harness = task.Harness,
+            Status = AgentRunStatus.Running, OwnerId = owner.OwnerId, FenceEpoch = owner.Epoch, StartedAt = now, HeartbeatAt = now, LeaseExpiresAt = now + AgentRunLiveness.Window,
+            TaskJson = JsonSerializer.Serialize(task, AgentJson.Options),
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        });
+        await db.SaveChangesAsync();
+
+        return owner;
     }
 
     /// <summary>One recorded critic model call on the run's ledger under <paramref name="callKind"/> — the shape the Room's "did anything check this?" probe reads (an APPROVED review leaves nothing else behind).</summary>

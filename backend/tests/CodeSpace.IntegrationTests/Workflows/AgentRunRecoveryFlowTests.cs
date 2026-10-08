@@ -209,6 +209,56 @@ public class AgentRunRecoveryFlowTests : IDisposable
         run.Error!.ShouldContain("5", customMessage: "the recovered failure names the exit code");
     }
 
+    /// <summary>
+    /// The output review runs AFTER the push, so a worker that died between the two left a pushed branch and a manifest
+    /// row naming it, and the spool recovery landed the run with no word on its review — a would-be success read
+    /// Succeeded and every door that reads the result took the unreviewed work. Under a configured review the recovered
+    /// result is marked unreviewed whatever its status, and a would-be success is HELD for a human, exactly as the live
+    /// path holds a result its review never examined.
+    /// </summary>
+    [Theory]
+    [InlineData(0, AgentRunStatus.NeedsReview)]
+    [InlineData(5, AgentRunStatus.Failed)]
+    public async Task Durable_run_recovered_under_a_configured_review_is_marked_unreviewed(int exitCode, AgentRunStatus expected)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedDurableRunAsync(teamId, processId: DeadPid(), exitCode: exitCode, task: new AgentTask { Goal = "harden the login check", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate });
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+        run.Status.ShouldBe(expected);
+        result.OutputReview.ShouldBe(OutputReviewState.Unreviewed);
+        result.UnreviewedReason.ShouldBe(AgentRunReconcilerService.SpoolRecoveredUnreviewedReason);
+        AgentOutputReviewHold.Withholds(result).ShouldBeTrue("no door may take what the dead worker pushed before its review");
+
+        if (exitCode == 0) result.ExitReason.ShouldBe(AgentRunExecutor.OutputUnreviewedExitReason, "a would-be success is held exactly as the live path holds one");
+    }
+
+    [Fact]
+    public async Task Durable_run_recovered_with_no_review_configured_lands_as_it_always_has()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await SeedDurableRunAsync(teamId, processId: DeadPid(), exitCode: 0, task: new AgentTask { Goal = "harden the login check", Harness = "codex-cli" });
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<CodeSpaceDbContext>().AgentRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded);
+        JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!.OutputReview.ShouldBeNull();
+    }
+
     [Fact]
     public async Task Durable_run_gone_without_a_marker_is_abandoned()
     {
@@ -739,7 +789,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
     }
 
     /// <summary>Seed a stale (20-min) Running run carrying a durable handle that points at a spool dir with an optional exit marker — the post-crash state the reconciler probes. <paramref name="launchHost"/> stamps the handle as some OTHER host's (null ⇒ unstamped, the pre-stamp shape); <paramref name="deadline"/> overrides the run's wall clock (default: an hour out); <paramref name="fenceEpoch"/> defaults to the unclaimed 0, and must be positive for a caller that also opens a native-record attempt against this run.</summary>
-    private async Task<Guid> SeedDurableRunAsync(Guid teamId, int processId, int? exitCode, string? launchHost = null, DateTimeOffset? deadline = null, long fenceEpoch = 0)
+    private async Task<Guid> SeedDurableRunAsync(Guid teamId, int processId, int? exitCode, string? launchHost = null, DateTimeOffset? deadline = null, long fenceEpoch = 0, AgentTask? task = null)
     {
         var spoolDir = Path.Combine(Path.GetTempPath(), "cs-recover-test-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(spoolDir);
@@ -759,6 +809,7 @@ public class AgentRunRecoveryFlowTests : IDisposable
             Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, FenceEpoch = fenceEpoch,
             StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window,   // lease = last heartbeat + window (lapsed, since stamp is 20min old)
             RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options),
+            TaskJson = task is null ? "{}" : JsonSerializer.Serialize(task, AgentJson.Options),
         });
         await db.SaveChangesAsync();
         return runId;

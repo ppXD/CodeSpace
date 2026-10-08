@@ -125,6 +125,39 @@ public class GitIntegrateRunNodeFlowTests
             customMessage: "the ledger row the withheld producer left behind still names the run's root, and the anchor is read from there");
     }
 
+    /// <summary>
+    /// The output review's half of the candidate's invariant, over real rows: a unit its configured review did not
+    /// approve (flagged, held unreviewed, a decision left open, a Failed end with its patch, an executor fault after the
+    /// push) carries a manifest row the executor wrote BEFORE the review — Pushed, acceptance Passed — so only its result,
+    /// read against its task's configured review, says it is withheld. The node hands the integrator the approved
+    /// sibling alone (PROBE_R3: it handed it both).
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(UnapprovedUnitShapes.ManifestDriven), MemberType = typeof(UnapprovedUnitShapes))]
+    public async Task A_unit_its_output_review_did_not_approve_never_reaches_the_integrator(string shape)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedRunAsync(teamId, userId);
+        var repositoryId = Guid.NewGuid();
+
+        var approved = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#0", MinutesAgo: 9) { Result = UnapprovedUnitShapes.Approved("codespace/agent/approved"), OutputReviewMode = ReviewMode.Gate });
+        var unapproved = await SeedAgentRunAsync(teamId, runId, new AgentRunSeed("map#1", MinutesAgo: 3) { Result = UnapprovedUnitShapes.Of(shape, "codespace/agent/unapproved"), OutputReviewMode = ReviewMode.Gate });
+        await SeedAgentManifestAsync(teamId, runId, approved, repositoryId, branch: "codespace/agent/approved", acceptance: PublishAcceptanceState.Passed);
+        await SeedAgentManifestAsync(teamId, runId, unapproved, repositoryId, branch: "codespace/agent/unapproved", acceptance: PublishAcceptanceState.Passed);
+
+        using var scope = _fixture.BeginScope();
+        var integrator = new RecordingIntegrator
+        {
+            Result = IntegrationResult.Build(IntegrationStatus.Clean, $"codespace/integration/{runId:N}", new[] { new ContributionOutcome { Label = "agent#map#0", Disposition = ContributionDisposition.Applied } }),
+        };
+        var node = new GitIntegrateRunNode(integrator, new StubResolver(), scope.Resolve<IPublishManifestStore>(), scope.Resolve<CodeSpaceDbContext>());
+
+        (await node.RunAsync(Context(repositoryId, teamId, runId), CancellationToken.None)).Status.ShouldBe(NodeStatus.Success);
+
+        integrator.LastRequest.ShouldNotBeNull().Contributions.Select(c => c.ProducedBranch).ShouldBe(new[] { "codespace/agent/approved" },
+            customMessage: $"the review did not approve the other unit ({shape}) — the supervisor's doors withhold it, and so must the candidate's");
+    }
+
     [Fact]
     public async Task A_run_that_produced_nothing_integrable_skips_without_touching_git()
     {
@@ -324,7 +357,14 @@ public class GitIntegrateRunNodeFlowTests
     }
 
     /// <summary>One agent-run row to seed. <see cref="SubtaskId"/> is the supervisor's per-agent stamp — set it and the row lands in the supervisor lane, whose turn cell is a container rather than a unit.</summary>
-    private sealed record AgentRunSeed(string IterationKey, int MinutesAgo, string NodeId = "agent", string? Patch = null, string? SubtaskId = null);
+    private sealed record AgentRunSeed(string IterationKey, int MinutesAgo, string NodeId = "agent", string? Patch = null, string? SubtaskId = null)
+    {
+        /// <summary>The terminal result the row carries; null ⇒ a plain Succeeded result with the seed's patch.</summary>
+        public AgentRunResult? Result { get; init; }
+
+        /// <summary>The output review the row's task configured — every review-produced result shape comes from a task that configured one.</summary>
+        public ReviewMode OutputReviewMode { get; init; }
+    }
 
     private async Task<Guid> SeedAgentRunAsync(Guid teamId, Guid runId, AgentRunSeed seed)
     {
@@ -337,9 +377,9 @@ public class GitIntegrateRunNodeFlowTests
         db.AgentRun.Add(new AgentRun
         {
             Id = id, TeamId = teamId, WorkflowRunId = runId, NodeId = seed.NodeId, IterationKey = seed.IterationKey,
-            Harness = "codex-cli", Status = AgentRunStatus.Succeeded,
-            TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "do the work", Harness = "codex-cli", SubtaskId = seed.SubtaskId }, Core.Services.Agents.AgentJson.Options),
-            ResultJson = JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = seed.Patch ?? $"diff --git a/{seed.IterationKey} b/{seed.IterationKey}\n" }, Core.Services.Agents.AgentJson.Options),
+            Harness = "codex-cli", Status = seed.Result?.Status ?? AgentRunStatus.Succeeded,
+            TaskJson = JsonSerializer.Serialize(new AgentTask { Goal = "do the work", Harness = "codex-cli", SubtaskId = seed.SubtaskId, OutputReviewMode = seed.OutputReviewMode }, Core.Services.Agents.AgentJson.Options),
+            ResultJson = JsonSerializer.Serialize(seed.Result ?? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = seed.Patch ?? $"diff --git a/{seed.IterationKey} b/{seed.IterationKey}\n" }, Core.Services.Agents.AgentJson.Options),
             CreatedDate = at, CreatedBy = SystemUsers.SeederId, LastModifiedDate = at, LastModifiedBy = SystemUsers.SeederId,
         });
         await db.SaveChangesAsync();

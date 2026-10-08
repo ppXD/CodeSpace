@@ -159,6 +159,18 @@ public class WorkflowResumeAgentRunPayloadTests
     }
 
     [Fact]
+    public void BuildResumePayload_carries_why_the_output_review_never_examined_the_result()
+    {
+        // The agent.run node refuses to hand a branch / change set downstream while this is set — it can only refuse
+        // what crosses the wait boundary.
+        var result = new AgentRunResult { Status = AgentRunStatus.NeedsReview, ExitReason = "output-unreviewed", UnreviewedReason = "the reviewer could not run", ProducedBranch = "codespace/agent/x" };
+        var run = new AgentRun { Status = AgentRunStatus.NeedsReview, ResultJson = JsonSerializer.Serialize(result, AgentJson.Options) };
+
+        JsonDocument.Parse(WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run)).RootElement
+            .GetProperty("unreviewedReason").GetString().ShouldBe("the reviewer could not run");
+    }
+
+    [Fact]
     public void BuildResumePayload_surfaces_per_repo_branches_WITHOUT_leaking_the_diff()
     {
         // S7-C0 — a multi-repo run's resume payload (the agent.run node output source) carries each repo's branch +

@@ -60,6 +60,14 @@ internal static partial class ClaudeWorkspaceMemory
     /// <summary>The longest file or directory name a notice repeats; a longer one is cut. Pinned by a test.</summary>
     internal const int MaxNoticeNameLength = 120;
 
+    /// <summary>
+    /// What the timeline says when a task loads no repository memory at all (<see cref="AgentTask.ExcludeRepositoryInstructions"/>
+    /// — an output reviewer, whose clone is the branch under review). Nothing is added back with <c>--add-dir</c> and no
+    /// pointer rule is written, so under <c>--setting-sources user</c> no <c>CLAUDE.md</c> or rule of the workspace's
+    /// reaches the model; the files stay readable as content.
+    /// </summary>
+    internal const string ExcludedNotice = "Loaded none of the workspace's CLAUDE.md memory or rules: this run reviews a branch whose instruction files the reviewed agent could have written, so they are content to inspect, not instructions.";
+
     /// <summary>The directories to add, in order; the pointer rules the run's config home carries (ClaudeWorkspaceMemory.Pointers.cs); and one sentence for each directory, rule or bound that left memory out.</summary>
     internal sealed record Plan(IReadOnlyList<string> Directories, IReadOnlyList<ConfigHomeFile> Pointers, IReadOnlyList<string> Notices);
 
@@ -71,6 +79,7 @@ internal static partial class ClaudeWorkspaceMemory
     public static Plan For(AgentTask task)
     {
         if (string.IsNullOrWhiteSpace(task.WorkspaceDirectory)) return new Plan([], [], []);
+        if (task.ExcludeRepositoryInstructions) return new Plan([], [], [ExcludedNotice]);
 
         var roots = RootDirectories(task).ToList();
 

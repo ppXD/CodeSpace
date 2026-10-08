@@ -215,6 +215,88 @@ public class RunIntegrationContributionsTests
             customMessage: $"AcceptanceState={state} must {(contributes ? "reach" : "be withheld from")} the integrated candidate — the same rule SupervisorOutcome.IsWithheldFromHead applies at every door to the deep lane's head");
     }
 
+    /// <summary>
+    /// The OUTPUT review is the other half of the head invariant, and the manifest row cannot carry it: the executor
+    /// upserts the row BEFORE the review runs, so a branch the reviewer flagged — or one its configured review never
+    /// examined, including a run that left a decision open or ended Failed with its patch — still reads Pushed with an
+    /// acceptance verdict of its own (PROBE_R2/R3: the supervisor lane withheld these units while this door integrated
+    /// them). The verdict rides the run's result, read through the SAME predicate the supervisor's doors use.
+    /// </summary>
+    [Theory]
+    [InlineData("approved", true)]
+    [InlineData("no-review", true)]
+    [InlineData("output-flagged", false)]
+    [InlineData("output-unreviewed", false)]
+    [InlineData("needs-decision", false)]
+    [InlineData("failed-with-patch", false)]
+    [InlineData("flagged-before-the-state-existed", false)]
+    public void A_unit_its_output_review_did_not_approve_is_withheld_from_the_candidate(string shape, bool contributes)
+    {
+        var runId = Guid.NewGuid();
+        var produced = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/Auth.cs" }, ProducedBranch = "codespace/agent/a", BaseSha = "base1" };
+        var result = shape switch
+        {
+            "approved" => produced with { OutputReview = OutputReviewState.Approved },
+            "no-review" => produced,
+            "output-flagged" => produced with { Status = AgentRunStatus.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = "hard-coded admin backdoor", OutputReview = OutputReviewState.Flagged },
+            "output-unreviewed" => AgentOutputReviewHold.Held(produced, "812345 characters were never shown to the reviewer"),
+            "needs-decision" => AgentCompletionContract.ApplyPendingDecision(AgentOutputReviewHold.Unreviewed(produced, AgentRunExecutor.DecisionOpenUnreviewedReason), Guid.NewGuid()),
+            "failed-with-patch" => AgentOutputReviewHold.Unreviewed(produced with { Status = AgentRunStatus.Failed, ExitReason = "error_max_turns" }, "ended Failed before its review"),
+            _ => produced with { Status = AgentRunStatus.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = "hard-coded admin backdoor" },
+        };
+
+        var contributions = RunIntegrationContributions.Build(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: PublishAcceptanceState.Passed) },
+            new[] { Work(runId, "agent", "map#0", minute: 1, JsonSerializer.Serialize(result, AgentJson.Options)) });
+
+        contributions.Count.ShouldBe(contributes ? 1 : 0, $"'{shape}' must {(contributes ? "reach" : "be withheld from")} the integrated candidate — the same answer SupervisorOutcome.IsWithheldFromHead gives the deep lane");
+    }
+
+    /// <summary>A run abandoned after its push wrote no result at all. Under a configured review there is no verdict to read, so its pushed branch is withheld; with no review configured it integrates as it always has.</summary>
+    [Theory]
+    [InlineData(ReviewMode.Gate, false)]
+    [InlineData(ReviewMode.None, true)]
+    public void A_unit_with_no_result_is_withheld_only_when_its_task_configured_a_review(ReviewMode mode, bool contributes)
+    {
+        var runId = Guid.NewGuid();
+        var task = JsonSerializer.Serialize(new AgentTask { Goal = "do the work", Harness = "codex-cli", OutputReviewMode = mode }, AgentJson.Options);
+
+        var contributions = RunIntegrationContributions.Build(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a") },
+            new[] { new RunAgentWork(runId, "agent", "map#0", At(1), ResultJson: null, task) });
+
+        contributions.Count.ShouldBe(contributes ? 1 : 0);
+    }
+
+    /// <summary>
+    /// Under a configured review only an approval lets a pushed unit through, and a result that says nothing is no
+    /// approval. The executor writes the manifest before the review runs, so a fault anywhere after the push — the
+    /// review's own ledger read, a revise round's harness, the transcript attach — replaces the result with a fresh
+    /// Failed one that carries no review state, while the row still names the pushed (possibly flagged) branch. The one
+    /// stateless result that does pass is the Succeeded shape an approving review wrote before the state existed.
+    /// </summary>
+    [Theory]
+    [InlineData("approved", true)]
+    [InlineData("approved-before-the-state-existed", true)]
+    [InlineData("executor-fault", false)]
+    public void Under_a_configured_review_a_result_that_says_nothing_is_no_approval(string shape, bool contributes)
+    {
+        var runId = Guid.NewGuid();
+        var result = shape switch
+        {
+            "approved" => new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/Auth.cs" }, ProducedBranch = "codespace/agent/a", OutputReview = OutputReviewState.Approved },
+            "approved-before-the-state-existed" => new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/Auth.cs" }, ProducedBranch = "codespace/agent/a" },
+            _ => new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentRunExecutor.GenericExecutorExitReason, Error = "the ledger read faulted" },
+        };
+        var task = JsonSerializer.Serialize(new AgentTask { Goal = "do the work", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate }, AgentJson.Options);
+
+        var contributions = RunIntegrationContributions.Build(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: PublishAcceptanceState.Passed) },
+            new[] { new RunAgentWork(runId, "agent", "map#0", At(1), JsonSerializer.Serialize(result, AgentJson.Options), task) });
+
+        contributions.Count.ShouldBe(contributes ? 1 : 0, $"'{shape}' under a configured Gate review must {(contributes ? "reach" : "be withheld from")} the integrated candidate");
+    }
+
     /// <summary>A flunked unit is withheld WITHOUT taking its siblings with it: the surviving sibling still integrates, which is the whole point of the map running continue-on-error rather than terminating.</summary>
     [Fact]
     public void A_withheld_unit_does_not_withhold_its_siblings()

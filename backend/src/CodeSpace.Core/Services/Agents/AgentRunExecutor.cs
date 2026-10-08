@@ -65,7 +65,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal const string PatchOffloadInterruptedReason = "offload-interrupted";
 
     /// <summary>Cap on the captured diff inlined into the persisted result row (~1 MB). A larger diff is truncated with a marker; the full diff belongs in the artifact layer (a later slice).</summary>
-    private const int MaxPatchChars = 1_000_000;
+    internal const int MaxPatchChars = 1_000_000;
 
     /// <summary>Redacted durable reason for a writable repository whose git facts could not be captured.</summary>
     internal const string RepositoryCaptureUnavailableCode = "capture-unavailable";
@@ -969,6 +969,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             // Publish-or-park (I1/I2): record what the re-attach path recovered, exactly like the live path.
             await PersistPublishManifestAsync(agentRunId, run, task, result, expectedEpoch, cancellationToken).ConfigureAwait(false);
+
+            // The configured OUTPUT review holds on this terminal path too, in the live path's order (after the
+            // manifest, the review's own verdict last). It reads the change the re-attach just captured — no branch
+            // was pushed here, so an agent reviewer ladders to the model critic — and a run that completed across a
+            // worker restart can no longer land Succeeded and ungated because the crash happened at the right moment.
+            result = await ReviewOutputIfEnabledAsync(owner, task, result, run, cancellationToken).ConfigureAwait(false);
 
             await _captureIntents.CommitAsync(agentRunId, expectedEpoch, CaptureFactsOf(result, task), cancellationToken).ConfigureAwait(false);
 
@@ -3178,25 +3184,36 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
     /// <summary>
     /// Review the agent's produced change with an INDEPENDENT critic at completion. Off ⇒ byte-identical
-    /// (no per-run <c>OutputReviewMode</c> baked). Self-skips
-    /// when there's nothing to gate — a non-success, or a no-op / re-attach run with no captured diff. A DISAPPROVED change
-    /// re-grades the would-be <see cref="AgentRunStatus.Succeeded"/> run to <see cref="AgentRunStatus.NeedsReview"/>
+    /// (no per-run <c>OutputReviewMode</c> baked). A DISAPPROVED change re-grades the would-be
+    /// <see cref="AgentRunStatus.Succeeded"/> run to <see cref="AgentRunStatus.NeedsReview"/>
     /// (<see cref="CompletionDisposition.NeedsReview"/>) so a human looks before the downstream PR-open (Succeeded-gated)
     /// consumes it; the captured work is preserved, and the critique rides <see cref="AgentRunResult.ReviewFeedback"/>.
-    /// FAILS OPEN — a failed review keeps the original result. Under <see cref="ReviewMode.Improve"/> the S6 revise loop
-    /// reads the flag + feedback and buys the agent a bounded re-run before the flag stands (Gate never re-runs).
+    /// Under <see cref="ReviewMode.Improve"/> the S6 revise loop reads the flag + feedback and buys the agent a bounded
+    /// re-run before the flag stands (Gate never re-runs).
+    ///
+    /// <para>FAILS CLOSED, and says so on the result. Once a review is configured every path out of here stamps
+    /// <see cref="AgentRunResult.OutputReview"/>, and only a review that ran over the WHOLE result and approved it stamps
+    /// <see cref="OutputReviewState.Approved"/> — the one state every head, PR-open and change-set door takes. A run
+    /// that produced nothing at all is the one unstamped exit: there is nothing for any door to take. Everything else
+    /// is <see cref="OutputReviewState.Unreviewed"/>, with why on <see cref="AgentRunResult.UnreviewedReason"/>: a
+    /// review that could not run, an approval of a partial render or with no co-sign (held at NeedsReview under
+    /// <see cref="OutputUnreviewedExitReason"/>), and the two exits that used to return the result untouched — a run
+    /// that ended other than Succeeded with work in hand, and one that left a decision open. Those keep their status
+    /// for the paths that own it (a failure stays a failure; A1 re-grades the open decision at completion), but no
+    /// door may take their work: the agent could otherwise skip its own review by ending Failed, or by raising a
+    /// decision and waiting it out.</para>
     ///
     /// <para>C1: a TEXT-ONLY result is reviewed too. Until this fix the gate demanded a diff, so the one shape whose
     /// whole output IS its text — a question answered in the summary, a report written into a captured deliverable —
     /// was the single shape that shipped past a configured Gate/Improve review untouched, exactly where an answer is
     /// least falsifiable. Such a result is rendered as an ANSWER and judged against the goal PLUS the task's
-    /// acceptance criteria. A diff-bearing result is rendered byte-identically to before.</para>
+    /// acceptance criteria.</para>
     /// </summary>
     internal async Task<AgentRunResult> ReviewOutputIfEnabledAsync(AgentRunOwnerToken owner, AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
         if (task.OutputReviewMode == ReviewMode.None) return result;
-        if (result.Status != AgentRunStatus.Succeeded) return result;
         if (!HasReviewableOutput(result)) return result;
+        if (result.Status != AgentRunStatus.Succeeded) return EndedBeforeReview(result);
 
         var runId = owner.RunId;
         if (run.Id != runId) throw new AgentRunOwnershipLostException(runId);
@@ -3205,62 +3222,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // Defer to the A1 completion gate: a run that left a decision.request unanswered will be re-graded to
         // NeedsReview(NeedsDecision) at the completion choke point WITH the specific decision linkage (the stronger
         // signal). Don't pre-empt it by flipping to output-flagged here — A1 always takes precedence (the same ordering
-        // FinalOutputReview/A2 respects). Resolve the ledger from a fresh scope (the heartbeat-loop pattern), not a ctor dep.
-        using (var ledgerScope = _scopeFactory.CreateScope())
-        {
-            var ledger = ledgerScope.ServiceProvider.GetRequiredService<IToolCallLedgerService>();
-            if (await ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false) is not null) return result;
-        }
+        // FinalOutputReview/A2 respects). The status is A1's to set, but the change was still never reviewed, and the
+        // result says so. Resolve the ledger from a fresh scope (the heartbeat-loop pattern), not a ctor dep.
+        if (await HasOpenDecisionAsync(runId, cancellationToken).ConfigureAwait(false)) return AgentOutputReviewHold.Unreviewed(result, DecisionOpenUnreviewedReason);
 
-        // S8 reviewer ladder: an opted-in AGENT reviewer first (a real read-only run cloning the produced branch on a
-        // distinct-first harness — it inspects the repository, not a diff string), laddering DOWN to the in-process
-        // model critic when the agent can't produce a verdict (no branch, staging/parse failure) — an agent review is
-        // never worse than a model review, and a model review is never worse than none.
-        var verdict = task.ReviewerAgent
-            ? await ReviewWithAgentAsync(owner, task, result, run, cancellationToken).ConfigureAwait(false)
-            : CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: not requested");
+        var verdict = await ReachOutputVerdictAsync(owner, task, result, run, cancellationToken).ConfigureAwait(false);
 
-        var agentReviewed = !verdict.Failed;
-
-        // Built LAZILY, and at most ONCE. The two consumers below are mutually exclusive (the model rung runs only
-        // when the agent rung failed; the co-sign only when it succeeded AND approved), so an agent DISAPPROVAL needs
-        // no request at all — and building one eagerly charged that path a manifest listing plus a blob read per
-        // captured deliverable for a render nobody would look at. Memoized so a future second consumer still pays once.
-        CriticRequest? built = null;
-        async Task<CriticRequest> RequestAsync() => built ??= await BuildReviewRequestAsync(task, result, run, cancellationToken).ConfigureAwait(false);
-
-        if (verdict.Failed)
-            verdict = await ReviewRecordedAsync(await RequestAsync().ConfigureAwait(false), run, task, cancellationToken).ConfigureAwait(false);
-
-        // D② approve co-sign: an AGENT reviewer's APPROVAL gets a cheap independent MODEL co-check before it counts.
-        // The reviewer agent READS the produced tree — hostile committed content could try to instruct it to approve
-        // (the injection prize) — so approval requires CONSENSUS across the two independent channels: a model
-        // disagreement fails toward the human (NeedsReview carrying both sides), never a silent pass. A FAILED
-        // co-check keeps the agent's approval (fail-open — a broken co-check must not manufacture a flag), and a
-        // DISAPPROVING agent verdict needs no co-sign (the worst case of a wrong block is one wasted revise round).
-        if (agentReviewed && verdict.Approved)
-        {
-            var coSign = await ReviewRecordedAsync(await RequestAsync().ConfigureAwait(false), run, task, cancellationToken).ConfigureAwait(false);
-
-            if (!coSign.Failed && !coSign.Approved)
-                verdict = coSign with { Rationale = $"The reviewer agent approved, but the independent model co-check disagreed: {coSign.Rationale}" };
-        }
-
-        // FAIL-OPEN, but no longer in silence. A Failed verdict here means BOTH rungs could not produce one — the
-        // configured output review did not happen and the change ships ungated. A STANDALONE run (no WorkflowRunId)
-        // has no workflow ledger for the critic's review.skipped beat to land on, so the agent's own event stream is
-        // the only surface its operator ever reads; the beat rides here for every agent run alike.
-        //
-        // 5.6 residual: the RESULT itself now carries the same fact. Status/CompletionDisposition stay untouched
-        // (visibility, not punishment) — but a reader of the result alone (a standalone run's only surface, or any
-        // consumer that never reads the agent's own event stream) can no longer mistake "never reviewed" for "reviewed
-        // and clean" just because Status still reads Succeeded.
-        if (verdict.Failed)
-        {
-            await AppendReviewSkippedWarningAsync(owner, verdict, cancellationToken).ConfigureAwait(false);
-
-            return result with { UnreviewedReason = verdict.Rationale };
-        }
+        if (verdict.Failed) return await HoldUnreviewedAsync(owner, result, verdict, cancellationToken).ConfigureAwait(false);
 
         var feedback = RenderReviewFeedback(verdict);
 
@@ -3270,11 +3238,114 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // look at this?" and counted a FLAG as a pass. Recorded for BOTH verdicts, so the answer is the review's own.
         await RecordOutputReviewVerdictAsync(run, verdict, feedback, cancellationToken).ConfigureAwait(false);
 
-        if (verdict.Approved) return result;   // a clean pass ⇒ byte-identical
+        if (verdict.Approved) return result with { OutputReview = OutputReviewState.Approved };
 
         await AppendOutputFlaggedWarningAsync(owner, verdict, cancellationToken).ConfigureAwait(false);
 
-        return result with { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = feedback };
+        return result with { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = feedback, OutputReview = OutputReviewState.Flagged };
+    }
+
+    /// <summary>Why a run landed by this worker's drain on shutdown is unreviewed — the landing folds the agent's spool and captures its diff inside the host's shutdown budget, which no review call fits. Pinned by a test.</summary>
+    internal const string DrainLandedUnreviewedReason = "The run was landed while its worker shut down, before its configured output review ran: nothing it produced was reviewed.";
+
+    /// <summary>Why a result whose run left a decision open was never reviewed — the review defers to that decision (A1), and the run ends before anyone answers it. Pinned by a unit test.</summary>
+    internal const string DecisionOpenUnreviewedReason = "The run left a decision open, so its configured output review deferred to that decision and never ran: nothing it produced was reviewed.";
+
+    /// <summary>Whether the run left a decision.request unanswered — the A1 completion gate's own question, asked from a fresh scope.</summary>
+    private async Task<bool> HasOpenDecisionAsync(Guid runId, CancellationToken cancellationToken)
+    {
+        using var ledgerScope = _scopeFactory.CreateScope();
+
+        return await ledgerScope.ServiceProvider.GetRequiredService<IToolCallLedgerService>().FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false) is not null;
+    }
+
+    /// <summary>
+    /// A result that ended other than Succeeded never reaches the review. One whose acceptance check already rejected
+    /// it is withheld at every door by that verdict, and one with no change has nothing a door could take; any other
+    /// carries work its configured review never read — a self-reported failure keeps its captured patch — so it is
+    /// marked unreviewed. Its status is untouched: the failure is the run's own verdict.
+    /// </summary>
+    private static AgentRunResult EndedBeforeReview(AgentRunResult result) =>
+        HasChange(result) && result.AcceptancePassed != false
+            ? AgentOutputReviewHold.Unreviewed(result, $"The run ended {result.Status} ({result.ExitReason ?? "no exit reason"}) before its configured output review ran, so its captured change was never reviewed.")
+            : result;
+
+    /// <summary>The exit reason of a result a configured output review never examined in full — held at NeedsReview, refused by every PR-open, change-set and head door. Pinned by a unit test: it is durable on stored results.</summary>
+    public const string OutputUnreviewedExitReason = "output-unreviewed";
+
+    /// <summary>
+    /// The review ladder's one verdict for this result. S8: an opted-in AGENT reviewer first (a real read-only run
+    /// cloning the produced branch on a distinct-first harness — it inspects the repository, not a diff string),
+    /// laddering DOWN to the in-process model critic when the agent can't produce a verdict (no branch, staging/parse
+    /// failure, a change spanning repositories its one clone cannot hold). A FAILED verdict here means the change was
+    /// not examined in full, and <see cref="ReviewOutputIfEnabledAsync"/> holds it.
+    /// </summary>
+    private async Task<CriticVerdict> ReachOutputVerdictAsync(AgentRunOwnerToken owner, AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
+    {
+        var agentVerdict = task.ReviewerAgent
+            ? await ReviewWithAgentAsync(owner, task, result, run, cancellationToken).ConfigureAwait(false)
+            : CriticVerdict.ReviewFailed(ReviewMode.Gate, "agent-reviewer: not requested");
+
+        // A DISAPPROVING agent verdict needs no model call at all (the worst case of a wrong block is one wasted revise
+        // round), so the request is built only on the two paths that consume it — and building it eagerly charged that
+        // path a manifest listing plus a blob read per captured deliverable for a render nobody would look at.
+        if (!agentVerdict.Failed && !agentVerdict.Approved) return agentVerdict;
+
+        var review = await BuildReviewRequestAsync(task, result, run, cancellationToken).ConfigureAwait(false);
+        var modelVerdict = await CoveringTheWholeResultAsync(await ReviewRecordedAsync(review.Request, run, task, cancellationToken).ConfigureAwait(false), review, run, cancellationToken).ConfigureAwait(false);
+
+        return agentVerdict.Failed ? modelVerdict : CoSigned(agentVerdict, modelVerdict);
+    }
+
+    /// <summary>
+    /// D② approve co-sign: an AGENT reviewer's APPROVAL counts only with an independent MODEL co-check beside it. The
+    /// reviewer agent READS the produced tree — hostile committed content could instruct it to approve (the injection
+    /// prize) — so approval requires CONSENSUS across the two channels. A model disagreement fails toward the human
+    /// (NeedsReview carrying both sides); a co-check that could not run, or that read only part of the change, is no
+    /// consensus either: the approval stands alone, and a lone approval from the channel an injection targets is not
+    /// a verdict. That co-check failure used to keep the approval, and the producer could force it with padding.
+    /// </summary>
+    private static CriticVerdict CoSigned(CriticVerdict agentApproval, CriticVerdict coSign)
+    {
+        if (coSign.Failed) return CriticVerdict.ReviewFailed(ReviewMode.Gate, $"The reviewer agent approved, but the independent model co-check reached no verdict over the whole change, so the approval has no consensus: {coSign.Rationale}");
+
+        return coSign.Approved ? agentApproval : coSign with { Rationale = $"The reviewer agent approved, but the independent model co-check disagreed: {coSign.Rationale}" };
+    }
+
+    /// <summary>
+    /// A model APPROVAL counts only for what the reviewer was shown. When the render could not show all of the result —
+    /// a cut at the budget, a file git rendered only as "Binary files … differ", a change or deliverable that was never
+    /// captured or read — an approval of the part shown approves nothing past it, and the agent decides much of what
+    /// falls there (padding ahead of a flaw, a <c>-diff</c> attribute in its own <c>.git</c>), so it would otherwise buy
+    /// a clean pass. A FLAG over a partial render stands: an objection to what the reviewer read is a real objection.
+    ///
+    /// <para>The critic's own call SUCCEEDED here, so it recorded no <c>review.skipped</c> beat; the void is this
+    /// executor's, and so is the beat. Without it the run's ledger holds only the call's <c>interaction.completed</c>
+    /// row, which the Room reads as a review that approved.</para>
+    /// </summary>
+    private async Task<CriticVerdict> CoveringTheWholeResultAsync(CriticVerdict verdict, BuiltReview review, AgentRun run, CancellationToken cancellationToken)
+    {
+        if (verdict is not { Failed: false, Approved: true } || review.Omitted is not { } omitted) return verdict;
+
+        var uncovered = CriticVerdict.ReviewFailed(ReviewMode.Gate, $"The reviewer approved what it was shown, but part of the result was never shown to the reviewer ({omitted}), so its approval does not cover it.");
+
+        await RecordReviewSkippedAsync(run, review.Request.ArtifactKind, uncovered.Rationale, cancellationToken).ConfigureAwait(false);
+
+        return uncovered;
+    }
+
+    /// <summary>
+    /// Hold a result no configured review examined in full: NeedsReview under <see cref="OutputUnreviewedExitReason"/>,
+    /// <see cref="OutputReviewState.Unreviewed"/> with the reason on <see cref="AgentRunResult.UnreviewedReason"/>, and a
+    /// timeline warning — a STANDALONE run (no WorkflowRunId) has no workflow ledger for the review.skipped beat, so its
+    /// own event stream is the only surface its operator reads. No review.completed beat is written: no verdict exists
+    /// to record.
+    /// </summary>
+    private async Task<AgentRunResult> HoldUnreviewedAsync(AgentRunOwnerToken owner, AgentRunResult result, CriticVerdict verdict, CancellationToken cancellationToken)
+    {
+        await AppendReviewSkippedWarningAsync(owner, verdict, cancellationToken).ConfigureAwait(false);
+
+        return AgentOutputReviewHold.Held(result, verdict.Rationale);
     }
 
     /// <summary>
@@ -3297,21 +3368,33 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// (no <see cref="AgentRun.WorkflowRunId"/>) has no workflow ledger to land on and records nothing, and a ledger
     /// write that faults is swallowed — saying what a review decided may never itself break the run.</para>
     /// </summary>
-    private async Task RecordOutputReviewVerdictAsync(AgentRun run, CriticVerdict verdict, string reason, CancellationToken cancellationToken)
+    private Task RecordOutputReviewVerdictAsync(AgentRun run, CriticVerdict verdict, string reason, CancellationToken cancellationToken) =>
+        RecordReviewBeatAsync(run, WorkflowRunRecordTypes.ReviewCompleted, JsonSerializer.SerializeToElement(new { kind = LlmStructuredCritic.OutputReviewCallKind, agentRunId = run.Id, approved = verdict.Approved, reason, reviewerModel = verdict.ReviewerModel, independence = verdict.Independence.ToString(), calibrated = verdict.Calibrated }), cancellationToken);
+
+    /// <summary>
+    /// Append a <see cref="WorkflowRunRecordTypes.ReviewSkipped"/> beat for a review this executor found reached no
+    /// verdict over the whole result — the same payload shape the critic writes for a review that could not run
+    /// (<c>critic.skipped</c>, the output review's artifact kind, the reviewed <c>agentRunId</c>), so the Room folds the
+    /// unit as "could not run" instead of reading the successful call's interaction row as an approval.
+    /// </summary>
+    private Task RecordReviewSkippedAsync(AgentRun run, string artifactKind, string reason, CancellationToken cancellationToken) =>
+        RecordReviewBeatAsync(run, WorkflowRunRecordTypes.ReviewSkipped, JsonSerializer.SerializeToElement(new { kind = LlmStructuredCritic.SkippedCallKind, mode = nameof(ReviewMode.Gate), artifact_kind = artifactKind, reason, agentRunId = run.Id }), cancellationToken);
+
+    /// <summary>One output-review beat on the owning workflow run's ledger, keyed to the run's cell. Fail-open both ways (see <see cref="RecordOutputReviewVerdictAsync"/>).</summary>
+    private async Task RecordReviewBeatAsync(AgentRun run, string recordType, JsonElement payload, CancellationToken cancellationToken)
     {
         if (run.WorkflowRunId is not { } workflowRunId) return;
 
         try
         {
             using var scope = _scopeFactory.CreateScope();
-            var payload = JsonSerializer.SerializeToElement(new { kind = LlmStructuredCritic.OutputReviewCallKind, agentRunId = run.Id, approved = verdict.Approved, reason, reviewerModel = verdict.ReviewerModel, independence = verdict.Independence.ToString(), calibrated = verdict.Calibrated });
 
             await scope.ServiceProvider.GetRequiredService<IRunRecordLogger>()
-                .RecordInteractionAsync(workflowRunId, WorkflowRunRecordTypes.ReviewCompleted, run.NodeId, run.IterationKey, Guid.NewGuid(), parentRecordId: null, payload, cancellationToken).ConfigureAwait(false);
+                .RecordInteractionAsync(workflowRunId, recordType, run.NodeId, run.IterationKey, Guid.NewGuid(), parentRecordId: null, payload, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: could not record the output-review verdict beat; the verdict is reported by the result alone", run.Id);
+            _logger.LogWarning(ex, "Agent run {RunId}: could not record the output-review {RecordType} beat; the result alone reports it", run.Id, recordType);
         }
     }
 
@@ -3398,48 +3481,194 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return string.IsNullOrWhiteSpace(verdict.ReviewerModel) ? body : $"{body} (reviewed on {verdict.ReviewerModel})";
     }
 
-    /// <summary>Render the produced change for the critic — the git unified diff (already capped), with the agent's summary + the changed-file list as context.</summary>
-    private static string RenderChange(AgentRunResult result)
+    /// <summary>The most characters of the agent's own closing summary a CHANGE render repeats as context. The diff is the substance under review; the summary is the agent's claim about it, so a cut here hides nothing the reviewer judges.</summary>
+    internal const int MaxReviewedSummaryChars = 4_096;
+
+    /// <summary>The most characters of changed-file names a change render lists, across every repository. The names are context — each changed file's diff already names it — so the list is cut with a count of what it left out, and the cut withholds no approval.</summary>
+    internal const int MaxReviewedFileListChars = 16_384;
+
+    /// <summary>
+    /// The most characters of the result's SUBSTANCE one review render shows — every writable repository's diff, then
+    /// every captured deliverable (for an answer: the answer, then its deliverables), sharing one allowance. The critic
+    /// reviews a render this large in parts sized to its reviewer model's window (<see cref="LlmStructuredCritic"/>), so
+    /// an honest large result — a regenerated lockfile, generated code, a long report — is reviewed whole rather than
+    /// held, and no size the agent picks makes the critic call fail. Kept BELOW the 1 MB inline patch cap
+    /// (<see cref="MaxPatchChars"/>) on purpose: a patch the capture itself truncated is always longer than this, so
+    /// that cut is always counted. Past it, what the render cuts it states and counts, and an approval does not cover it.
+    /// </summary>
+    internal const int MaxReviewedChars = 800_000;
+
+    /// <summary>The change the critic reads, bounded (<see cref="MaxReviewedChars"/>) — every writable repository's diff under its own alias when the workspace held several (the top-level fields carry the primary alone), else the one diff — with the agent's summary and each changed-file list as context. <paramref name="budget"/> counts what was not shown.</summary>
+    private static string RenderChange(AgentRunResult result, bool repositoryBound, ReviewRenderBudget budget)
     {
         var builder = new StringBuilder();
+        var files = new ReviewRenderBudget(MaxReviewedFileListChars);
 
-        if (!string.IsNullOrWhiteSpace(result.Summary)) builder.AppendLine($"Agent summary: {result.Summary}").AppendLine();
+        if (!string.IsNullOrWhiteSpace(result.Summary)) builder.AppendLine($"Agent summary: {Clipped(result.Summary, MaxReviewedSummaryChars)}").AppendLine();
 
-        builder.AppendLine($"Changed files ({result.ChangedFiles.Count}): {string.Join(", ", result.ChangedFiles)}").AppendLine();
-        builder.AppendLine("Diff:").AppendLine(string.IsNullOrEmpty(result.Patch) ? "(no unified diff captured)" : result.Patch);
+        if (result.RepositoryResults.Count == 0)
+        {
+            AppendChangedRepository(builder, new RepositoryRender(null, result.ChangedFiles, result.Patch, Diffed: repositoryBound || !string.IsNullOrEmpty(result.BaseSha)), budget, files);
+            return builder.ToString();
+        }
+
+        foreach (var repository in result.RepositoryResults.Where(r => r.Access == WorkspaceAccess.Write))
+        {
+            builder.AppendLine($"Repository '{repository.Alias}':");
+
+            if (repository.CaptureError is not null)
+            {
+                builder.AppendLine("(its change could not be captured, so it is not shown here)").AppendLine();
+                budget.Omit("a repository whose change could not be captured");
+                continue;
+            }
+
+            AppendChangedRepository(builder, new RepositoryRender(repository.Alias, repository.ChangedFiles, repository.Patch, Diffed: true), budget, files);
+        }
 
         return builder.ToString();
     }
 
-    /// <summary>C1 — the total captured-deliverable bytes a text-only review reads. Bounded so a large report cannot balloon the critic prompt; the overflow is stated in the render rather than silently dropped.</summary>
-    internal const int MaxReviewedDeliverableChars = 64 * 1024;
+    /// <summary>One repository's part of a change render: its alias (null for a single-repo run), its changed files, its diff, and whether the files are a repository's — true for every run bound to one, whether or not its git capture succeeded; false only for a scratch run, whose file list is its harness's own report of the deliverables it wrote.</summary>
+    private readonly record struct RepositoryRender(string? Alias, IReadOnlyList<string> ChangedFiles, string? Patch, bool Diffed);
 
-    /// <summary>Whether <paramref name="result"/> carries a recorded diff — the pre-C1 review trigger, and still the one that selects the byte-identical change render.</summary>
-    private static bool HasDiff(AgentRunResult result) => result.ChangedFiles.Count > 0 || !string.IsNullOrEmpty(result.Patch);
+    /// <summary>One repository's changed-file list and diff, each through its own allowance.</summary>
+    private static void AppendChangedRepository(StringBuilder builder, RepositoryRender repository, ReviewRenderBudget diffs, ReviewRenderBudget files)
+    {
+        var listed = repository.ChangedFiles.TakeWhile(name => files.TryTake(name.Length + 2)).ToList();
+        var unlisted = repository.ChangedFiles.Count - listed.Count;
 
-    /// <summary>C1 — whether there is anything for the critic to READ: a diff, an answer in the agent's summary, or a captured deliverable. All three absent ⇒ a genuine no-op / re-attach run, which still self-skips exactly as before.</summary>
-    private static bool HasReviewableOutput(AgentRunResult result) =>
-        HasDiff(result) || !string.IsNullOrWhiteSpace(result.Summary) || result.CapturedArtifactCount + result.UndeclaredArtifactCount > 0;
+        builder.AppendLine($"Changed files ({repository.ChangedFiles.Count}): {string.Join(", ", listed)}{(unlisted > 0 ? $" … (+{unlisted} more not listed)" : "")}").AppendLine();
+        builder.AppendLine("Diff:").AppendLine(RenderDiff(repository, diffs)).AppendLine();
+    }
 
     /// <summary>
-    /// C1 — the critic's request for THIS result: the unchanged change render for a diff-bearing run, else the answer
+    /// The repository's diff through the render's allowance, with everything the reviewer cannot read in it counted:
+    /// a repository's changed files whose diff the result does not hold (an inline copy shed after a refused offload, or
+    /// a capture that failed and left the names the harness reported while the push still publishes the clone), and
+    /// every file git rendered as a placeholder ("Binary files … differ", or a binary patch). Git renders one for
+    /// content with a NUL byte, and for any file the clone's own <c>.git/info/attributes</c> marks <c>-diff</c> or its
+    /// <c>.git/config</c> puts over <c>core.bigFileThreshold</c> — both written by the agent under review, neither visible
+    /// in any diff — so a placeholder hides source as easily as an image, and no approval can cover what it hid. A
+    /// scratch run's file list — only its harness reported it, and no repository stands behind it — names no diff to
+    /// miss: its files reach the review as captured deliverables.
+    /// </summary>
+    private static string RenderDiff(RepositoryRender repository, ReviewRenderBudget budget)
+    {
+        if (string.IsNullOrEmpty(repository.Patch))
+        {
+            if (repository.ChangedFiles.Count > 0 && repository.Diffed) budget.Omit($"{repository.ChangedFiles.Count} changed file(s){InRepository(repository.Alias)} whose diff was not captured");
+
+            return "(no unified diff captured)";
+        }
+
+        var shown = budget.Take(repository.Patch);
+        var opaque = OpaqueDiffCount(shown);
+
+        if (opaque > 0) budget.Omit($"{opaque} file(s){InRepository(repository.Alias)} git showed only as \"Binary files … differ\" or a binary patch, whose content the reviewer could not read");
+
+        return shown;
+    }
+
+    private static string InRepository(string? alias) => alias is null ? "" : $" in '{alias}'";
+
+    /// <summary>How many files a unified diff shows only as git's binary placeholder. Every line of a hunk starts with a space, '+', '-' or '\', so a line that IS the placeholder can only be git's own.</summary>
+    internal static int OpaqueDiffCount(string diff) =>
+        diff.Split('\n').Count(line => line.TrimEnd('\r') is var text && (text == "GIT binary patch" || text.StartsWith("Binary files ", StringComparison.Ordinal) && text.EndsWith(" differ", StringComparison.Ordinal)));
+
+    /// <summary>The head of <paramref name="text"/>, at most <paramref name="maxChars"/>, marked when cut.</summary>
+    private static string Clipped(string text, int maxChars) =>
+        text.Length <= maxChars ? text : text[..maxChars] + $" … ({text.Length - maxChars} characters omitted)";
+
+    /// <summary>
+    /// One review render's character allowance for what the critic is SHOWN, deterministic, with every cut stated in
+    /// the render and everything not shown — cut at the allowance, or never shown at all — counted on
+    /// <see cref="Omitted"/>, so a verdict over a partial render can be told from one over the whole result. A cut
+    /// never splits a surrogate pair.
+    /// </summary>
+    private sealed class ReviewRenderBudget(int allowance)
+    {
+        private readonly List<string> _unseen = new();
+        private int _left = allowance;
+        private long _cutChars;
+
+        /// <summary>Whether the allowance is spent, so nothing more can be shown.</summary>
+        public bool Exhausted => _left <= 0;
+
+        /// <summary>What the render did not show, as one clause a hold reason can quote; null when it showed everything.</summary>
+        public string? Omitted => _cutChars == 0 && _unseen.Count == 0 ? null : string.Join("; ", (_cutChars > 0 ? [$"{_cutChars} characters past the review budget"] : Array.Empty<string>()).Concat(_unseen));
+
+        /// <summary>As much of <paramref name="text"/> as the allowance holds, with a marker naming what it cut.</summary>
+        public string Take(string text)
+        {
+            if (text.Length <= _left)
+            {
+                _left -= text.Length;
+                return text;
+            }
+
+            var shown = _left > 0 && char.IsHighSurrogate(text[_left - 1]) ? _left - 1 : _left;
+
+            _left = 0;
+            _cutChars += text.Length - shown;
+
+            return text[..shown] + $"\n[… {text.Length - shown} characters omitted — the reviewer was not shown them …]";
+        }
+
+        /// <summary>Whether <paramref name="chars"/> more still fit; spends them when they do.</summary>
+        public bool TryTake(int chars)
+        {
+            if (chars > _left) return false;
+
+            _left -= chars;
+            return true;
+        }
+
+        /// <summary>Count content the render could not show at all — an uncaptured repository, a placeholder diff, an unread deliverable — in words a hold reason can quote.</summary>
+        public void Omit(string what) => _unseen.Add(what);
+    }
+
+    /// <summary>
+    /// Whether <paramref name="result"/> carries produced WORK the review must read as a CHANGE: git ground truth on
+    /// ANY writable repository (<see cref="AgentWorkPresence.ShowsWork(AgentRunResult)"/> — the top-level fields carry
+    /// the primary alone, so a secondary repository's change used to read as "no code change"), an inline diff, or a
+    /// repository whose change could not be captured (unknown is not "nothing").
+    /// </summary>
+    private static bool HasChange(AgentRunResult result) =>
+        AgentWorkPresence.ShowsWork(result) || !string.IsNullOrEmpty(result.Patch) || result.RepositoryResults.Any(r => r.CaptureError is not null || !string.IsNullOrEmpty(r.Patch));
+
+    /// <summary>C1 — whether there is anything for the critic to READ: a change, an answer in the agent's summary, or a captured deliverable. All three absent ⇒ a genuine no-op run, which still self-skips exactly as before: there is nothing for any door to take.</summary>
+    private static bool HasReviewableOutput(AgentRunResult result) =>
+        HasChange(result) || !string.IsNullOrWhiteSpace(result.Summary) || result.CapturedArtifactCount + result.UndeclaredArtifactCount > 0;
+
+    /// <summary>The critic's request for one result, and what of the result its bounded render could not show (null when it showed everything).</summary>
+    private readonly record struct BuiltReview(CriticRequest Request, string? Omitted);
+
+    /// <summary>
+    /// C1 — the critic's request for THIS result: the change render for a run that produced work, else the answer
     /// render judged against the goal plus the task's own acceptance criteria (an answer's "done" is its contract, not
     /// its file list). BOTH shapes name <see cref="LlmStructuredCritic.OutputReviewCallKind"/>: this is the one review
     /// rung that examines a produced RESULT, and the Room's "did anything check this?" probe reads exactly that kind.
     ///
+    /// <para>BOTH shapes carry the run's captured deliverables after their substance, through one shared allowance. A
+    /// change render used to show the diff alone, so one trivial tracked edit dropped every deliverable from the review —
+    /// and a deliverable need not be tracked at all (<c>.git/info/exclude</c> keeps it out of the diff while the capture
+    /// still takes it).</para>
+    ///
     /// <para><c>AgentRunId</c> rides too, for the SAME reason <see cref="RecordOutputReviewVerdictAsync"/> stamps
-    /// <c>run.Id</c> on its own beat: the memoized request here backs BOTH the model rung and the D② co-sign, so
-    /// whichever one lands a <c>review.skipped</c> beat (<see cref="LlmStructuredCritic.RecordSkippedAsync"/>) names the
-    /// same unit a later <c>review.completed</c> beat would — one reviewed unit, never two, in the Room's fold.</para>
+    /// <c>run.Id</c> on its own beat: the request backs BOTH the model rung and the D② co-sign, so whichever one lands a
+    /// <c>review.skipped</c> beat (<see cref="LlmStructuredCritic.RecordSkippedAsync"/>) names the same unit a later
+    /// <c>review.completed</c> beat would — one reviewed unit, never two, in the Room's fold.</para>
     /// </summary>
-    private async Task<CriticRequest> BuildReviewRequestAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
+    private async Task<BuiltReview> BuildReviewRequestAsync(AgentTask task, AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
     {
-        if (HasDiff(result))
-            return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentChange, Artifact = RenderChange(result), Goal = task.Goal, CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = run.Id, ProducerModel = ProducerModelOf(task, result) };
+        var budget = new ReviewRenderBudget(MaxReviewedChars);
+        var change = HasChange(result);
+        var substance = change ? RenderChange(result, RepositoryWorkspaceResolver.CanonicalWorkspace(task) is not null, budget) : RenderAnswerHead(result, budget);
+        var deliverables = await ReadCapturedDeliverablesAsync(result, run, budget, cancellationToken).ConfigureAwait(false);
+        var artifact = substance + RenderDeliverables(deliverables, nameAbsence: !change);
 
-        var deliverables = await ReadCapturedDeliverablesAsync(result, run, cancellationToken).ConfigureAwait(false);
-
-        return new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = CriticArtifactKinds.AgentAnswer, Artifact = RenderAnswer(result, deliverables), Goal = ReviewGoal(task), CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = run.Id, ProducerModel = ProducerModelOf(task, result) };
+        return new BuiltReview(new CriticRequest { Mode = ReviewMode.Gate, ArtifactKind = change ? CriticArtifactKinds.AgentChange : CriticArtifactKinds.AgentAnswer, Artifact = artifact, Goal = change ? task.Goal : ReviewGoal(task), CallKind = LlmStructuredCritic.OutputReviewCallKind, AgentRunId = run.Id, ProducerModel = ProducerModelOf(task, result) }, budget.Omitted);
     }
 
     private static ReviewModelIdentity ProducerModelOf(AgentTask task, AgentRunResult result) => new() { ModelCredentialModelId = task.ModelCredentialModelId, ConfiguredModel = task.Model, ObservedModel = result.Model };
@@ -3454,19 +3683,29 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return $"{task.Goal}\n\nAcceptance criteria{described}: {string.Join(", ", criteria)}";
     }
 
-    /// <summary>C1 — the answer the critic reads: the agent's own closing summary plus every captured deliverable's text, each under its own path header. Internal + static so the bounding + the no-deliverable wording are unit-pinned.</summary>
-    internal static string RenderAnswer(AgentRunResult result, IReadOnlyList<(string Path, string Text)> deliverables)
+    /// <summary>C1 — the answer the critic reads: the agent's own closing summary plus every captured deliverable's text, each under its own path header. The summary IS the answer here, so it shares the render's allowance with the deliverables. Internal + static so the no-deliverable wording is unit-pinned.</summary>
+    internal static string RenderAnswer(AgentRunResult result, IReadOnlyList<(string Path, string Text)> deliverables) =>
+        RenderAnswerHead(result, new ReviewRenderBudget(MaxReviewedChars)) + RenderDeliverables(deliverables, nameAbsence: true);
+
+    /// <summary>The answer render's head: what the critic is reading, and the agent's own answer through the render's allowance.</summary>
+    private static string RenderAnswerHead(AgentRunResult result, ReviewRenderBudget budget)
     {
         var builder = new StringBuilder();
 
         builder.AppendLine("This run produced no code change — its output IS the answer below.").AppendLine();
-        builder.AppendLine($"Agent summary: {(string.IsNullOrWhiteSpace(result.Summary) ? "(none)" : result.Summary)}").AppendLine();
+        builder.AppendLine($"Agent summary: {(string.IsNullOrWhiteSpace(result.Summary) ? "(none)" : budget.Take(result.Summary))}").AppendLine();
 
-        if (deliverables.Count == 0)
-        {
-            builder.AppendLine("Captured deliverables: (none)");
-            return builder.ToString();
-        }
+        return builder.ToString();
+    }
+
+    /// <summary>Every captured deliverable that was read, each under its own path header. An answer names an empty set (its deliverables are its substance); a change render says nothing about one, and heads a non-empty set so the reviewer can tell the deliverables from the diff.</summary>
+    private static string RenderDeliverables(IReadOnlyList<(string Path, string Text)> deliverables, bool nameAbsence)
+    {
+        var builder = new StringBuilder();
+
+        if (deliverables.Count == 0) return nameAbsence ? builder.AppendLine("Captured deliverables: (none)").ToString() : "";
+
+        if (!nameAbsence) builder.AppendLine("Captured deliverables:").AppendLine();
 
         foreach (var (path, text) in deliverables)
             builder.AppendLine($"=== {path} ===").AppendLine(text).AppendLine();
@@ -3475,12 +3714,14 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
-    /// Read this attempt's captured deliverables back out of the artifact store, bounded by
-    /// <see cref="MaxReviewedDeliverableChars"/> across the whole set. BEST-EFFORT: an unresolvable row, or any
-    /// store fault, degrades to the summary-only review rather than failing the run — the critic is advisory and
-    /// fails open, so a storage hiccup must never manufacture a flag OR block completion.
+    /// Read this attempt's captured deliverables back out of the artifact store through the render's shared
+    /// allowance. Everything the read could not show — the tail past the allowance, a deliverable it never reached, an
+    /// unresolvable row, or the whole set when the store faults — is counted on <paramref name="budget"/>: the review
+    /// still runs over what it could read (a flag on it stands), but its approval cannot cover deliverables nobody
+    /// examined. The count names no path: a deliverable's name is the agent's to choose, and the hold reason is the
+    /// server's.
     /// </summary>
-    private async Task<IReadOnlyList<(string Path, string Text)>> ReadCapturedDeliverablesAsync(AgentRunResult result, AgentRun run, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<(string Path, string Text)>> ReadCapturedDeliverablesAsync(AgentRunResult result, AgentRun run, ReviewRenderBudget budget, CancellationToken cancellationToken)
     {
         if (result.CapturedArtifactCount + result.UndeclaredArtifactCount == 0) return Array.Empty<(string, string)>();
 
@@ -3493,28 +3734,26 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var latest = current.Max(r => r.FenceEpoch);
             var read = new List<(string, string)>();
-            var budget = MaxReviewedDeliverableChars;
 
             foreach (var row in current.Where(r => r.FenceEpoch == latest).OrderBy(r => r.LogicalPath, StringComparer.Ordinal))
             {
-                if (budget <= 0) break;
+                var bytes = budget.Exhausted ? null : await _artifacts.GetBytesAsync(run.TeamId, row.ContentArtifactId, cancellationToken).ConfigureAwait(false);
 
-                var bytes = await _artifacts.GetBytesAsync(run.TeamId, row.ContentArtifactId, cancellationToken).ConfigureAwait(false);
+                if (bytes is null)
+                {
+                    budget.Omit(budget.Exhausted ? $"a captured deliverable of {row.SizeBytes} bytes past the review budget" : "a captured deliverable that could not be read");
+                    continue;
+                }
 
-                if (bytes is null) continue;
-
-                var text = System.Text.Encoding.UTF8.GetString(bytes.Bytes);
-                var kept = text.Length <= budget ? text : text[..budget] + "\n… (truncated for review) …";
-
-                budget -= Math.Min(text.Length, budget);
-                read.Add((row.LogicalPath, kept));
+                read.Add((row.LogicalPath, budget.Take(System.Text.Encoding.UTF8.GetString(bytes.Bytes))));
             }
 
             return read;
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: could not read the captured deliverables for the output review; reviewing the summary alone", run.Id);
+            _logger.LogWarning(ex, "Agent run {RunId}: could not read the captured deliverables for the output review; reviewing the rest alone, which cannot approve what it never read", run.Id);
+            budget.Omit($"{result.CapturedArtifactCount + result.UndeclaredArtifactCount} captured deliverable(s) the artifact store could not serve");
             return Array.Empty<(string, string)>();
         }
     }
@@ -3535,13 +3774,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>Append a Warning event saying the configured output review did NOT run, so a change that shipped ungated says so on the lane its operator actually reads (a standalone run has no workflow ledger for the critic's <c>review.skipped</c> beat). Best-effort, exactly like the flagged warning: reporting a skipped review may never mask the run's terminal write.</summary>
+    /// <summary>Append a Warning event saying the configured output review did NOT examine the change, so a change held for a human says why on the lane its operator actually reads (a standalone run has no workflow ledger for the critic's <c>review.skipped</c> beat). Best-effort, exactly like the flagged warning: reporting a skipped review may never mask the run's terminal write.</summary>
     private async Task AppendReviewSkippedWarningAsync(AgentRunOwnerToken owner, CriticVerdict verdict, CancellationToken cancellationToken)
     {
         var runId = owner.RunId;
         try
         {
-            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Review skipped — the configured output review could not run, so this change was not gated: {verdict.Rationale}" }, cancellationToken).ConfigureAwait(false);
+            await _runs.AppendEventAsync(owner, new AgentEvent { Kind = AgentEventKind.Warning, Text = $"Review skipped — the configured output review could not examine this change, so it is held for a human: {verdict.Rationale}" }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
@@ -4865,9 +5104,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         folded = await WithFactsFromDurableEventsAsync(folded, owner.RunId, run.TeamId, harness, deadline, cancellationToken).ConfigureAwait(false);
         folded = await WithWorkspaceChangesWithinBudgetAsync(folded, owner.RunId, run.TeamId, handle, deadline, cancellationToken).ConfigureAwait(false);
 
+        // The landing never reaches the configured output review — no review call fits the drain's budget — so the
+        // result says so, or the patch it captured would read as work no reviewer ever objected to.
+        var landed = AgentOutputReviewHold.NeverReviewed(AsLostModelAccess(folded), task.OutputReviewMode, DrainLandedUnreviewedReason);
+
         try
         {
-            await CompleteAndNotifyAsync(owner, run.TeamId, AsLostModelAccess(folded), cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, landed, cancellationToken).ConfigureAwait(false);
             return true;
         }
         catch (Exception exception) when (exception is not AgentRunOwnershipLostException)

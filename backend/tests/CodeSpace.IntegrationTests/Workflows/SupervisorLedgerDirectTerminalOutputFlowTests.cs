@@ -138,6 +138,33 @@ public sealed class SupervisorLedgerDirectTerminalOutputFlowTests
         result.AcceptancePassed.ShouldBe(false, "before this fix the ledger-direct run had ZERO grading targets and this stayed null (vacuous pass) — it must now be reached and fail closed against the unclonable fake remote");
     }
 
+    /// <summary>
+    /// VERIFY_P3b, PROBE_R2 and R4 end to end: the executor pushes a unit's branch BEFORE its output review runs, so a
+    /// unit the review then flagged, held unreviewed, or never ran on (an open decision, a Failed end with the patch in
+    /// hand) sits in the publish ledger as Pushed — and that single pushed row used to satisfy the stop as a
+    /// ledger-direct publication, surfacing the branch as the run's delivered head with no merge at all. The unit's
+    /// compact is folded by the REAL rehydrate from its REAL agent-run row, so the review's verdict reaches the door
+    /// through the same projection production uses.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(UnapprovedUnitShapes.All), MemberType = typeof(UnapprovedUnitShapes))]
+    public async Task A_unit_its_output_review_did_not_approve_never_surfaces_as_the_delivered_head(string shape)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var repoId = await SeedBoundRepositoryAsync(teamId);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var agentRunId = Guid.NewGuid();
+        await SeedUnapprovedAgentRunAsync(runId, teamId, agentRunId, UnapprovedUnitShapes.Of(shape, "codespace/agent/unapproved"));
+        await SeedUnfoldedSpawnAsync(runId, teamId, agentRunId);
+        await SeedAgentManifestAsync(runId, teamId, agentRunId, repoId, "codespace/agent/unapproved");
+
+        var result = await RunTurnAsync(runId, teamId, new AlwaysStopDecider());
+
+        result.IntegratedBranch.ShouldBeNull($"the unit's review did not approve it ({shape}) — its pushed branch is not the run's delivered head");
+        result.RepositoryBranches.ShouldBeEmpty();
+    }
+
     [Fact]
     public async Task A_replan_after_the_wave_finished_still_surfaces_the_branches_it_stranded()
     {
@@ -261,6 +288,30 @@ public sealed class SupervisorLedgerDirectTerminalOutputFlowTests
         var outcome = JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1, agentResults = new[] { result } }, AgentJson.Options);
 
         await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Spawn, outcome);
+    }
+
+    /// <summary>A spawn whose outcome names its agent but folds no result yet — the real rehydrate folds it off the agent-run row.</summary>
+    private async Task SeedUnfoldedSpawnAsync(Guid runId, Guid teamId, Guid agentRunId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        await AddTerminalDecisionAsync(db, runId, teamId, SupervisorDecisionKinds.Spawn, JsonSerializer.Serialize(new { agentRunIds = new[] { agentRunId }, agentCount = 1 }, AgentJson.Options));
+    }
+
+    /// <summary>A terminal agent run its output review did not approve — the row the executor writes for that shape, with the branch it pushed before the review ran.</summary>
+    private async Task SeedUnapprovedAgentRunAsync(Guid runId, Guid teamId, Guid agentRunId, AgentRunResult result)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.AgentRun.Add(new AgentRun
+        {
+            Id = agentRunId, TeamId = teamId, WorkflowRunId = runId, NodeId = NodeId, IterationKey = $"{NodeId}#turn0", Harness = "codex-cli",
+            Status = result.Status, TaskJson = "{}", ResultJson = JsonSerializer.Serialize(result, AgentJson.Options),
+        });
+
+        await db.SaveChangesAsync();
     }
 
     /// <summary>ONE spawn decision staging a WAVE of Succeeded agents — the shape a plan(2) → spawn×2 trajectory records.</summary>

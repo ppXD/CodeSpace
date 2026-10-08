@@ -60,6 +60,29 @@ public sealed record SupervisorAgentResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? InfraExitReason { get; init; }
 
+    /// <summary>
+    /// The output review's objection when it FLAGGED this unit (<c>AgentRunResult.ReviewFeedback</c>, clipped): what
+    /// the independent reviewer found and why the unit stands at NeedsReview. A flagged unit is withheld from the
+    /// reviewable head exactly like a rejected one, and this is the critique the decider retries against. It quotes
+    /// the reviewed artifact, so every prompt renders it as data. Null-omitted: an unflagged unit serializes
+    /// byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? ReviewFeedback { get; init; }
+
+    /// <summary>
+    /// Why a CONFIGURED output review never produced a verdict on this unit (<c>AgentRunResult.UnreviewedReason</c>,
+    /// clipped) — the reviewer could not run, its approval did not cover the whole result, or the run ended in a way that
+    /// skipped it (failed with work in hand, left a decision open, recovered after a restart). Never examined is not
+    /// approved, so the unit is withheld from the reviewable head until a human looks. Null-omitted.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? UnreviewedReason { get; init; }
+
+    /// <summary>Where the configured output review left this unit (<c>AgentRunResult.OutputReview</c>): only <see cref="OutputReviewState.Approved"/> lets a reviewed unit's work reach the head. Null when no review was configured, or the unit produced nothing to review. Null-omitted.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OutputReviewState? OutputReview { get; init; }
+
     /// <summary>The git ground-truth repo-relative paths the agent changed (never the diff body). Defaults to empty and NEVER serializes null, so a consumer can always treat it as an array.</summary>
     public IReadOnlyList<string> ChangedFiles { get; init; } = Array.Empty<string>();
 

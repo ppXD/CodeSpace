@@ -77,6 +77,34 @@ public sealed class SupervisorMergeWithholdFlowTests
         branches[0].ShouldBe("codespace/agent/accepted", "the surviving branch is the accepted unit's");
     }
 
+    /// <summary>
+    /// PROBE_P3, R2 and R4 end to end: a unit whose configured output review did not approve it — FLAGGED, held
+    /// unreviewed, left a decision open (the review deferred and never ran), or ended Failed with its patch (the review
+    /// never ran) — used to be folded into the reviewable head like accepted work; its branch was already pushed, since
+    /// the push runs before the review. Its compact is folded by the turn's REAL rehydrate from its REAL agent-run row —
+    /// the same projection production reads — and the real merge executor folds only the clean sibling.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(UnapprovedUnitShapes.All), MemberType = typeof(UnapprovedUnitShapes))]
+    public async Task A_merge_withholds_a_unit_its_output_review_did_not_approve(string shape)
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+
+        var cleanId = Guid.NewGuid();
+        var unapprovedId = Guid.NewGuid();
+        var unapproved = UnapprovedUnitShapes.Of(shape, "codespace/agent/unapproved");
+
+        await SeedDecisionAsync(runId, teamId, 1, SupervisorDecisionKinds.Spawn, """{"subtaskIds":["s1","s2"]}""", JsonSerializer.Serialize(new { agentRunIds = new[] { cleanId, unapprovedId }, agentCount = 2 }, AgentJson.Options));
+        await SeedAgentRunAsync(cleanId, teamId, runId, "codespace/agent/clean");
+        await SeedAgentRunRawAsync(unapprovedId, teamId, runId, unapproved.Status, JsonSerializer.Serialize(unapproved, AgentJson.Options));
+
+        var outcome = JsonDocument.Parse((await RunMergeTurnAsync(runId, teamId))!).RootElement;
+
+        outcome.GetProperty("merged").EnumerateArray().Select(e => e.GetProperty("producedBranch").GetString())
+            .ShouldBe(new[] { "codespace/agent/clean" }, $"the other unit's review did not approve it ({shape}) — its work is withheld from the head like a rejected unit's");
+    }
+
     [Fact]
     public async Task A_merge_of_an_all_ungraded_wave_folds_every_unit_byte_identical_to_pre_slice()
     {

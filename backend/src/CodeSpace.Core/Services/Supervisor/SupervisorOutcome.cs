@@ -752,6 +752,11 @@ public static class SupervisorOutcome
             // post-hoc grade can read to tell an attempt that failed from one our own infrastructure never let run.
             // Everything else stays absent so an ordinary tape's bytes are untouched (see the field's own doc).
             InfraExitReason = InfraExitReasonOf(result),
+            // The output review's own word on the unit — the critique it flagged, or why it never examined the unit.
+            // Both withhold the unit from the head (IsWithheldFromHead), and the critique is what a retry targets.
+            ReviewFeedback = ClipCompactText(result?.ReviewFeedback),
+            UnreviewedReason = ClipCompactText(result?.UnreviewedReason),
+            OutputReview = result?.OutputReview,
             ChangedFiles = CompactChangedFiles(result?.ChangedFiles),
             TotalChangedFiles = result?.ChangedFiles.Count > CompactChangedFilesMax ? result.ChangedFiles.Count : null,
             ProducedBranch = result?.ProducedBranch,
@@ -880,14 +885,26 @@ public static class SupervisorOutcome
     /// widened): its per-unit acceptance grade objectively REJECTED it (<see cref="SupervisorAgentResult.AcceptancePassed"/>
     /// == false), OR a human WAIVED its verification (<see cref="IsWaived"/> — WAIVED ≠ PASSED at every
     /// objective-truth read, the FATAL-1 invariant: unverified work never reaches the reviewable head without its
-    /// own co-sign). Shared by every door to the head — the merge (<c>RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge</c>),
+    /// own co-sign), OR its configured output review did not approve it (<see cref="IsOutputReviewWithheld"/>).
+    /// Shared by every door to the head — the merge (<c>RealSupervisorActionExecutor.ResolveAgentRunIdsToMerge</c>),
     /// the resolver's branch collection (<c>RealSupervisorActionExecutor.Resolve.cs</c>), the I3 publish gate's
-    /// already-published shortcut (<see cref="SupervisorPublishGate"/>), AND the run-wide
-    /// <see cref="WithheldAgentRunIds"/> aggregate — so none of them can ever drift on which units are withheld.
-    /// An ungraded unit (<c>null</c> — no per-unit contract, or a deferred multi-repo unit) is NOT withheld
-    /// (byte-identical to pre-slice).
+    /// already-published shortcut (<see cref="SupervisorPublishGate"/>), the ledger-direct publication rung
+    /// (<see cref="SupervisorLedgerDirectPublication"/>), AND the run-wide <see cref="WithheldAgentRunIds"/>
+    /// aggregate the published-branch resolver reads — so none of them can ever drift on which units are withheld.
+    /// An ungraded, unreviewed-by-configuration unit is NOT withheld (byte-identical to pre-slice).
     /// </summary>
-    public static bool IsWithheldFromHead(SupervisorAgentResult result) => result.AcceptancePassed == false || IsWaived(result);
+    public static bool IsWithheldFromHead(SupervisorAgentResult result) => result.AcceptancePassed == false || IsWaived(result) || IsOutputReviewWithheld(result);
+
+    /// <summary>
+    /// The unit's configured OUTPUT review did not approve it: the reviewer FLAGGED it, or never examined the whole
+    /// result — it could not run, read only part of it, or the run ended in a way that skipped it (failed with work in
+    /// hand, left a decision open, recovered after a restart). The executor pushes a unit's branch BEFORE that review
+    /// runs, so such a unit's branch is already on the remote and in the publish ledger — this is what keeps it there
+    /// instead of on the head. A passing acceptance grade does not outvote it: the check and the review answer
+    /// different questions, and the head takes only work both let through. The same predicate the plan-map lane's
+    /// integrator reads (<see cref="Agents.AgentOutputReviewHold"/>), so the two lanes cannot disagree about a unit.
+    /// </summary>
+    public static bool IsOutputReviewWithheld(SupervisorAgentResult result) => Agents.AgentOutputReviewHold.Withholds(result);
 
     /// <summary>A human authorized FORGOING this unit's verification (the co-sign overlay's waive, B3) — carried DISTINCTLY from the pass/fail bool so no reader can launder it into a green. Waived is not rejected (nothing objectively failed) and not passed (nothing was verified).</summary>
     public static bool IsWaived(SupervisorAgentResult result) => result.AcceptanceVerdict == Messages.Contracts.VerificationDisposition.Waived;
