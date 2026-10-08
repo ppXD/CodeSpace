@@ -391,8 +391,7 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
         var read = process.StandardOutput.BaseStream.CopyToAsync(output, _stopping.Token);
         var error = process.StandardError.ReadToEndAsync(_stopping.Token);
         input.Position = 0;
-        await input.CopyToAsync(process.StandardInput.BaseStream, _stopping.Token);
-        process.StandardInput.Close();
+        await WriteRequestBodyAsync(process, input);
         try { await Task.WhenAll(read, error, process.WaitForExitAsync(_stopping.Token)).WaitAsync(TimeSpan.FromSeconds(30)); }
         catch { if (!process.HasExited) process.Kill(entireProcessTree: true); throw; }
         process.ExitCode.ShouldBe(0, await error);
@@ -410,6 +409,21 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
         }
         context.Response.ContentLength64 = bytes.Length - boundary;
         await context.Response.OutputStream.WriteAsync(bytes.AsMemory(boundary), _stopping.Token);
+    }
+
+    /// <summary>
+    /// Hand <c>git http-backend</c> the request body. A backend that answers before reading all of it — or a client that
+    /// went away so the backend gave up — closes its stdin early, and the write then fails with a broken pipe. That is not
+    /// a fixture failure: the backend's own output and exit code decide the response, exactly as a real server's would.
+    /// </summary>
+    private async Task WriteRequestBodyAsync(Process process, Stream body)
+    {
+        try
+        {
+            await body.CopyToAsync(process.StandardInput.BaseStream, _stopping.Token);
+            process.StandardInput.Close();
+        }
+        catch (Exception e) when (e is IOException or SocketException) { /* the backend stopped reading; its exit code below still decides */ }
     }
 
     private static int FindHeadersEnd(byte[] bytes)
