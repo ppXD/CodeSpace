@@ -373,6 +373,34 @@ public class SupervisorDeciderTests
     }
 
     [Fact]
+    public void A_passed_unit_whose_check_was_not_isolated_carries_its_oracle_note_into_the_prompt()
+    {
+        var agentId = Guid.NewGuid();
+        var note = "oracle: UNVERIFIED (`make` runs against the graded tree, which can supply its configuration)";
+        var outcome = SupervisorOutcome.FoldAgentResults(
+            $$"""{"agentRunIds":["{{agentId}}"],"agentCount":1}""",
+            new[]
+            {
+                new SupervisorAgentResult
+                {
+                    AgentRunId = agentId, Status = "Succeeded", Summary = "did it", ProducedBranch = "codespace/agent/foo",
+                    AcceptancePassed = true, AcceptanceDetail = "tests-passed", AcceptanceOracleNote = note,
+                },
+            });
+
+        var spawn = new SupervisorPriorDecision
+        {
+            Id = Guid.NewGuid(), Sequence = 2, DecisionKind = SupervisorDecisionKinds.Spawn, Status = SupervisorDecisionStatus.Succeeded,
+            PayloadJson = """{"subtaskIds":["s1"]}""", OutcomeJson = outcome,
+        };
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 2, spawn));
+
+        prompt.ShouldContain("acceptance PASSED", Case.Sensitive);
+        prompt.ShouldContain(AcceptanceOracleProtection.OracleNoteClausePhrase(note), Case.Sensitive, "the brain weighing a merge is told the check could not be isolated");
+    }
+
+    [Fact]
     public void The_user_prompt_names_a_retrys_tier_escalation()
     {
         // A2 (P4-2): the decider must see that a stronger model was already tried this retry — both so it doesn't

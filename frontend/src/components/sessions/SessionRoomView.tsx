@@ -1965,6 +1965,7 @@ const PROTECTION_LABEL: Record<RoomOracleProtection, string | null> = {
   Unanchored: "unanchored",
   Subject: "self-graded",
   Protected: "protected",
+  Unverified: "unverified",
 };
 
 /**

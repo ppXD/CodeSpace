@@ -64,7 +64,7 @@ public sealed partial class TaskLaunchBenchmarkCellRunner : ITaskLaunchBenchmark
 
             await ReconstructWorkspaceAsync(context.WorkspaceDirectory, attempts, cancellationToken).ConfigureAwait(false);
 
-            var grade = await BenchmarkTaskGrading.GradeAsync(_graders, _runners, new BenchmarkTaskGradingRequest { Task = task, WorkspaceDirectory = context.WorkspaceDirectory, TeamId = context.TeamId, ProducerModel = ProducerModelOf(context.Selection, attempts), Posture = GradedPosture(attempts) }, cancellationToken).ConfigureAwait(false);
+            var grade = await BenchmarkTaskGrading.GradeAsync(_graders, _runners, new BenchmarkTaskGradingRequest { Task = task, WorkspaceDirectory = context.WorkspaceDirectory, TeamId = context.TeamId, ProducerModel = ProducerModelOf(context.Selection, attempts), Posture = GradedPosture(attempts), FixtureStager = context.FixtureStager }, cancellationToken).ConfigureAwait(false);
 
             var completionMode = await LoadCompletionEnforcementModeAsync(launched.RunId, cancellationToken).ConfigureAwait(false);
 

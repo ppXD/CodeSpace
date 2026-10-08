@@ -52,6 +52,34 @@ public sealed class LocalAcceptanceExecutorFlowTests(PostgresFixture fixture)
     }
 
     [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_self_graded_scratch_verdict_carries_its_oracle_note_onto_the_run_result(bool planted)
+    {
+        // The forged scratch pass used to reach the run record as a bare "tests-passed": the verifier's caveat and the
+        // grade's own isolation note were both dropped by the fold. An inline python check now runs isolated, so a
+        // module the agent planted beside its deliverable cannot flip it, and the scratch caveat rides the result.
+        if (OperatingSystem.IsWindows() || !PythonAvailable()) return;
+
+        var directory = NewDirectory();
+        try
+        {
+            var check = new[] { "python3", "-c", "import json, sys\nsys.exit(0 if json.load(open('out.json'))['answer'] == 7 else 1)\n" };
+            var script = "printf '{\"answer\": 6}' > out.json; " + (planted ? "printf 'def load(f):\\n    return {\"answer\": 7}\\n' > json.py; " : "") + "echo produced";
+            var harness = new ShellHarness(script);
+            var (runId, _) = await ExecuteAsync(TaskFor(directory) with { Acceptance = new SupervisorAcceptanceSpec { Command = check } }, harness);
+            using var scope = fixture.BeginScope();
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+            result.AcceptancePassed.ShouldBe(false, $"the answer is 6 whatever json.py says (planted={planted}, detail='{result.AcceptanceDetail}')");
+            result.AcceptanceOracleNote.ShouldNotBeNull("the scratch lane's caveat reaches the durable result");
+            result.AcceptanceOracleNote!.ShouldContain("No oracle file snapshot was declared");
+        }
+        finally { if (Directory.Exists(directory)) Directory.Delete(directory, recursive: true); }
+    }
+
+    [Theory]
     [InlineData("empty", GradeFailureClass.SpecIncomplete)]
     [InlineData("pathspec", GradeFailureClass.SpecIncomplete)]
     [InlineData("missing-oracle", GradeFailureClass.Environment)]
@@ -181,6 +209,17 @@ public sealed class LocalAcceptanceExecutorFlowTests(PostgresFixture fixture)
 
     private static AgentTask TaskFor(string? directory) => new() { Goal = "produce verifiable local work", Harness = "local-acceptance-test", Model = "test-model", WorkspaceDirectory = directory, Autonomy = AgentAutonomyLevel.Trusted, Permissions = AgentAutonomyPolicy.Derive(AgentAutonomyLevel.Trusted), MaxReviseRounds = 0, TimeoutSeconds = 30 };
     private static string NewDirectory() { var directory = Path.Combine(Path.GetTempPath(), "cs-local-executor-" + Guid.NewGuid().ToString("N")); Directory.CreateDirectory(directory); return directory; }
+
+    private static bool PythonAvailable()
+    {
+        try
+        {
+            using var probe = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("python3", "--version") { RedirectStandardOutput = true, RedirectStandardError = true })!;
+            probe.WaitForExit();
+            return probe.ExitCode == 0;
+        }
+        catch (System.ComponentModel.Win32Exception) { return false; }
+    }
 
     private sealed class ShellHarness(string script) : IAgentHarness
     {

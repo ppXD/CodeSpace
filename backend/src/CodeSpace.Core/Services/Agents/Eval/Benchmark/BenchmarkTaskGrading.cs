@@ -13,6 +13,9 @@ namespace CodeSpace.Core.Services.Agents.Eval.Benchmark;
 /// duplicating the two resolves. The runner is bound to the producing agent's posture
 /// (<see cref="AcceptanceGradingPosturePolicy.Bind"/>), exactly as every acceptance grade's is: the check runs bytes
 /// that agent wrote, so it never gets more memory, CPU or network than the agent had.
+///
+/// <para>The check never runs in the tree the agent wrote: it runs in a <see cref="BenchmarkOracleWorld"/> — a copy
+/// outside the workspace whose judges come from the frozen fixture — so editing the judge buys nothing and is flagged.</para>
 /// </summary>
 internal static class BenchmarkTaskGrading
 {
@@ -22,9 +25,11 @@ internal static class BenchmarkTaskGrading
 
         var runner = AcceptanceGradingPosturePolicy.Bind(runners.Resolve(Sandbox.SandboxKinds.Local), request.Posture ?? AcceptanceGradingPosturePolicy.FailClosed);
 
-        var context = new BenchmarkGradingContext { Task = request.Task, WorkspaceDirectory = request.WorkspaceDirectory, Runner = runner, TeamId = request.TeamId, ProducerModel = request.ProducerModel };
+        using var world = BenchmarkOracleWorld.Prepare(request.Task, request.WorkspaceDirectory, request.FixtureStager);
 
-        return await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false);
+        var context = new BenchmarkGradingContext { Task = request.Task, WorkspaceDirectory = world.Directory, Runner = runner, TeamId = request.TeamId, ProducerModel = request.ProducerModel, PinnedOraclePaths = world.PinnedPaths };
+
+        return world.Conclude(await grader.GradeAsync(context, cancellationToken).ConfigureAwait(false));
     }
 }
 
@@ -37,4 +42,7 @@ internal sealed record BenchmarkTaskGradingRequest
 
     /// <summary>The posture of the agent run whose workspace this grades. The fixture's test command imports that agent's code, so it runs under the same ceilings and network cut. Required so no instrument can forget it; null grades under <see cref="AcceptanceGradingPosturePolicy.FailClosed"/>.</summary>
     public required AcceptanceGradingPosture? Posture { get; init; }
+
+    /// <summary>The stager that staged this cell's fixture — the platform-owned source its judge is restored from before grading. Required so no instrument can forget it; null (a cell staged by hand) restores nothing and the grade says its judge was not platform-owned.</summary>
+    public required IBenchmarkFixtureStager? FixtureStager { get; init; }
 }

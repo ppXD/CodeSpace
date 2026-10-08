@@ -113,6 +113,7 @@ public sealed class QualificationRunner : IQualificationRunner, DependencyInject
             MetricsJson = JsonSerializer.Serialize(new
             {
                 solved = score.Solved, unsolved = score.Unsolved, abstained = score.Abstained, infraUnknown = score.InfraUnknown,
+                solvedUnverified = score.SolvedUnverified, tamperFlagged = score.TamperFlagged,
                 total = score.Total, solveRate = score.SolveRateOverSuite, solveRateLowerBound = lowerBound, evaluatorHealth = score.EvaluatorHealth, executionPath = run.ExecutionPath,
                 census = BuildCensus(run),
             }, Agents.AgentJson.Options),

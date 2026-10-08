@@ -66,6 +66,28 @@ public class QualificationRunnerFlowTests
     }
 
     [Fact]
+    public async Task The_receipt_counts_solves_resting_on_an_unisolated_check_and_cells_that_touched_their_judge()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var cells = Cells(solved: 3, unsolved: 1, infra: 0).Select((cell, i) => i switch
+        {
+            0 => cell with { OracleNote = "oracle: UNVERIFIED (check.sh lives at the repository root)" },
+            1 => cell with { OracleNote = "ORACLE TAMPER VOIDED — the cell changed its judge, restored from the frozen fixture: check.sh" },
+            _ => cell,
+        }).ToList();
+
+        using var scope = _fixture.BeginScope();
+        var outcome = await Runner(scope, cells, BenchmarkExecutionPath.TaskLaunch).QualifyAsync("supervisor-" + Guid.NewGuid().ToString("N")[..6], "git-branch", Spec(minLowerBound: 0.1), teamId, Selection(), CancellationToken.None);
+
+        var row = await scope.Resolve<CodeSpaceDbContext>().QualificationReceipt.AsNoTracking().SingleAsync(r => r.Id == outcome.ReceiptId);
+        var metrics = JsonDocument.Parse(row.MetricsJson!).RootElement;
+
+        metrics.GetProperty("solved").GetInt32().ShouldBe(3);
+        metrics.GetProperty("solvedUnverified").GetInt32().ShouldBe(1, "a receipt reader sees how many solves rest on a check the platform could not isolate");
+        metrics.GetProperty("tamperFlagged").GetInt32().ShouldBe(1, "and how many cells touched their judge");
+    }
+
+    [Fact]
     public async Task A_direct_harness_round_remains_shadow_even_when_every_oracle_passes()
     {
         var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);

@@ -274,7 +274,7 @@ public static class SupervisorRecitation
         // caller, before it delegates — so a second arm would be unreachable, and an unreachable copy of a rendered
         // sentence is exactly how two surfaces drift into saying different things about one row. The infra arms
         // below stay as they are: they are about a check that RAN and could not finish.
-        "Succeeded" when result.AcceptancePassed == true => $"done (accepted){SubjectClause(result)}",
+        "Succeeded" when result.AcceptancePassed == true => $"done (accepted){SubjectClause(result)}{OracleNoteClause(result)}",
         // Same three-way split as the decider's verdict line — the recitation and the results section must never
         // give the weak brain CONTRADICTORY framings of the same row (one says REJECTED-retry, the other UNVERIFIED-replan).
         // Reads AcceptancePassed directly (not the newer Contradiction field) so a row folded BEFORE P4-1 shipped —
@@ -307,6 +307,10 @@ public static class SupervisorRecitation
     /// <summary>What an ACCEPTED row owes about a program file the check ran without protecting — empty on every ordinary pass, so the compact stays byte-identical. Reads the same clause the decider's verdict line does (<see cref="AcceptanceOracleProtection.SubjectDetailMarker"/>) and renders it through the SAME <see cref="AcceptanceOracleProtection.SubjectClausePhrase"/>, never a second derivation or a second wording the two sections could disagree over.</summary>
     private static string SubjectClause(SupervisorAgentResult result) =>
         AcceptanceOracleProtection.SubjectFilesIn(result.AcceptanceDetail) is { Length: > 0 } files ? $" — {AcceptanceOracleProtection.SubjectClausePhrase(Truncate(files))}" : "";
+
+    /// <summary>What an ACCEPTED row owes about its grade's oracle note — empty when the grade owed none, so an ordinary compact stays byte-identical. Renders the SAME <see cref="AcceptanceOracleProtection.OracleNoteClausePhrase"/> the decider's verdict line does.</summary>
+    private static string OracleNoteClause(SupervisorAgentResult result) =>
+        result.AcceptanceOracleNote is { Length: > 0 } note ? $" — {AcceptanceOracleProtection.OracleNoteClausePhrase(Truncate(note))}" : "";
 
     private static string Truncate(string? detail) =>
         string.IsNullOrWhiteSpace(detail) ? "no detail" : detail.Length <= 160 ? detail : detail[..160] + "…";

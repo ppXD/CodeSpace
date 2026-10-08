@@ -58,8 +58,21 @@ public sealed class BenchmarkTaskGradingPostureTests
         grade.Class.ShouldBe(GradeFailureClass.Environment, "the ceiling killed it, which says nothing about whether the agent solved the task");
     }
 
-    private static Task<BenchmarkGrade> GradeAsync(RecordingRunners runners, AcceptanceGradingPosture? posture) =>
-        BenchmarkTaskGrading.GradeAsync(new BenchmarkGraderRegistry(new IBenchmarkGrader[] { new TestsPassGrader() }), runners, new BenchmarkTaskGradingRequest { Task = FixtureTask(), WorkspaceDirectory = Path.GetTempPath(), Posture = posture }, CancellationToken.None);
+    /// <summary>Grade an empty cell workspace of this test's own: the grade copies the workspace into a grading tree, so it must never be handed a shared directory.</summary>
+    private static async Task<BenchmarkGrade> GradeAsync(RecordingRunners runners, AcceptanceGradingPosture? posture)
+    {
+        var workspace = Path.Combine(Path.GetTempPath(), "cs-bench-posture-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(workspace);
+
+        try
+        {
+            return await BenchmarkTaskGrading.GradeAsync(new BenchmarkGraderRegistry(new IBenchmarkGrader[] { new TestsPassGrader() }), runners, new BenchmarkTaskGradingRequest { Task = FixtureTask(), WorkspaceDirectory = workspace, Posture = posture, FixtureStager = null }, CancellationToken.None);
+        }
+        finally
+        {
+            Directory.Delete(workspace, recursive: true);
+        }
+    }
 
     private static BenchmarkTask FixtureTask() => new()
     {

@@ -1526,6 +1526,57 @@ public sealed class SupervisorUnitAcceptanceFoldFlowTests
         evidence.ShouldContain("the check EXECUTES solution.sh", Case.Sensitive, "the brain still gets told the check graded the candidate's own version of the file it edited");
     }
 
+    [Fact]
+    public async Task A_units_pass_the_grader_could_not_isolate_reaches_the_room_and_the_decider_labelled()
+    {
+        // The grader labels a `make check` pass "oracle: UNVERIFIED (…)" — make reads the candidate's own Makefile. The
+        // single-repo unit fold used to keep only pass + detail, so that pass reached the Room's verification row and the
+        // decider's verdict line as a plain, objectively verified "tests-passed". Real Postgres, real git, real make,
+        // the REAL SupervisorAcceptanceGrader; the assertions read what the Room and the decider actually render.
+        if (!await GitAvailableAsync() || !await ToolAvailableAsync("make")) return;
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(new() { ["Makefile"] = "check:\n\tsh check.sh\n", ["check.sh"] = "#!/bin/sh\n[ \"$(cat answer.txt)\" = 7 ]\n", ["answer.txt"] = "6\n" });
+        var baseSha = await remote.HeadShaAsync();
+        await remote.CommitOnBranchAsync("candidate", new() { ["answer.txt"] = "7\n" });
+
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var runId = await SeedSupervisorRunAsync(teamId, userId);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var makeCheck = new[] { "make", "check" };
+
+        await SeedPlanAsync(runId, teamId, sequence: 1, PlanPayload(("s1", makeCheck)));
+        var agentId = Guid.NewGuid();
+        await SeedSpawnAsync(runId, teamId, sequence: 2, """{"subtaskIds":["s1"]}""", SpawnOutcome(Unit(agentId, "candidate")));
+        await SeedManifestAsync(teamId, agentId, repoId, "candidate", baseSha: baseSha, patchArtifactId: null);
+
+        SupervisorTurnContext ctx;
+        using (var graderScope = _fixture.BeginScope())
+            ctx = await RehydrateAsync(runId, teamId, GoalConfig(repoId, makeCheck), graderScope.Resolve<ISupervisorAcceptanceGrader>());
+
+        var result = SupervisorOutcome.ReadAgentResults(ctx.PriorDecisions.Single(d => d.DecisionKind == SupervisorDecisionKinds.Spawn).OutcomeJson).Single();
+
+        result.AcceptancePassed.ShouldBe(true, $"the candidate's answer is right (detail='{result.AcceptanceDetail}')");
+        result.AcceptanceOracleNote.ShouldNotBeNull("the grade's integrity note must survive the fold onto the durable tape");
+        result.AcceptanceOracleNote!.ShouldContain(CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders.OracleRuntime.UnverifiedNoteMarker, Case.Sensitive);
+
+        CodeSpace.Core.Services.Sessions.Room.RoomProjector.ArtifactVerificationOf(result, "repo", new Dictionary<Guid, CodeSpace.Core.Services.Sessions.Room.RoomAgentLogSummary>()).OracleProtection
+            .ShouldBe(CodeSpace.Messages.Dtos.Sessions.Room.RoomOracleProtection.Unverified, "the Room's verification row must not tag this pass like a protected one");
+
+        var prompt = CodeSpace.Core.Services.Supervisor.Deciders.LlmSupervisorDecider.BuildUserPromptForTest(ctx);
+
+        prompt.ShouldContain(AcceptanceOracleProtection.OracleNoteClausePhrase(result.AcceptanceOracleNote), Case.Sensitive, "the brain weighing a merge reads that the check could not be isolated");
+    }
+
+    private static async Task<bool> ToolAvailableAsync(string tool)
+    {
+        if (OperatingSystem.IsWindows()) return false;
+
+        var probe = await new CodeSpace.Core.Services.Agents.Sandbox.Runners.LocalProcessRunner().RunAsync(new SandboxSpec { Command = "sh", Args = new[] { "-c", $"command -v {tool}" }, TimeoutSeconds = 10 }, CancellationToken.None);
+
+        return probe.Status == SandboxStatus.Success;
+    }
+
     /// <summary>The durable CAS evidence behind a folded grade — the text the bounded <c>AcceptanceEvidenceTail</c> is clipped from, and the only place a PASSING unit's oracle account survives (the tail rides the tape on failure only).</summary>
     private async Task<string> EvidenceTextAsync(Guid teamId, Guid? evidenceArtifactId)
     {

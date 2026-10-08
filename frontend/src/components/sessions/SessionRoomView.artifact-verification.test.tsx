@@ -71,6 +71,13 @@ describe("per-artifact / per-repository verification (P21)", () => {
     expect(screen.getByText("unanchored")).toBeInTheDocument();
   });
 
+  it("tags a check the grader could not isolate so its pass never reads as verified", () => {
+    render(<PrCard delivery={delivery({ verifications: [verification({ passed: true, oracleProtection: "Unverified" })] })} />);
+
+    expect(screen.getByText(/acceptance passed/)).toBeInTheDocument();
+    expect(screen.getByText("unverified")).toBeInTheDocument();
+  });
+
   it("notes an incomplete log WITHOUT hiding or flipping an otherwise-verified delivery", () => {
     render(<PrCard delivery={delivery({ verifications: [verification({ passed: true, logsComplete: false })] })} />);
 

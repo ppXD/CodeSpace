@@ -46,6 +46,9 @@ public class BenchmarkResultRecord : IEntity<Guid>, IAuditable
 
     public string? OutcomeDetail { get; set; }
 
+    /// <summary>The cell grade's oracle-integrity note (<c>BenchmarkGrade.OracleNote</c>) — an UNVERIFIED check, a voided judge tamper, a judge changed mid-check. Null when the grade owed none.</summary>
+    public string? OracleNote { get; set; }
+
     /// <summary>The agent run that executed the cell — provenance back to its event log. Null when the run was never created (a setup failure).</summary>
     public Guid? AgentRunId { get; set; }
 

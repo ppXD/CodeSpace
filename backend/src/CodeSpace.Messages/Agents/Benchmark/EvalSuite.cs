@@ -43,6 +43,9 @@ public sealed record CorpusCellOutcome
 
     /// <summary>The grade detail / infra error backing the state (best-effort, for the operator reading a table).</summary>
     public string? Detail { get; init; }
+
+    /// <summary>The grade's oracle-integrity note, when it owed one — a check the platform could not isolate, or a judge the cell touched. Null for an infra cell that was never graded.</summary>
+    public string? OracleNote { get; init; }
 }
 
 public enum CorpusCellState
@@ -68,6 +71,12 @@ public sealed record CorpusCellScore
     public required int Abstained { get; init; }
 
     public required int InfraUnknown { get; init; }
+
+    /// <summary>Of <see cref="Solved"/>, the cells whose check the grader could not isolate — a solve the platform cannot stand behind on its own. Counted apart, never subtracted: the headline still divides every solve by every cell.</summary>
+    public int SolvedUnverified { get; init; }
+
+    /// <summary>Cells, whatever their verdict, whose work touched their judge (a voided tamper, or a judge changed while the check ran).</summary>
+    public int TamperFlagged { get; init; }
 
     public int Total => Solved + Unsolved + Abstained + InfraUnknown;
 

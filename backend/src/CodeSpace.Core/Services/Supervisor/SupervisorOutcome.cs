@@ -763,6 +763,7 @@ public static class SupervisorOutcome
             // units whose agents carried no verdict; its already-graded guard now correctly skips these.
             AcceptancePassed = result?.AcceptancePassed,
             AcceptanceDetail = ClipCompactText(result?.AcceptanceDetail),
+            AcceptanceOracleNote = ClipCompactText(result?.AcceptanceOracleNote),
             AcceptanceEvidenceId = result?.AcceptanceEvidenceId,
             // C2: the capture's own health rides the compact, because the repo-less re-grade rebuilds its world from
             // the captured rows and cannot otherwise tell a storage fault (infra — a retry is wasted) from an agent

@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
+using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Supervisor;
@@ -436,7 +437,7 @@ public class SupervisorAcceptanceGraderTests
         var spec = new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "tests/" }, SetupCommand = new[] { "npm", "ci" } };
         await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, authored, Anchor("abc123def4567890"), CancellationToken.None);
 
-        runners.Invocations.Select(i => i.Command).ShouldBe(new[] { "git", "git", "git", "git", "npm" }, "fixture check: the oracle restore's git steps and the setup step all ran");
+        runners.Invocations.Select(i => i.Command).ShouldBe(new[] { "git", "git", "git", "git", "npm" }, "fixture check: the oracle restore's git steps and the setup step all ran (the setup changed nothing, so nothing is restored after it)");
         runners.Invocations.ShouldAllBe(i => i.TimeoutSeconds == expected, "the oracle restore and the setup step run under the bounded window");
         oracle.Context!.Task.TimeoutSeconds.ShouldBe(expected, "and so does the check");
     }
@@ -508,7 +509,7 @@ public class SupervisorAcceptanceGraderTests
         runners.Invocations[0].Args.ShouldBe(new[] { "diff", "--name-only", "abc123def4567890", "--", "tests/", "check.sh" });
         runners.Invocations[1].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/", "check.sh" });
         runners.Invocations[2].Args.ShouldBe(new[] { "diff", "--name-only", "--diff-filter=A", "abc123def4567890", "--", "tests/", "check.sh" });
-        runners.Invocations[3].Args.ShouldBe(new[] { "clean", "-fdq", "--", "tests/", "check.sh" }, "scoped to the protected paths, so it can never delete the candidate's real work");
+        runners.Invocations[3].Args.ShouldBe(new[] { "clean", "-fdxq", "--", "tests/", "check.sh" }, "scoped to the protected paths, so it can never delete the candidate's real work — and ignored files too, which a patch can plant there");
         runners.Invocations.ShouldAllBe(i => i.WorkingDirectory == "/tmp/clone-xyz", "restore acts on the SAME workspace the check grades");
 
         oracle.Context.ShouldNotBeNull("the oracle runs AFTER the restore — it grades the base's judge against the candidate's code");
@@ -684,6 +685,222 @@ public class SupervisorAcceptanceGraderTests
         await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, Anchor("abc123def4567890"), CancellationToken.None);
 
         runners.Invocations.ShouldBeEmpty("no probe, no restore — the deliverable is not the oracle");
+    }
+
+    // ── A derived judge's DIRECTORY is guarded, not restored whole: hooks put back, everything else kept and labelled ──
+
+    private static readonly SandboxResult Ok = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" };
+
+    private static SandboxResult Out(string stdout) => Ok with { Stdout = stdout };
+
+    [Fact]
+    public async Task A_derived_judge_in_a_subdirectory_restores_its_file_and_pins_its_untouched_directory()
+    {
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(Out("tests/check.py\n"));   // ls-tree: the base ships the judge
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = new[] { "python3", "tests/check.py" } }, 30, new OracleAnchor("abc123def4567890", new[] { "tests/check.py" }), CancellationToken.None);
+
+        runners.Invocations[2].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/check.py" }, "the judge's FILE is restored — never its whole directory, which can hold the candidate's honest work");
+        runners.Invocations[5].Args.ShouldBe(new[] { "diff", "--name-status", "--no-renames", "-z", "abc123def4567890", "--", "tests/" }, "the directory around it is compared with base");
+        runners.Invocations[6].Args.ShouldBe(new[] { "ls-files", "-o", "-z", "--", "tests/" }, "with every untracked file listed, whatever the candidate's .gitignore says");
+        oracle.Context!.PinnedOraclePaths.ShouldBe(new[] { "tests/" }, "nothing in the directory differs from base, so the runtime may treat it as the platform's");
+        grade.OracleNote.ShouldBeNull("an untouched judge directory reads clean");
+    }
+
+    [Fact]
+    public async Task Honest_work_beside_a_derived_judge_is_kept_and_the_grade_is_labelled_unverified()
+    {
+        // A co-located test's subject, an updated expected output, an added regression test: restoring them from base
+        // voided honest work no retry could ever pass. They stay the candidate's, and the grade says the judge may read them.
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(Out("src/test_calc.py\n"));                                               // ls-tree
+        for (var i = 0; i < 4; i++) runners.Script(Ok);                                            // diff, checkout, diff-filter=A, clean
+        runners.Script(Out("M\0src/calc.py\0A\0src/test_new.py\0"));                            // the directory's tracked differences
+        runners.Script(Out("src/notes.txt\0"));                                                  // and an untracked one
+        var oracle = new FakeGrader(Pass);
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, runners: runners);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = new[] { "python3", "src/test_calc.py" } }, 30, new OracleAnchor("abc123def4567890", new[] { "src/test_calc.py" }), CancellationToken.None);
+
+        runners.Invocations.Count.ShouldBe(7, "nothing in the directory is put back — no checkout follows the comparison");
+        oracle.Context!.PinnedOraclePaths.ShouldBe(new[] { "src/test_calc.py" }, "only the judge's own file is the platform's now");
+        grade.Passed.ShouldBeTrue();
+        grade.OracleNote!.ShouldStartWith(OracleRuntime.UnverifiedNoteMarker, Case.Sensitive);
+        grade.OracleNote.ShouldContain("src/calc.py, src/notes.txt, src/test_new.py");
+        grade.OracleNote.ShouldNotContain("TAMPER", Case.Sensitive, "editing the files beside a judge is not tampering with it");
+    }
+
+    [Fact]
+    public async Task A_hook_beside_a_derived_judge_is_put_back_an_added_one_discarded_an_edited_one_voided()
+    {
+        var clone = Path.Combine(Path.GetTempPath(), "cs-grade-hooks-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(clone, "tests"));
+        File.WriteAllText(Path.Combine(clone, "tests", "sitecustomize.py"), "planted");
+
+        try
+        {
+            var runners = new RecordingRunnerRegistry();
+            runners.Script(Out("tests/check.py\n"));                                             // ls-tree
+            for (var i = 0; i < 4; i++) runners.Script(Ok);                                        // restore steps
+            runners.Script(Out("M\0tests/conftest.py\0A\0tests/sitecustomize.py\0"));           // an edited hook and an added one
+            var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), handleDir: clone, runners: runners);
+
+            var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = new[] { "python3", "tests/check.py" } }, 30, new OracleAnchor("abc123def4567890", new[] { "tests/check.py" }), CancellationToken.None);
+
+            runners.Invocations[7].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/conftest.py" }, "the base's hook is put back");
+            File.Exists(Path.Combine(clone, "tests", "sitecustomize.py")).ShouldBeFalse("an added hook is gone before the check runs");
+            grade.OracleNote!.ShouldStartWith(OracleGuard.TamperNoteMarker, Case.Sensitive, "an edited hook is a change to platform bytes");
+            grade.OracleNote.ShouldContain("tests/conftest.py");
+            grade.OracleNote.ShouldContain("discarded: tests/sitecustomize.py", Case.Sensitive, "an addition is discarded, said neutrally");
+            grade.OracleNote.ShouldNotContain(OracleRuntime.UnverifiedNoteMarker, Case.Sensitive, "no candidate byte is left beside the judge");
+        }
+        finally
+        {
+            Directory.Delete(clone, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_subject_the_command_runs_from_inside_the_judges_directory_is_still_the_candidates_and_is_named()
+    {
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(Out("tests/check.sh\n"));                                                   // ls-tree
+        for (var i = 0; i < 4; i++) runners.Script(Ok);
+        runners.Script(Out("M\0tests/solution.sh\0"));                                            // the candidate's fix
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
+
+        var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "-c", "sh tests/check.sh && sh tests/solution.sh" } };
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, new OracleAnchor("abc123def4567890", new[] { "tests/check.sh" }), CancellationToken.None);
+
+        runners.Invocations[2].Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/check.sh" }, "the subject is never restored");
+        grade.Detail.ShouldEndWith(AcceptanceOracleProtection.SubjectDetailMarker + "tests/solution.sh", Case.Sensitive, "the pass still says it graded the candidate's own copy of the file it ran");
+    }
+
+    [Fact]
+    public async Task A_judge_directory_that_cannot_be_compared_fails_closed()
+    {
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(Out("tests/check.py\n"));
+        for (var i = 0; i < 4; i++) runners.Script(Ok);
+        runners.Script(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = "fatal: bad object" });
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass), runners: runners);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = new[] { "python3", "tests/check.py" } }, 30, new OracleAnchor("abc123def4567890", new[] { "tests/check.py" }), CancellationToken.None);
+
+        grade.Passed.ShouldBeFalse();
+        grade.Detail.ShouldStartWith("oracle-restore-failed:");
+        grade.Class.ShouldBe(GradeFailureClass.Environment);
+    }
+
+    // ── After the setup step and after the check, the judge's scope is compared with what it held just before ──
+
+    [Fact]
+    public async Task A_setup_step_that_rewrites_platform_owned_judge_bytes_is_voided_and_its_outputs_are_kept_and_reported()
+    {
+        var clone = Path.Combine(Path.GetTempPath(), "cs-grade-setup-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(clone, "tests"));
+        File.WriteAllText(Path.Combine(clone, "tests", "check.sh"), "judge\n");
+        File.WriteAllText(Path.Combine(clone, "tests", "case.sh"), "[ \"$(cat answer.txt)\" = 7 ]\n");
+
+        try
+        {
+            var runners = new RecordingRunnerRegistry
+            {
+                OnRun = spec =>
+                {
+                    if (spec.Command != "npm") return;
+
+                    File.WriteAllText(Path.Combine(clone, "tests", "case.sh"), "exit 0\n");          // the setup rewrites a base file beside the judge
+                    File.WriteAllText(Path.Combine(clone, "tests", "generated_case.sh"), "true\n");   // and builds an output there
+                    File.WriteAllText(Path.Combine(clone, "tests", "conftest.py"), "planted\n");      // and drops a hook
+                },
+            };
+            runners.Script(Out("tests/check.sh\n"));                                               // ls-tree
+            var oracle = new FakeGrader(Pass);
+            var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, handleDir: clone, runners: runners);
+
+            var spec = new SupervisorAcceptanceSpec { Command = new[] { "sh", "tests/check.sh" }, SetupCommand = new[] { "npm", "ci" } };
+            var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", spec, 30, new OracleAnchor("abc123def4567890", new[] { "tests/check.sh" }), CancellationToken.None);
+
+            runners.Invocations.Last().Args.ShouldBe(new[] { "checkout", "abc123def4567890", "--", "tests/case.sh" }, "only the platform-owned file the setup changed is put back");
+            File.Exists(Path.Combine(clone, "tests", "conftest.py")).ShouldBeFalse("a hook the setup dropped never reaches the check");
+            File.Exists(Path.Combine(clone, "tests", "generated_case.sh")).ShouldBeTrue("an honest setup output beside the judge is never silently deleted");
+            oracle.Context!.PinnedOraclePaths.ShouldBe(new[] { "tests/check.sh" }, "the directory now holds a byte the platform does not own");
+            grade.OracleNote!.ShouldContain("setup step changed platform-owned judge bytes", Case.Sensitive);
+            grade.OracleNote.ShouldContain("tests/case.sh");
+            grade.OracleNote.ShouldContain("discarded: tests/conftest.py", Case.Sensitive);
+            grade.OracleNote.ShouldContain(OracleRuntime.UnverifiedNoteMarker + "the setup step left files beside the judge, kept as written: tests/generated_case.sh", Case.Sensitive);
+        }
+        finally
+        {
+            Directory.Delete(clone, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_check_that_rewrites_its_platform_owned_judge_while_it_runs_loses_its_pass()
+    {
+        var clone = Path.Combine(Path.GetTempPath(), "cs-grade-midcheck-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(clone, "tests"));
+        File.WriteAllText(Path.Combine(clone, "tests", "check.sh"), "judge\n");
+        File.WriteAllText(Path.Combine(clone, "tests", "expected.txt"), "7\n");
+
+        try
+        {
+            var runners = new RecordingRunnerRegistry();
+            runners.Script(Out("tests/check.sh\n"));
+            var expected = Path.Combine(clone, "tests", "expected.txt");
+            var oracle = new FakeGrader(Pass) { OnGrade = _ => { File.Delete(expected); File.WriteAllText(expected, "6\n"); } };   // the seal is no lock: unlink and recreate
+            var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, handleDir: clone, runners: runners);
+
+            var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = new[] { "sh", "tests/check.sh" } }, 30, new OracleAnchor("abc123def4567890", new[] { "tests/check.sh" }), CancellationToken.None);
+
+            grade.Passed.ShouldBeFalse("the pass was decided against judge bytes that changed under it");
+            grade.Detail.ShouldBe(OracleGuard.ChangedDuringCheckDetail);
+            grade.OracleNote!.ShouldContain("tests/expected.txt");
+        }
+        finally
+        {
+            Directory.Delete(clone, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task A_restored_directory_is_pinned_with_a_trailing_slash_however_the_contract_spelled_it()
+    {
+        var clone = Path.Combine(Path.GetTempPath(), "cs-grade-pins-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(clone, "tests"));
+
+        try
+        {
+            var oracle = new FakeGrader(Pass);
+            var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), oracle, handleDir: clone, runners: new RecordingRunnerRegistry());
+
+            await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command, ProtectedPaths = new[] { "tests", "check.sh" } }, 30, Anchor("abc123def4567890"), CancellationToken.None);
+
+            oracle.Context!.PinnedOraclePaths.ShouldBe(new[] { "tests/", "check.sh" });
+        }
+        finally
+        {
+            Directory.Delete(clone, recursive: true);
+        }
+    }
+
+    [Fact]
+    public async Task An_integrity_note_and_the_checks_own_runtime_note_both_ride_the_grade()
+    {
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(Out("check.sh\n"));   // ls-tree
+        runners.Script(Out("check.sh\n"));   // diff: tampered
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "file:///r" }), new FakeGrader(Pass with { OracleNote = "oracle: UNVERIFIED (x)" }), runners: runners);
+
+        var grade = await grader.GradeAsync(Guid.NewGuid(), Guid.NewGuid(), "b", new SupervisorAcceptanceSpec { Command = Command }, 30, Anchor("abc123def4567890"), CancellationToken.None);
+
+        grade.OracleNote.ShouldStartWith("ORACLE TAMPER VOIDED", Case.Sensitive, "the tamper leads");
+        grade.OracleNote!.ShouldEndWith("; oracle: UNVERIFIED (x)", Case.Sensitive, "and the runtime's own note is kept beside it, never replaced");
     }
 
     // ── C3: the oracle's integrity travels ON the grade, not only in the evidence ────────────────────────
@@ -1044,12 +1261,15 @@ public class SupervisorAcceptanceGraderTests
     {
         // The literal is the wire value on durable receipts — a rename/bump is a re-qualification decision, not
         // an invisible refactor. Bump in the SAME PR as any grading-semantics change.
+        // v10: a derived judge's DIRECTORY is guarded (hooks put back, the candidate's other changes kept and labelled),
+        // compared again after the setup step and after the check (a pass whose platform-owned judge bytes changed is
+        // voided), and run under the isolated oracle runtime; a check it could not isolate says so.
         // v9: the setup and the check run under the PRODUCING run's posture (network, egress allowlist, memory/cpu
         // ceilings), narrow-only — a request with none grades network-off under the Confined ceilings; a check killed at
         // that ceiling is an Environment fact, and a setup the sandbox severed is decided by the posture.
         // v8: every grade step runs under a bounded window — a non-positive authored timeout grades at the default
         // instead of arming no wall clock, and a longer one is capped at SupervisorLane.MaxAcceptanceGradeTimeoutSeconds.
-        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v9");
+        SupervisorAcceptanceGrader.EvaluatorVersion.ShouldBe("supervisor-acceptance/v10");
     }
 
     [Fact]
@@ -1072,9 +1292,13 @@ public class SupervisorAcceptanceGraderTests
         public IReadOnlyList<ISandboxRunner> All => new ISandboxRunner[] { this };
         public string Kind => "local";
 
+        /// <summary>What a command "does" to the workspace, for the cases that need a step to move it.</summary>
+        public Action<SandboxSpec>? OnRun { get; init; }
+
         public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
         {
             Invocations.Add(spec);
+            OnRun?.Invoke(spec);
             return Task.FromResult(_scripted.Count > 0 ? _scripted.Dequeue() : new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = "", Stderr = "" });
         }
     }
@@ -1326,10 +1550,14 @@ public class SupervisorAcceptanceGraderTests
         public BenchmarkGradingKind ResolvedKind { get; set; }
         public BenchmarkGradingContext? Context { get; private set; }
 
+        /// <summary>What the "check" does to the graded tree while it runs, for the cases that need a check to move it.</summary>
+        public Action<BenchmarkGradingContext>? OnGrade { get; init; }
+
         public Task<BenchmarkGrade> GradeAsync(BenchmarkGradingContext context, CancellationToken cancellationToken)
         {
             Context = context;
             if (_throw != null) throw _throw;
+            OnGrade?.Invoke(context);
             return Task.FromResult(_grade!);
         }
     }

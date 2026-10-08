@@ -92,6 +92,34 @@ public class AcceptanceOracleProtectionTests
         AcceptanceOracleProtection.DeriveProtectedPaths(new[] { "  " }, OwnsEverythingAtBase, _ => true).ShouldBeEmpty();
     }
 
+    // ── The judge's scope: what a derived judge OWNS, which the grader restores whole ──
+
+    [Theory]
+    [InlineData("tests/check.py", "tests/")]           // a judge in a directory owns that directory — siblings, cases, hooks
+    [InlineData("ci/unit/run.sh", "ci/unit/")]
+    [InlineData("check.sh", "check.sh")]               // at the root its directory is the candidate's whole tree: only itself
+    public void A_judge_owns_its_directory_except_at_the_root(string program, string scope) =>
+        AcceptanceOracleProtection.JudgeScope(program).ShouldBe(scope);
+
+    [Theory]
+    [InlineData("tests/", "tests/check.py", true)]
+    [InlineData("tests/", "tests/unit/x.py", true)]
+    [InlineData("check.sh", "check.sh", true)]
+    [InlineData("tests/check.py", "tests/helpers.py", false)]   // a file pin covers that file only
+    [InlineData("tests", "tests/check.py", false)]              // no trailing slash ⇒ a file, never a directory
+    [InlineData("tests/", "testsuite/check.py", false)]         // a shared prefix is not containment
+    public void Covers_matches_a_file_or_anything_under_a_directory(string pinned, string path, bool expected) =>
+        AcceptanceOracleProtection.Covers(new[] { pinned }, path).ShouldBe(expected);
+
+    [Theory]
+    [InlineData("./tests/check.py", "tests/check.py")]
+    [InlineData("check.sh", "check.sh")]
+    [InlineData("make", null)]
+    [InlineData("/opt/ci/check.sh", null)]
+    [InlineData("../x.sh", null)]
+    public void A_token_names_a_repository_file_only_when_it_is_path_shaped_and_inside(string token, string? expected) =>
+        AcceptanceOracleProtection.RepoPath(token).ShouldBe(expected);
+
     private static string[] Argv(string spec) => spec.Split('|', StringSplitOptions.RemoveEmptyEntries);
 
     private static string[] Expected(string spec) => spec.Length == 0 ? Array.Empty<string>() : spec.Split(',');

@@ -1304,25 +1304,24 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             Ran = ran,
             Passed = ran ? result.AcceptancePassed : null,
             Detail = ClipVerificationDetail(result.AcceptanceDetail),
-            OracleProtection = ProtectionOf(result.AcceptanceDetail),
+            OracleProtection = ProtectionOf(result),
             EvidenceArtifactId = result.AcceptanceEvidenceId,
             LogsComplete = agentLogs.TryGetValue(result.AgentRunId, out var log) ? LogsAreComplete(log.Status) : null,
         };
     }
 
     /// <summary>
-    /// Reads the SAME Detail markers <see cref="AcceptanceOracleProtection.SubjectFilesIn"/> and
-    /// <see cref="AcceptanceOracleProtection.IsUnanchored"/> already decode for the decider prompt — never a
-    /// second definition of what they mean. <see cref="RoomOracleProtection.Unanchored"/> is defined but
-    /// unpopulated today: the grader writes the unanchored clause to <c>BenchmarkGrade.OracleNote</c>, which no
-    /// per-unit <c>AcceptanceDetail</c> producer copies onto <paramref name="detail"/> — so
-    /// <see cref="AcceptanceOracleProtection.IsUnanchored"/> never matches on real data and this resolves to
-    /// <see cref="RoomOracleProtection.None"/> in production.
+    /// Reads the SAME markers the supervisor decider prompt already decodes, never a second definition of what they mean:
+    /// the subject clause on the Detail (<see cref="AcceptanceOracleProtection.SubjectFilesIn"/>), then the grade's own
+    /// integrity note — a judge graded with nothing anchoring it (<see cref="AcceptanceOracleProtection.IsUnanchored"/>)
+    /// or a check the grader could not isolate (<see cref="AcceptanceOracleProtection.IsUnverified"/>). A voided tamper
+    /// alone weakens nothing: the base's judge decided that verdict.
     /// </summary>
-    private static RoomOracleProtection ProtectionOf(string? detail)
+    private static RoomOracleProtection ProtectionOf(SupervisorAgentResult result)
     {
-        if (AcceptanceOracleProtection.SubjectFilesIn(detail) is not null) return RoomOracleProtection.Subject;
-        if (AcceptanceOracleProtection.IsUnanchored(detail)) return RoomOracleProtection.Unanchored;
+        if (AcceptanceOracleProtection.SubjectFilesIn(result.AcceptanceDetail) is not null) return RoomOracleProtection.Subject;
+        if (AcceptanceOracleProtection.IsUnanchored(result.AcceptanceDetail) || AcceptanceOracleProtection.IsUnanchored(result.AcceptanceOracleNote)) return RoomOracleProtection.Unanchored;
+        if (AcceptanceOracleProtection.IsUnverified(result.AcceptanceOracleNote)) return RoomOracleProtection.Unverified;
 
         return RoomOracleProtection.None;
     }

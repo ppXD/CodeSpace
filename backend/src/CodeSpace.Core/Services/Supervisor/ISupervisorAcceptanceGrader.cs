@@ -59,7 +59,9 @@ public interface ISupervisorAcceptanceGrader
     /// files it names; anything else the check executes or reads can decide its exit code — a module beside a pinned
     /// script (a planted <c>json.py</c> flips a pinned <c>check.py</c>), test-runner config and plugins, manifest
     /// scripts. The verdict is only as independent as an oracle that neither executes nor imports candidate-controlled
-    /// files. Same per-kind oracles, same fail-closed posture.
+    /// files. Same per-kind oracles, same fail-closed posture. A tests-pass check here runs under the isolated oracle
+    /// runtime (<c>OracleRuntime</c>): inline python cannot be shadowed by a module in the directory, and any program
+    /// file the check runs is reported unverified on the grade's <c>OracleNote</c> rather than passing as clean.
     /// </summary>
     Task<BenchmarkGrade> GradeDirectoryAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken) =>
         Task.FromResult(new BenchmarkGrade { Passed = false, Detail = "grade-error: directory grading is not supported by this grader", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault });

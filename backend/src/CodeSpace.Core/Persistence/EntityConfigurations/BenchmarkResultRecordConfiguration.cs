@@ -21,6 +21,7 @@ public class BenchmarkResultRecordConfiguration : IEntityTypeConfiguration<Bench
         builder.Property(r => r.ObservationArm).HasMaxLength(40);
         builder.Property(r => r.OutcomeState).HasMaxLength(30);
         builder.Property(r => r.OutcomeDetail).HasColumnType("text");
+        builder.Property(r => r.OracleNote).HasColumnType("text");
         builder.Property(r => r.RunStatus).HasMaxLength(20);
         builder.Property(r => r.ExitReason).HasMaxLength(60);
         builder.Property(r => r.GitSha).HasMaxLength(60);

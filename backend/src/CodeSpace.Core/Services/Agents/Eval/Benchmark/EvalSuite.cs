@@ -102,6 +102,7 @@ public static class EvalSuite
                     // solve denominator instead of counting Unsolved against the model.
                     State = ClassifyResult(result),
                     Detail = result.Grade.Detail,
+                    OracleNote = result.Grade.OracleNote,
                 };
 
             return new CorpusCellOutcome
@@ -130,12 +131,14 @@ public static class EvalSuite
         foreach (var v in list) AppendField(builder, v);
     }
 
-    /// <summary>The fixed-denominator reduction — pure counting over the classified cells.</summary>
+    /// <summary>The fixed-denominator reduction — pure counting over the classified cells, plus the two oracle-integrity tallies a reader needs beside the headline (<see cref="CorpusCellScore.SolvedUnverified"/>, <see cref="CorpusCellScore.TamperFlagged"/>).</summary>
     public static CorpusCellScore Score(IReadOnlyList<CorpusCellOutcome> cells) => new()
     {
         Solved = cells.Count(c => c.State == CorpusCellState.Solved),
         Unsolved = cells.Count(c => c.State == CorpusCellState.Unsolved),
         Abstained = cells.Count(c => c.State == CorpusCellState.Abstained),
         InfraUnknown = cells.Count(c => c.State == CorpusCellState.InfraUnknown),
+        SolvedUnverified = cells.Count(c => c.State == CorpusCellState.Solved && Supervisor.AcceptanceOracleProtection.IsUnverified(c.OracleNote)),
+        TamperFlagged = cells.Count(c => Graders.OracleGuard.IsTamperFlagged(c.OracleNote)),
     };
 }
