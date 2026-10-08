@@ -25,11 +25,12 @@ namespace CodeSpace.UnitTests.Workflows;
 /// Pins the v1 GATE behaviour of <c>AgentRunExecutor.ReviewOutputIfEnabledAsync</c> — the 3rd critic application. With
 /// <see cref="ReviewMode.None"/> (the default) it is a pure passthrough that never calls the critic (byte-identical), and
 /// it self-skips a non-success or a no-diff run (a no-op / re-attach). When enabled, a DISAPPROVED change re-grades a
-/// would-be Succeeded run to <see cref="AgentRunStatus.NeedsReview"/> with a timeline warning; an approved verdict OR a
-/// failed review passes through unchanged (fail-open). Driven with a recording fake critic + the minimal run-service stub.
+/// would-be Succeeded run to <see cref="AgentRunStatus.NeedsReview"/> with a timeline warning; an approved verdict passes
+/// through unchanged, and a review that could not run holds the change for a human (output-unreviewed) instead of shipping
+/// it as a clean success. Driven with a recording fake critic + the minimal run-service stub.
 /// </summary>
 [Trait("Category", "Unit")]
-public sealed class AgentRunExecutorOutputReviewTests
+public sealed partial class AgentRunExecutorOutputReviewTests
 {
     [Fact]
     public async Task None_never_calls_the_critic_and_passes_through_byte_identical()
@@ -45,15 +46,37 @@ public sealed class AgentRunExecutorOutputReviewTests
     }
 
     [Fact]
-    public async Task A_non_succeeded_run_skips_the_review()
+    public async Task A_non_succeeded_run_with_work_is_never_reviewed_and_says_so()
+    {
+        // PROBE_R4 inverted: a self-reported Failed unit keeps its captured patch, the review never ran, and nothing on
+        // the result said so — every head door took the patch. The failure stays the run's own verdict; the result now
+        // says its change was never reviewed, which is what every door reads.
+        var (runId, executor, runs, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false });
+
+        var failed = SucceededWithChanges() with { Status = AgentRunStatus.Failed, ExitReason = "error_max_turns" };
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, failed, Run(runId), CancellationToken.None);
+
+        critic.Called.ShouldBeFalse("a non-success is not reviewed");
+        result.Status.ShouldBe(AgentRunStatus.Failed, "the failure is the run's own verdict — the review does not re-grade it");
+        result.ExitReason.ShouldBe("error_max_turns");
+        result.OutputReview.ShouldBe(OutputReviewState.Unreviewed, "its captured change was never reviewed, so no door may take it");
+        result.UnreviewedReason.ShouldNotBeNull().ShouldContain("ended Failed (error_max_turns)");
+        AgentOutputReviewHold.Withholds(result).ShouldBeTrue();
+        runs.AppendedEvents.ShouldBeEmpty("a failed run says it failed; it gains no second warning");
+    }
+
+    [Theory]
+    [InlineData(true, true)]     // the acceptance check rejected it: that verdict already withholds it at every door
+    [InlineData(false, false)]   // no change at all: nothing any door could take
+    public async Task A_non_succeeded_run_a_door_could_not_take_anyway_is_left_as_it_is(bool hasChange, bool acceptanceRejected)
     {
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = false });
 
-        var failed = SucceededWithChanges() with { Status = AgentRunStatus.Failed };
+        var failed = (hasChange ? SucceededWithChanges() : SucceededWithAnswer()) with { Status = AgentRunStatus.Failed, AcceptancePassed = acceptanceRejected ? false : null };
         var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, failed, Run(runId), CancellationToken.None);
 
-        critic.Called.ShouldBeFalse("a non-success has no produced change to gate");
-        result.Status.ShouldBe(AgentRunStatus.Failed);
+        critic.Called.ShouldBeFalse();
+        result.ShouldBeSameAs(failed);
     }
 
     [Fact]
@@ -78,32 +101,41 @@ public sealed class AgentRunExecutorOutputReviewTests
 
         critic.Called.ShouldBeTrue("a gated run with a diff IS reviewed");
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "an approved change stays a clean success");
+        result.OutputReview.ShouldBe(OutputReviewState.Approved, "the one state every door takes a reviewed unit's work at");
+        result.ShouldBe(input with { OutputReview = OutputReviewState.Approved }, "and the approval is the only thing added");
         runs.AppendedEvents.ShouldBeEmpty();
     }
 
-    [Fact]
-    public async Task A_failed_review_falls_open_to_the_original_success()
+    [Theory]
+    [InlineData(ReviewMode.Gate)]
+    [InlineData(ReviewMode.Improve)]
+    public async Task A_review_that_could_not_run_holds_the_change_for_a_human(ReviewMode mode)
     {
         var (runId, executor, runs, _) = NewExecutor(CriticVerdict.ReviewFailed(ReviewMode.Gate, "InvalidOperationException: the reviewer credential was revoked"));
 
-        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), GatedTask with { OutputReviewMode = mode }, SucceededWithChanges(), Run(runId), CancellationToken.None);
 
-        result.Status.ShouldBe(AgentRunStatus.Succeeded, "a failed review is never worse than no review — fail-open");
-        result.ExitReason.ShouldNotBe("output-flagged", "a review that did not run must not masquerade as a flag");
+        // This USED to fall open to Succeeded: the configured review never ran and the change shipped as a clean success,
+        // and the reviewed agent could choose when that happened (an oversized change makes the critic call fail). A
+        // configured review that produced no verdict is a change nobody examined — a human looks before anything consumes it.
+        result.Status.ShouldBe(AgentRunStatus.NeedsReview, "an unreviewable result is never a clean success while a review is configured");
+        result.CompletionDisposition.ShouldBe(CompletionDisposition.NeedsReview);
+        result.ExitReason.ShouldBe(AgentRunExecutor.OutputUnreviewedExitReason, "distinct from output-flagged: nothing objected, nothing examined it either");
+        result.ReviewFeedback.ShouldBeNull("a review that did not run has no findings to feed back");
+        result.UnreviewedReason.ShouldNotBeNull().ShouldContain("revoked", customMessage: "and the result says why, for the human it is held for");
+        result.OutputReview.ShouldBe(OutputReviewState.Unreviewed);
 
-        // 5.6 residual: the RESULT itself now carries the same fact — the only surface a STANDALONE run's result (no
-        // Room, no workflow ledger) ever exposes. Status/CompletionDisposition are unchanged (visibility, not
-        // punishment); a reader of the result alone can no longer read "Succeeded, no feedback" as "reviewed and clean".
-        result.UnreviewedReason.ShouldNotBeNullOrWhiteSpace("a reader of the result alone must be able to tell 'never reviewed' from 'reviewed and clean'");
-        result.UnreviewedReason.ShouldContain("revoked");
-
-        // D5 — this assertion USED to be `ShouldBeEmpty()`: the change shipped ungated and the lane said nothing. A
-        // STANDALONE run has no workflow ledger for the critic's review.skipped beat, so its own event stream is the
-        // only surface its operator reads. Fail-open is unchanged; the silence is not.
         runs.AppendedEvents.Count.ShouldBe(1);
         runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
         runs.AppendedEvents[0].Text.ShouldContain("Review skipped", customMessage: "the agent lane says the configured review did not run");
         runs.AppendedEvents[0].Text.ShouldContain("revoked", customMessage: "and says why, so the operator can act on it");
+    }
+
+    [Fact]
+    public void OutputUnreviewedExitReason_is_pinned()
+    {
+        // A durable exit reason: the Room, the node's retry verdict and the benchmark intervention proxy read it off stored results.
+        AgentRunExecutor.OutputUnreviewedExitReason.ShouldBe("output-unreviewed");
     }
 
     [Fact]
@@ -139,6 +171,7 @@ public sealed class AgentRunExecutorOutputReviewTests
         result.CompletionDisposition.ShouldBe(CompletionDisposition.NeedsReview);
         result.ExitReason.ShouldBe("output-flagged");
         result.ReviewFeedback.ShouldBe("incomplete Issues: no tests for the new path", "the critique persists on the result — WHY it was flagged, and the S6 Improve loop's food");
+        result.OutputReview.ShouldBe(OutputReviewState.Flagged);
 
         runs.AppendedEvents.Count.ShouldBe(1, "the operator gets a timeline warning explaining why it's flagged");
         runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
@@ -161,6 +194,17 @@ public sealed class AgentRunExecutorOutputReviewTests
         critic.Called.ShouldBeFalse("a pending decision defers to A1 — the output review never runs");
         result.Status.ShouldBe(AgentRunStatus.Succeeded, "the output review leaves the status for A1 to re-grade at completion");
         runs.AppendedEvents.ShouldBeEmpty();
+
+        // PROBE_R2 inverted: deferring used to leave NOTHING on the result, so an agent could skip its own review by
+        // raising a decision and waiting it out — the needs-decision unit then merged, published ledger-direct and
+        // integrated. The status is A1's; the fact that nothing reviewed the change is the result's.
+        result.OutputReview.ShouldBe(OutputReviewState.Unreviewed);
+        result.UnreviewedReason.ShouldBe(AgentRunExecutor.DecisionOpenUnreviewedReason);
+
+        var terminal = AgentCompletionContract.ApplyPendingDecision(result, Guid.NewGuid());
+
+        terminal.ExitReason.ShouldBe("needs-decision", "A1 still owns the status");
+        AgentOutputReviewHold.Withholds(terminal).ShouldBeTrue("and the hold survives A1's re-grade, onto the stored result every door reads");
     }
 
     [Fact]
@@ -307,7 +351,7 @@ public sealed class AgentRunExecutorOutputReviewTests
     [Fact]
     public async Task A_review_that_did_NOT_happen_records_no_verdict()
     {
-        // Fail-open: BOTH rungs failed to produce a verdict, so there is nothing to claim. The critic's own
+        // BOTH rungs failed to produce a verdict, so there is nothing to claim. The critic's own
         // review.skipped beat is the record of that, and inventing a verdict here would be the over-claim inverted.
         var (runId, executor, _, _, _, ledger) = NewExecutorWithStore(CriticVerdict.ReviewFailed(ReviewMode.Gate, "the reviewer credential was revoked"));
 
@@ -359,19 +403,26 @@ public sealed class AgentRunExecutorOutputReviewTests
     }
 
     [Fact]
-    public async Task A_failed_co_check_keeps_the_agent_approval()
+    public async Task A_failed_co_check_is_no_consensus_and_holds_the_change_unreviewed()
     {
-        var (runId, executor, runs, critic) = NewExecutor(
-            CriticVerdict.ReviewFailed(ReviewMode.Gate, "no reviewer model"),
+        // The reviewer agent reads the produced tree — the branch whose own CLAUDE.md / AGENTS.md its producer wrote — so
+        // its approval is exactly what an injection would forge, and the co-sign is the independent channel. A co-sign
+        // that could not run (one the producer can force, with an oversized diff) is not a second opinion that agreed:
+        // the approval stands alone, which is no consensus.
+        var (runId, executor, runs, critic, _, ledger) = NewExecutorWithStore(
+            CriticVerdict.ReviewFailed(ReviewMode.Gate, "LlmApiException: prompt is too long"),
             agentVerdict: new CriticVerdict { Mode = ReviewMode.Gate, Approved = true, Rationale = "looks complete" });
 
-        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, SucceededWithChanges(), Run(runId), CancellationToken.None);
+        var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AgentReviewedTask, SucceededWithChanges(), Run(runId, workflowRunId: Guid.NewGuid()), CancellationToken.None);
 
-        result.Status.ShouldBe(AgentRunStatus.Succeeded, "a broken co-check must not manufacture a flag — fail-open to the agent's approval");
-        result.UnreviewedReason.ShouldBeNull("the AGENT'S OWN verdict stood — a broken co-check is not the run going unreviewed");
+        result.Status.ShouldBe(AgentRunStatus.NeedsReview, "a lone agent approval is not consensus");
+        result.ExitReason.ShouldBe(AgentRunExecutor.OutputUnreviewedExitReason);
+        result.UnreviewedReason.ShouldNotBeNull().ShouldContain("co-check reached no verdict");
+        result.UnreviewedReason.ShouldContain("prompt is too long", customMessage: "the co-sign's own reason rides along");
+        ledger.Records.ShouldBeEmpty("no approved verdict is recorded for a review that reached no consensus — the Room's latest word must not read approved");
         critic.CallCount.ShouldBe(1);
         critic.ObservedRequest!.AgentRunId.ShouldBe(runId, "the D② co-sign's request names the reviewed unit, so its review.skipped beat groups with a later review.completed beat for the SAME run instead of falling back to the ledger cell");
-        runs.AppendedEvents.ShouldBeEmpty();
+        runs.AppendedEvents.ShouldHaveSingleItem().Text.ShouldContain("Review skipped");
     }
 
     [Fact]
@@ -448,14 +499,14 @@ public sealed class AgentRunExecutorOutputReviewTests
     }
 
     [Fact]
-    public async Task A_failed_review_of_a_text_only_answer_still_falls_open()
+    public async Task A_failed_review_of_a_text_only_answer_holds_it_for_a_human_too()
     {
         var (runId, executor, _, _) = NewExecutor(CriticVerdict.ReviewFailed(ReviewMode.Gate, "no reviewer model"));
 
         var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, SucceededWithAnswer(), Run(runId), CancellationToken.None);
 
-        result.Status.ShouldBe(AgentRunStatus.Succeeded, "the answer lane fails open like the diff lane — a review that could not run never manufactures a flag");
-        result.ExitReason.ShouldNotBe("output-flagged");
+        result.Status.ShouldBe(AgentRunStatus.NeedsReview, "the answer lane holds an unexamined answer exactly as the diff lane holds an unexamined change");
+        result.ExitReason.ShouldBe(AgentRunExecutor.OutputUnreviewedExitReason);
         result.UnreviewedReason.ShouldNotBeNullOrWhiteSpace("the answer lane says WHY just as the diff lane does");
     }
 
@@ -473,16 +524,17 @@ public sealed class AgentRunExecutorOutputReviewTests
     }
 
     [Fact]
-    public async Task A_deliverable_read_failure_degrades_to_the_summary_alone()
+    public async Task A_deliverable_read_failure_still_reviews_the_summary_but_cannot_approve_what_it_never_read()
     {
         var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true }, deliverables: Array.Empty<FakeDeliverable>(), deliverableReadThrows: true);
 
         var captured = SucceededWithAnswer() with { CapturedArtifactCount = 2 };
         var result = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), AnswerTask, captured, Run(runId), CancellationToken.None);
 
-        critic.Called.ShouldBeTrue("a storage fault must not cancel the review — the summary is still an answer");
+        critic.Called.ShouldBeTrue("a storage fault must not cancel the review — the summary is still an answer, and a flag on it would stand");
         critic.ObservedRequest!.Artifact.ShouldContain("Rust is memory-safe without a GC");
-        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        result.Status.ShouldBe(AgentRunStatus.NeedsReview, "the reviewer approved the summary; the two deliverables it never read are not approved by that");
+        result.ExitReason.ShouldBe(AgentRunExecutor.OutputUnreviewedExitReason);
     }
 
     [Fact]

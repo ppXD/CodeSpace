@@ -1231,8 +1231,11 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     /// <para>A WAIVED unit (<see cref="SupervisorOutcome.IsWaived"/>) is not a graded unit either, in EITHER direction:
     /// a human authorized forgoing its verification, so its executor-level grade — which can read FAILED, since the
     /// waive is what let the work through anyway — is not a rejection the card may report, and the waive is certainly
-    /// not a pass. Rejection is read through the ONE documented definition of withheld-from-head, with the waived arm
-    /// excluded explicitly, so this fold and every door to the head agree on what a refused unit is.</para>
+    /// not a pass, so the graded set excludes it before the rejection read.</para>
+    ///
+    /// <para>Rejection here is the ACCEPTANCE half of withheld-from-head only: the head doors also withhold a unit its
+    /// output review did not approve, but that is not a failed check, and this card answers "did the check pass?".
+    /// The review's own verdict reaches the Room through its review.completed / review.skipped beats.</para>
     ///
     /// <para>Pure; internal so it is unit-pinned directly.</para>
     /// </summary>
@@ -1243,7 +1246,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         if (graded.Count == 0) return (null, Array.Empty<string>());
 
         var failed = graded
-            .Where(r => SupervisorOutcome.IsWithheldFromHead(r) && !SupervisorOutcome.IsWaived(r))
+            .Where(r => r.AcceptancePassed == false)
             .Select(r => labels.TryGetValue(r.AgentRunId, out var label) ? label : UnnamedUnit)
             .ToList();
 

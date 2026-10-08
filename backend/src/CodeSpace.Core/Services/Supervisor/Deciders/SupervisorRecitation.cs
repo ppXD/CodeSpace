@@ -270,6 +270,10 @@ public static class SupervisorRecitation
     {
         // B2: a waived unit is named as waived — "done" alone would read as ordinary evidence (WAIVED ≠ PASSED).
         _ when SupervisorOutcome.IsWaived(result) => "verification WAIVED by a human — not objectively verified, withheld from the head",
+        // Read before the acceptance arms: a unit its output review did not approve is withheld whatever its check
+        // said, so "done (accepted)" would recite a finished item the head will never take.
+        _ when !string.IsNullOrWhiteSpace(result.ReviewFeedback) => "FLAGGED by its output review — withheld from the head; RETRY this subtask against the review findings shown with its result",
+        _ when SupervisorOutcome.IsOutputReviewWithheld(result) => "its configured output review could NOT examine it — withheld from the head; retry it only if the attempt kept the review from running, else ask a human to review it",
         // F1 has NO arm here on purpose. The deployment-ended state is answered by StateFor, this method's ONLY
         // caller, before it delegates — so a second arm would be unreachable, and an unreachable copy of a rendered
         // sentence is exactly how two surfaces drift into saying different things about one row. The infra arms
@@ -312,6 +316,13 @@ public static class SupervisorRecitation
     private static string OracleNoteClause(SupervisorAgentResult result) =>
         result.AcceptanceOracleNote is { Length: > 0 } note ? $" — {AcceptanceOracleProtection.OracleNoteClausePhrase(Truncate(note))}" : "";
 
-    private static string Truncate(string? detail) =>
-        string.IsNullOrWhiteSpace(detail) ? "no detail" : detail.Length <= 160 ? detail : detail[..160] + "…";
+    /// <summary>A detail as one recited clause: at most 160 characters, on ONE line — an agent-reported error rides here too, and a break inside it would start a line of the recitation's own.</summary>
+    private static string Truncate(string? detail)
+    {
+        if (string.IsNullOrWhiteSpace(detail)) return "no detail";
+
+        var line = AgentReportedText.OneLine(detail);
+
+        return line.Length <= 160 ? line : line[..160] + "…";
+    }
 }

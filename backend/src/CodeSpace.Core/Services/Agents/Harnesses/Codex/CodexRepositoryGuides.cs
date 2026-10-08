@@ -56,6 +56,7 @@ internal static partial class CodexRepositoryGuides
 
     public static Plan For(AgentTask task)
     {
+        if (task.ExcludeRepositoryInstructions) return None;
         if (!OperatingSystem.IsLinux() && !OperatingSystem.IsMacOS()) return None;
 
         var repositories = RepositoriesBelow(task);

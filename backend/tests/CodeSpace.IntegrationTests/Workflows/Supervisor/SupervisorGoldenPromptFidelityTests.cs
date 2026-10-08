@@ -631,7 +631,20 @@ public class SupervisorGoldenPromptFidelityTests
     /// it) by the re-pin receipt above — a digest whose predecessor is deleted can only ever be compared with itself.</para>
     /// </summary>
     /// <remarks>
-    /// THIS RE-PIN: the prompt gained the OPERATOR ACCEPTANCE FLOOR block — the argv the server runs on every branch a
+    /// THIS RE-PIN: every unit's agent-reported text — its closing summary, or the error its harness reported — moved
+    /// off the one raw line it shared with the unit's status and behind the data prefix the oracle's evidence tail
+    /// already used (<c>        | </c>), under a header that names it agent-reported data
+    /// (<c>LlmSupervisorDecider.RenderAgentReport</c>). Rendered raw, a summary could restage the server's own
+    /// "acceptance PASSED" verdict line, or a "(server)" directive, at the verdict indent above the genuine verdict;
+    /// every break a model reads as a new line now starts a fenced line instead.
+    ///
+    /// <para>The moved bytes are attributed, not claimed: <see cref="Only_the_agent_reported_text_moved_behind_the_fence"/>
+    /// winds the fence back (<see cref="AsReportedBeforeTheFence"/>, which takes the new block from the renderer) and
+    /// requires <see cref="PreAgentReportFenceCorpusDigest"/> over all 29 scenarios, and every older anchor routes through
+    /// the same wind-back inside <see cref="AsRenderedBeforeTheTurnRoster"/> and the floor receipt. No verdict line, steer
+    /// or roster moved; only where an agent's own words sit.</para>
+    ///
+    /// PREVIOUS RE-PIN: the prompt gained the OPERATOR ACCEPTANCE FLOOR block — the argv the server runs on every branch a
     /// stop ships (<see cref="SupervisorTurnContext.AcceptanceChecks"/>) — rendered right after the acceptance-criteria
     /// block by <c>LlmSupervisorDecider.AppendOperatorAcceptanceFloor</c>, and ONLY when the context carries one. Until
     /// now the brain drove every run blind to the one check that decides it: a failing floor withholds those branches and
@@ -776,7 +789,15 @@ public class SupervisorGoldenPromptFidelityTests
     /// (<c>merge</c>, run 34085079257 at 24/25). <see cref="Exactly_the_amendable_tapes_offer_the_amend_verb"/>
     /// pins which rosters offer it — the set was EMPTY across all 25 before that change.</para>
     /// </remarks>
-    private const string GoldenPromptDigest = "6b9c621bf49c7e5858a1289f62581319c3974d8f86cab3272c54d1574084c893";
+    private const string GoldenPromptDigest = "6586d47c358c273cb04fe0b662473382a09fe4058916fb8c96e18c1bcc79a946";
+
+    /// <summary>
+    /// The pin this corpus carried while each unit's closing summary (or reported error) rendered RAW on its
+    /// <c>agent {k}:</c> line. Superseded, never deleted: <see cref="Only_the_agent_reported_text_moved_behind_the_fence"/>
+    /// winds the fence back over today's rendering and requires this digest over all 29 scenarios, so the fence is
+    /// the ONLY thing the re-pin moved.
+    /// </summary>
+    private const string PreAgentReportFenceCorpusDigest = "6b9c621bf49c7e5858a1289f62581319c3974d8f86cab3272c54d1574084c893";
 
     /// <summary>
     /// The pin this corpus carried while the operator's acceptance floor never reached the prompt: the decider read
@@ -1118,7 +1139,7 @@ public class SupervisorGoldenPromptFidelityTests
         moved.ShouldBe(CarriesAnOperatorFloor.ToList(), ignoreOrder: true,
             "the set of scenarios whose prompt moved must match the named receipt — a tape whose floor the block did not render, or a tape that gained the block without one, is a re-pin nobody attributed");
 
-        Digest(RenderedCorpus(FloorWithheld)).ShouldBe(PreOperatorFloorCorpusDigest,
+        Digest(RenderedCorpus(s => AsReportedBeforeTheFence(FloorWithheld(s), s.Context))).ShouldBe(PreOperatorFloorCorpusDigest,
             "with every floor withheld the corpus must digest to the pin it carried before the block existed — anything else drifted into the same commit, so the move is then not the floor block alone");
 
         var carrier = SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == "repeat-failure-under-a-declared-check");
@@ -1131,6 +1152,29 @@ public class SupervisorGoldenPromptFidelityTests
             "the tape that carries the floor shows the model that floor's block — present, and not merely some other byte moved");
         withFloor.Replace(block, string.Empty, StringComparison.Ordinal).ShouldBe(FloorWithheld(carrier),
             "the carrier's prompt minus the block's own lines must be exactly its floor-withheld prompt — so the block is the ONLY thing that moved");
+    }
+
+    /// <summary>
+    /// The named receipt for <see cref="GoldenPromptDigest"/>'s move: agent-reported text moved behind the fence and
+    /// nothing else moved. With the fence wound back the corpus must digest to <see cref="PreAgentReportFenceCorpusDigest"/>
+    /// — the pin before the fence — and the scenarios whose prompt moved must be exactly the ones whose rendered tape
+    /// carries an agent's summary or reported error.
+    /// </summary>
+    [Fact]
+    public void Only_the_agent_reported_text_moved_behind_the_fence()
+    {
+        Digest(RenderedCorpus(s => AsReportedBeforeTheFence(LlmSupervisorDecider.BuildUserPromptForTest(s.Context), s.Context))).ShouldBe(PreAgentReportFenceCorpusDigest,
+            "with the fence wound back the corpus must digest to the pin it carried before the fence — anything else drifted into the same commit");
+
+        var moved = SupervisorDecisionGoldenScenarios.All.Where(s => LlmSupervisorDecider.BuildUserPromptForTest(s.Context) is var prompt && prompt != AsReportedBeforeTheFence(prompt, s.Context)).Select(s => s.Name).ToList();
+        var carriers = SupervisorDecisionGoldenScenarios.All.Where(s => s.Context.PriorDecisions
+                .Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind))
+                .SelectMany(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson))
+                .Any(r => !string.IsNullOrWhiteSpace(r.Error) || !string.IsNullOrWhiteSpace(r.Summary)))
+            .Select(s => s.Name).ToList();
+
+        moved.ShouldNotBeEmpty("fixture check: the corpus carries agent-reported text, or this receipt proves nothing");
+        moved.ShouldBe(carriers, ignoreOrder: true, "the fence moves exactly the tapes that carry agent-reported text, and no other");
     }
 
     /// <summary>One scenario's prompt with its operator floor withheld — what every prompt read before the floor reached the brain, since the decider rendered the free-text criteria and never this field.</summary>
@@ -1249,6 +1293,8 @@ public class SupervisorGoldenPromptFidelityTests
     ///   <item>the per-unit MODEL/TOKEN/COST recitation, removed because it did not exist when any superseded digest
     ///         was recorded.</item>
     ///   <item>the clean-integration merge mask and closing sentence, restored to their prior offer.</item>
+    ///   <item>each unit's agent-reported text, back on the one raw line it rendered as before the fence
+    ///         (<see cref="AsReportedBeforeTheFence"/>).</item>
     /// </list>
     /// It exists because the roster renders on EVERY turn where the mask rendered on most, so a superseded digest
     /// recomputed over today's raw rendering can no longer reproduce itself, and every receipt below would have to
@@ -1271,6 +1317,8 @@ public class SupervisorGoldenPromptFidelityTests
     /// </summary>
     private static string AsRenderedBeforeTheTurnRoster(string prompt, SupervisorTurnContext context)
     {
+        prompt = AsReportedBeforeTheFence(prompt, context);
+
         var roster = $"{Environment.NewLine}{SupervisorActionRoster.Render(context)}{Environment.NewLine}";
         var mask = AsMaskedBeforeTheAmendArm(context) is { } withheld ? $"{Environment.NewLine}{withheld}{Environment.NewLine}" : string.Empty;
         var unitCosts = SupervisorBudgetRecitation.RenderUnits(context.PriorDecisions, context.ModelPrices);
@@ -1293,6 +1341,25 @@ public class SupervisorGoldenPromptFidelityTests
             .Replace(LlmSupervisorDecider.ClosingReconcileBeforeLanding, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal)
             .Replace(LlmSupervisorDecider.ClosingAlreadyIntegrated, LlmSupervisorDecider.ClosingLandsWithAMerge, StringComparison.Ordinal);
     }
+
+    /// <summary>
+    /// One scenario's prompt with every unit's agent-reported text back on the ONE raw line it rendered as before the
+    /// fence (<c>    agent {k}: {Status} — {error: …|summary|(no summary)}</c>). The fenced block is taken FROM the
+    /// decider's own renderer (<see cref="LlmSupervisorDecider.RenderAgentReport"/>) and the old line is frozen HISTORY
+    /// — the bytes every superseded digest was taken over — so a reword of the live header stays a one-file change and
+    /// can never silently move a superseded pin.
+    /// </summary>
+    private static string AsReportedBeforeTheFence(string prompt, SupervisorTurnContext context)
+    {
+        foreach (var results in context.PriorDecisions.Where(d => SupervisorDecisionKinds.StagesAgents(d.DecisionKind)).Select(d => SupervisorOutcome.ReadAgentResults(d.OutcomeJson)))
+            for (var k = 0; k < results.Count; k++)
+                prompt = prompt.Replace(LlmSupervisorDecider.RenderAgentReport(k, results[k]), ReportedBeforeTheFence(k, results[k]), StringComparison.Ordinal);
+
+        return prompt;
+    }
+
+    private static string ReportedBeforeTheFence(int index, SupervisorAgentResult result) =>
+        $"    agent {index}: {result.Status} — {(!string.IsNullOrWhiteSpace(result.Error) ? $"error: {result.Error}" : !string.IsNullOrWhiteSpace(result.Summary) ? result.Summary : "(no summary)")}{Environment.NewLine}";
 
     /// <summary>The action mask as it rendered before <c>amend_acceptance</c> and the clean-frontier <c>merge</c> arm joined the verbs it can withhold: resolve's line alone, or NOTHING when resolve was available. Derived by deleting the later lines from today's render rather than restating the old format, so a reworded resolve reason stays a one-file change.</summary>
     private static string? AsMaskedBeforeTheAmendArm(SupervisorTurnContext context)

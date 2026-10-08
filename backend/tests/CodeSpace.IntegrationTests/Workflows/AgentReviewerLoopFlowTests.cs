@@ -54,6 +54,12 @@ public sealed class AgentReviewerLoopFlowTests
         using var reviewerCli = new ReviewVerdictFakeCli();   // the REVIEWER binary (codex-cli lane)
 
         var (teamId, userId) = await SeedTeamAsync();
+
+        // The D② co-sign's model: an approving agent verdict counts only with an independent model co-check beside it,
+        // and a co-sign with no reviewer model to run on is no consensus — the change would be held unreviewed.
+        await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "critic-model", provider: DeterministicCriticLlmClient.ProviderTag);
+        ResetCriticScript();
+
         using var remote = new BareRemote();
         await remote.SeedBaseAsync();
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
@@ -84,6 +90,8 @@ public sealed class AgentReviewerLoopFlowTests
         var reviewDiagnostics = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, teamId, afterSequence: 0, CancellationToken.None);
         result.ReviseRounds.ShouldBe(1, "the agent reviewer's disapproval bought exactly one revise round; recorded events: " + string.Join("\n", reviewDiagnostics.Select(item => item.Text)));
         result.ReviewFeedback.ShouldBeNull("the final review APPROVED — no flag stands");
+        result.UnreviewedReason.ShouldBeNull("the approval had its consensus: the model co-sign read the revised change and agreed");
+        CriticCalls().ShouldBe(1, "the co-sign ran exactly once — on the approving round; the disapproving round needed none");
 
         (await remote.BranchFileContentAsync(AgentRunExecutor.BuildBranchName(runId), "feature.txt"))
             .ShouldContain("revised clean", customMessage: "the re-pushed branch tip carries the healed work the reviewer approved");

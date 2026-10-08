@@ -159,6 +159,24 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     /// </summary>
     private const string SkipGitRepoCheck = "--skip-git-repo-check";
 
+    /// <summary>
+    /// The <c>-c</c> override that loads NO project doc — Codex reads an <c>AGENTS.md</c> (or <c>AGENTS.override.md</c>)
+    /// from its cwd and every directory above it to the repository root, and a project doc limit of zero turns that walk
+    /// off while <c>CODEX_HOME/AGENTS.md</c>, which carries the persona and the operating contract, still loads — both
+    /// halves measured against the binary by the sandbox lane's <c>RepositoryConfigE2ETests.A_review_task_loads_none_of_the_reviewed_branchs_instruction_files</c>,
+    /// which fails on any binary that is not the pin. Pinned by a test (Rule 8): the key is the CLI's.
+    /// </summary>
+    public const string NoProjectDocOverride = "project_doc_max_bytes=0";
+
+    /// <summary>A task that loads no repository instructions (<see cref="AgentTask.ExcludeRepositoryInstructions"/> — an output reviewer, whose cwd is the branch under review) gets <see cref="NoProjectDocOverride"/>, so the reviewed agent's own <c>AGENTS.md</c> never instructs its reviewer; every other task is byte-identical.</summary>
+    private static void AppendRepositoryInstructionExclusion(List<string> args, AgentTask task)
+    {
+        if (!task.ExcludeRepositoryInstructions) return;
+
+        args.Add("-c");
+        args.Add(NoProjectDocOverride);
+    }
+
     public SandboxSpec BuildInvocation(AgentTask task)
     {
         EnsureWithinInputCap(task.Goal);
@@ -193,6 +211,7 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
         AppendModelProviderConfig(args, task);
         AppendTelemetryConfig(args, task);
         AppendWorkspaceDistrust(args, task);
+        AppendRepositoryInstructionExclusion(args, task);
 
         // P3.3: Codex's default hook trust-review flow requires an interactive decision before a NON-managed command
         // hook may run — a freshly generated per-run hook has no persisted trust record, and there is no human at a

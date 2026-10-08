@@ -28,8 +28,8 @@ namespace CodeSpace.E2ETests.Workflows;
 /// <summary>
 /// 🟢 THE non-coding closed-loop E2E (triad S7 × S6) — a RESEARCH deliverable healed by the RUBRIC JUDGE through
 /// the in-run revise loop, end to end through the REAL engine: the standard tier's planner authors ONE research
-/// item whose acceptance is an <c>LlmJudge</c> contract (deliverable path + one-criterion rubric + pinned judge
-/// row), the map fans out a real agent whose FIRST attempt writes a report that flunks the rubric (no
+/// item whose acceptance is an <c>LlmJudge</c> contract (deliverable path + one-criterion rubric; the judge row the
+/// planner names is stripped, and the team's default row judges), the map fans out a real agent whose FIRST attempt writes a report that flunks the rubric (no
 /// <c>MEETS[healed]</c> marker), the executor's oracle gate runs the REAL <c>LlmRubricJudge</c> against the run's
 /// RECORDED PATCH, the failure detail — naming the unmet criterion — feeds the S6 revise round, the revision writes
 /// the satisfying content, the re-recorded patch RE-JUDGES to a pass, and the run lands Success with the checklist
@@ -64,12 +64,17 @@ public sealed class RubricReviseFanoutE2ETests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
         var (_, judgeRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "judge-model", provider: DeterministicJudgeLlmClient.ProviderTag);
+        await MakeTeamDefaultAsync(judgeRowId);
 
         using (var knob = _fixture.BeginScope())
         {
             var script = knob.Resolve<WorkPlanPlanScript>();
             script.AuthorRubricContract = true;
-            script.RubricJudgeModelId = judgeRowId;   // the fake can't know the seeded row — the test pins it
+
+            // The planner names a judge row of its own — its OWN model, whose fake answers plans and can grade nothing.
+            // A model-authored pin is stripped at the planner's acceptance boundary, so the judge resolves the
+            // operator's choice instead: the team's default row, marked above.
+            script.RubricJudgeModelId = plannerRowId;
         }
 
         try
@@ -164,6 +169,16 @@ public sealed class RubricReviseFanoutE2ETests
     }
 
     // ─── Seeding / plumbing ──────────────────────────────────────────────────
+
+    /// <summary>The operator's choice of judge: the team's default row leads the independence-aware auto pick.</summary>
+    private async Task MakeTeamDefaultAsync(Guid modelRowId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        (await db.ModelCredentialModel.SingleAsync(m => m.Id == modelRowId)).IsDefault = true;
+        await db.SaveChangesAsync();
+    }
 
     private async Task<Guid> SeedBoundRepositoryAsync(Guid teamId, string cloneUrlHttps)
     {

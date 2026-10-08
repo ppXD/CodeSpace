@@ -101,6 +101,9 @@ public sealed class WorkflowResumeAgentRunCompletionNotifier : IAgentRunCompleti
             // for PR-open, NEVER the raw per-repo diff, exactly as it already excludes the top-level patch.
             repositoryResults = result?.RepositoryResults?.Select(r => r.WithoutDiff()).ToList(),
             changeSetId = result?.ChangeSetId,
+            // Why a configured output review never examined this result in full — the node refuses to hand the branch
+            // and change set above to a PR-open or change-set node while it is set.
+            unreviewedReason = result?.UnreviewedReason,
             error = result?.Error ?? run.Error,
             // WHY the run ended (e.g. the fail-closed "acceptance-failed" re-grade) — the machine-readable half the
             // node's retry verdict keys on: a deterministic verdict failure must not be respawned as if transient.

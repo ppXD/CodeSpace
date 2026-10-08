@@ -89,7 +89,8 @@ internal sealed record PlannerAcceptanceDraft
 
         if (defect is not null) return null;
 
-        var spec = new SupervisorAcceptanceSpec { Kind = kind, Command = payload!.ToArray(), OraclePaths = OraclePaths?.ToArray(), Description = Description, Rubric = Rubric, Schema = Schema };   // non-empty: the walk above passed
+        // The rubric binds WITHOUT its judge pin: an operator knob the wire schema never offers (AcceptanceRubric.WithoutJudgePin).
+        var spec = new SupervisorAcceptanceSpec { Kind = kind, Command = payload!.ToArray(), OraclePaths = OraclePaths?.ToArray(), Description = Description, Rubric = AcceptanceRubric.WithoutJudgePin(Rubric), Schema = Schema };   // non-empty: the walk above passed
 
         // ArtifactPresent's OWN companion (P2.6 — validated as whichever content oracle it pairs with, even though
         // the spec's Kind itself stays ArtifactPresent here: ReconcileArtifactPresent is the one place that PROMOTES

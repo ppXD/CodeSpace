@@ -21,6 +21,13 @@ public sealed record AcceptanceRubric
     /// <summary>The credentialed-model ROW the judge runs on. Null ⇒ the team's strongest structured-eligible model (the same auto-pick the critics use). <c>[JsonIgnore(WhenWritingNull)]</c>.</summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Guid? JudgeModelId { get; init; }
+
+    /// <summary>
+    /// The rubric a MODEL authored, as it may bind: everything it wrote except <see cref="JudgeModelId"/>, which is an
+    /// operator knob — a pinned judge row bypasses the independence-aware auto pick, so a model-authored rubric could
+    /// choose its own judge (the producer's model, say). Null stays null; a rubric with no pin is returned as is.
+    /// </summary>
+    public static AcceptanceRubric? WithoutJudgePin(AcceptanceRubric? rubric) => rubric is { JudgeModelId: not null } ? rubric with { JudgeModelId = null } : rubric;
 }
 
 /// <summary>One rubric criterion: a stable id (the verdict joins back on it), the requirement the judge tests, and its relative weight.</summary>

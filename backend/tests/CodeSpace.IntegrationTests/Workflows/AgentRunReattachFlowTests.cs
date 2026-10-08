@@ -338,6 +338,88 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The re-attach terminal path graded and completed a run without ever calling its configured output review, so a
+    /// run that finished across a worker restart landed Succeeded and ungated — the crash chose whether the review ran.
+    /// A finished process is staged in its spool beside a REAL git clone holding the agent's change; the re-attach
+    /// captures that change and the production critic (the fixture's honest TestCritic row, pinned) reviews it.
+    /// </summary>
+    [Theory]
+    [InlineData(true, AgentRunStatus.NeedsReview, OutputReviewState.Flagged)]
+    [InlineData(false, AgentRunStatus.Succeeded, OutputReviewState.Approved)]
+    public async Task A_re_attached_run_is_held_to_its_configured_output_review(bool flawed, AgentRunStatus expected, OutputReviewState expectedReview)
+    {
+        if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
+
+        var teamId = await SeedTeamAsync();
+        var (_, reviewerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "critic-model", provider: DeterministicCriticLlmClient.ProviderTag);
+        var runId = await CreateReviewedRunAsync(teamId, reviewerRowId);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        var (clone, baseSha) = await NewCloneAsync();
+        await File.WriteAllTextAsync(Path.Combine(clone, "auth.txt"), flawed ? $"grant admin  # {DeterministicCriticLlmClient.RejectMarker}\n" : "grant nothing\n");
+
+        var spoolDir = NewSpoolDir();
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "out.log"), "changed the auth check\n");
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "exit"), "0");
+
+        var handle = new SandboxHandle { Kind = "local", ProcessId = 2147480011, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow.AddMinutes(10), WorkspaceDirectory = clone, WorkspaceBaseSha = baseSha };
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+
+        await LapseLeaseAsync(runId);
+        using (var scope = _fixture.BeginScope())
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None)).ShouldNotBeNull();
+
+        await ReattachAsync(runId, new ScriptedHarness());
+
+        using var verify = _fixture.BeginScope();
+        var run = await verify.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+
+        result.ChangedFiles.ShouldContain("auth.txt", customMessage: "fixture check: the re-attach captured the agent's change");
+        run.Status.ShouldBe(expected, "the re-attached run is judged by its configured review exactly like a live one");
+        result.OutputReview.ShouldBe(expectedReview);
+    }
+
+    private async Task<Guid> CreateReviewedRunAsync(Guid teamId, Guid reviewerRowId)
+    {
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
+        var task = new AgentTask { Goal = "harden the auth check", Harness = "scripted", Model = "test-model", TimeoutSeconds = 1800, OutputReviewMode = ReviewMode.Gate, ReviewerModelId = reviewerRowId };
+
+        return (await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+    }
+
+    /// <summary>A real git repository with one base commit — the clone a re-attach captures the agent's change from — and that commit's sha.</summary>
+    private async Task<(string Directory, string BaseSha)> NewCloneAsync()
+    {
+        var clone = NewSpoolDir();
+
+        await GitAsync(clone, "init", "-q");
+        await GitAsync(clone, "config", "user.email", "test@codespace.dev");
+        await GitAsync(clone, "config", "user.name", "Test");
+        await GitAsync(clone, "config", "commit.gpgsign", "false");
+        await File.WriteAllTextAsync(Path.Combine(clone, "base.txt"), "base\n");
+        await GitAsync(clone, "add", "-A");
+        await GitAsync(clone, "commit", "-qm", "base");
+
+        return (clone, (await GitAsync(clone, "rev-parse", "HEAD")).Trim());
+    }
+
+    private static async Task<string> GitAsync(string directory, params string[] args)
+    {
+        var result = await new LocalProcessRunner().RunAsync(new SandboxSpec { Command = "git", Args = args, WorkingDirectory = directory, TimeoutSeconds = 60 }, CancellationToken.None);
+
+        return result.Status == SandboxStatus.Success ? result.Stdout : throw new InvalidOperationException($"git {string.Join(' ', args)} failed: {result.Stderr}");
+    }
+
+    private static async Task<bool> GitAvailableAsync()
+    {
+        try { return (await new LocalProcessRunner().RunAsync(new SandboxSpec { Command = "git", Args = new[] { "--version" }, TimeoutSeconds = 10 }, CancellationToken.None)).Status == SandboxStatus.Success; }
+        catch { return false; }
+    }
+
     [Fact]
     public async Task A_fully_checkpointed_reattach_is_a_log_no_op()
     {

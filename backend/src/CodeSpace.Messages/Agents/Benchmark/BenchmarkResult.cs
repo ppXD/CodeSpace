@@ -50,7 +50,7 @@ public sealed record BenchmarkResult
     /// <summary>How many bounded revise rounds the executor ran inside this run (<c>AgentRunResult.ReviseRounds</c>). In a critic-on arm this is the retry a critic flag bought; 0 in a critic-off arm. The retry-share disclosure that keeps an A/B honest — a solve-rate lift riding on extra attempts is visible here, not hidden.</summary>
     public int ReviseRounds { get; init; }
 
-    /// <summary>The run's terminal <c>AgentRunResult.ExitReason</c>. Scopes an intervention proxy to the CRITIC-flag path (<c>"output-flagged"</c>) so it is never conflated with the arm-symmetric <c>"stalled"</c> harness-noise path. Null when the run recorded no result (a setup/infra failure before completion).</summary>
+    /// <summary>The run's terminal <c>AgentRunResult.ExitReason</c>. Scopes an intervention proxy to the CRITIC-flag path (<c>"output-flagged"</c>) so it is never conflated with the arm-symmetric <c>"stalled"</c> harness-noise path, and tells a flag from a result held because its review could not examine it (<c>"output-unreviewed"</c>) — a hold with no judgement behind it. Null when the run recorded no result (a setup/infra failure before completion).</summary>
     public string? ExitReason { get; init; }
 
     /// <summary>

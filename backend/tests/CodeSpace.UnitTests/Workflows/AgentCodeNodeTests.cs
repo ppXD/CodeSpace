@@ -537,6 +537,24 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public async Task A_succeeded_result_its_configured_review_never_examined_hands_no_branch_downstream()
+    {
+        // The executor holds such a result at NeedsReview; a Succeeded payload still naming an unreviewed reason is an
+        // older row or a path that re-graded past the hold. Its branch and change set are exactly what a git.open_pr /
+        // git.open_change_set node downstream would bind, so the node refuses to emit them.
+        var resume = JsonDocument.Parse("""
+            {"status":"Succeeded","summary":"Fixed it.","branch":"codespace/agent/x","repositoryResults":[{"alias":"infra","producedBranch":"codespace/agent/x"}],"changeSetId":"cs-1","unreviewedReason":"the reviewer could not run"}
+            """).RootElement;
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(new(), resume), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Retryable.ShouldBeFalse("a respawn reviews the same change the same way");
+        result.Error.ShouldContain("the reviewer could not run");
+        result.Outputs.ShouldNotContainKey("branch", "no PR-open or change-set node can bind work nobody reviewed");
+    }
+
+    [Fact]
     public async Task Resumed_failure_fails_the_node_with_the_error()
     {
         var resume = JsonDocument.Parse("""{"status":"Failed","error":"patch did not apply"}""").RootElement;
@@ -553,6 +571,7 @@ public class AgentCodeNodeTests
     [InlineData("TimedOut", null, true)]                // a wall-clock kill — transient by nature
     [InlineData("NeedsReview", null, false)]            // human-owed verdict — a respawn cannot change it
     [InlineData("NeedsReview", "output-flagged", false)] // the critic disapproved — that IS the verdict, a respawn cannot argue with it
+    [InlineData("NeedsReview", "output-unreviewed", false)] // the configured review never examined the change — a respawn reviews the same change the same way
     [InlineData("NeedsReview", "stalled", true)]         // the IDLE watchdog killed a silent process — the same kind of fact as its wall-clock sibling above, which has always retried
     [InlineData("Cancelled", null, false)]              // the user's own stop — never override it with a respawn
     [InlineData("Failed", "acceptance-failed", false)]  // a fail-closed verdict — same code + same check would fail again
