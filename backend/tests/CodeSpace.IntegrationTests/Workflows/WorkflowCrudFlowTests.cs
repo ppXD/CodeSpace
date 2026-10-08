@@ -220,6 +220,78 @@ public class WorkflowCrudFlowTests
             "individual Errors list should contain the trigger-count message");
     }
 
+    [Theory]
+    [InlineData("""{ "repositories": [{ "repositoryId": "{0}" }] }""")]
+    [InlineData("""{ "repositoryId": "{0}" }""")]
+    [InlineData("""{ "repositoryId": "{0}", "branches": ["main"] }""")]
+    public async Task An_activation_naming_another_teams_repository_never_stores_on_create_or_update(string configTemplate)
+    {
+        // The dispatcher already refuses to hand a team another team's events; this is the author-facing half: a
+        // trigger scoped to a repository the team does not hold can never fire, so it must never look configured.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var (foreignTeamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var foreignRepositoryId = await SeedRepositoryAsync(foreignTeamId);
+        var ownRepositoryId = await SeedRepositoryAsync(teamId);
+        var foreign = Activation(configTemplate.Replace("{0}", foreignRepositoryId.ToString()));
+        var own = Activation(configTemplate.Replace("{0}", ownRepositoryId.ToString()));
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = scope.Resolve<IMediator>();
+
+        var onCreate = await Should.ThrowAsync<WorkflowValidationException>(() => mediator.Send(new CreateWorkflowCommand { Name = "foreign", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput> { foreign }, Enabled = true }));
+        var workflowId = await mediator.Send(new CreateWorkflowCommand { Name = "own", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput> { own }, Enabled = true });
+        var onUpdate = await Should.ThrowAsync<WorkflowValidationException>(() => mediator.Send(new UpdateWorkflowCommand { WorkflowId = workflowId, Name = "own", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput> { own, foreign } }));
+
+        onCreate.Errors.ShouldContain(e => e.Contains(foreignRepositoryId.ToString()), customMessage: "the error must name the repository the author has to remove");
+        onUpdate.Errors.ShouldContain(e => e.Contains(foreignRepositoryId.ToString()));
+
+        using var verify = _fixture.BeginScope();
+        var stored = await verify.Resolve<CodeSpaceDbContext>().WorkflowActivation.AsNoTracking().Where(a => a.WorkflowId == workflowId && a.DeletedDate == null).Select(a => a.ConfigJson).ToListAsync();
+        stored.ShouldHaveSingleItem().ShouldContain(ownRepositoryId.ToString(), customMessage: "the refused update must leave the previous activations exactly as they were");
+    }
+
+    [Fact]
+    public async Task An_activation_naming_a_repository_the_team_has_since_removed_still_saves()
+    {
+        // Ownership, not liveness. The editor re-sends every activation on every save, so a trigger naming a repository
+        // the team unbound would otherwise 422 every later edit of the workflow — over a reference the ingestion gate
+        // already makes inert.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var removedRepositoryId = await SeedRepositoryAsync(teamId);
+        var activation = Activation($$"""{ "repositories": [{ "repositoryId": "{{removedRepositoryId}}" }] }""");
+
+        using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
+        var mediator = scope.Resolve<IMediator>();
+        var workflowId = await mediator.Send(new CreateWorkflowCommand { Name = "removed", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput> { activation }, Enabled = true });
+
+        await SoftDeleteRepositoryAsync(removedRepositoryId);
+
+        await Should.NotThrowAsync(() => mediator.Send(new UpdateWorkflowCommand { WorkflowId = workflowId, Name = "removed-renamed", Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput> { activation } }),
+            "a repository the team removed still belongs to it — check EnsureActivationRepositoriesHeldAsync does not filter on DeletedDate.");
+    }
+
+    private async Task SoftDeleteRepositoryAsync(Guid repositoryId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().Repository.Where(r => r.Id == repositoryId).ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedDate, DateTimeOffset.UtcNow));
+    }
+
+    private static WorkflowActivationInput Activation(string configJson) => new() { TypeKey = "trigger.pr.opened", Config = WorkflowsTestSeed.Json(configJson), Enabled = true };
+
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var providerId = Guid.NewGuid();
+        var repositoryId = Guid.NewGuid();
+
+        db.ProviderInstance.Add(new Core.Persistence.Entities.ProviderInstance { Id = providerId, TeamId = teamId, Provider = Messages.Enums.ProviderKind.GitHub, DisplayName = "GH", BaseUrl = $"https://gh-{providerId:N}.local" });
+        db.Repository.Add(new Core.Persistence.Entities.Repository { Id = repositoryId, TeamId = teamId, ProviderInstanceId = providerId, ExternalId = $"ext-{repositoryId:N}", NamespacePath = "acme", Name = "api", FullPath = $"acme/api-{repositoryId:N}", WebUrl = "https://gh.local/acme/api" });
+
+        await db.SaveChangesAsync();
+        return repositoryId;
+    }
+
     private async Task<Guid> CreateMinimalAsync(Guid teamId, Guid userId)
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);

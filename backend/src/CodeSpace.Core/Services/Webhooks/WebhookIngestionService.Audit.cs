@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Constants;
@@ -49,6 +50,10 @@ public sealed partial class WebhookIngestionService
     /// before the incoming one starts. Without this gate that promise holds only for the hooks the
     /// provider let us delete, and the ones it did not keep starting runs in a mode this connection
     /// has left.
+    ///
+    /// <para>Both scopes pass through it. A per-repository hook reaches Cancelled the same two ways — a
+    /// scope switch, or an unbind that could not delete it at the provider — and is the same way in
+    /// the team has left.</para>
     /// </summary>
     private async Task EnsureNotRetiredOrAuditAsync(RepositoryWebhookRegistrationStatus status, IngestionSubject subject, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
     {
@@ -66,6 +71,31 @@ public sealed partial class WebhookIngestionService
         }, cancellationToken).ConfigureAwait(false);
 
         throw new InvalidOperationException($"Webhook {subject.WebhookId} was retired ({status})");
+    }
+
+    /// <summary>
+    /// A per-repository hook is about its own repository and nothing else, so a repository the team removed retires
+    /// its hook with it, whatever the hook row says. The row does not always say so: an unbind deletes a Registered
+    /// hook but can only CAS the others to Cancelled, and a hook the operator finished by hand never told us its
+    /// remote id, so nothing could delete it at the provider. Recorded under the retired reason — to the operator
+    /// it is the same fact, a way in the team has left.
+    /// </summary>
+    private async Task EnsureRepositoryHeldOrAuditAsync(Repository repository, IngestionSubject subject, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
+    {
+        if (repository.DeletedDate == null) return;
+
+        await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
+        {
+            TeamId = subject.TeamId,
+            RepositoryId = subject.RepositoryId,
+            Reason = WorkflowRunRequestRejectionReasons.WebhookRetired,
+            Detail = $"webhook {subject.WebhookId} belongs to repository {repository.Id}, which was removed, and no longer accepts deliveries",
+            SourceType = BuildSourceType(subject),
+            ExternalEventId = null,    // pre-classification — a retired hook's body is never read
+            RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
+        }, cancellationToken).ConfigureAwait(false);
+
+        throw new InvalidOperationException($"Webhook {subject.WebhookId} belongs to removed repository {repository.Id}");
     }
 
     private async Task VerifySignatureOrAuditAsync(IWebhookSignatureVerifier verifier, string body, IReadOnlyDictionary<string, string> headers, string secret, IngestionSubject subject, CancellationToken cancellationToken)
@@ -215,6 +245,37 @@ public sealed partial class WebhookIngestionService
             DedupKey = BuildUnboundDedupKey(subject.WebhookId, identity),
             RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
         }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The delivery named a repository bound on this connection, under an owner path the hook does not cover. Recorded
+    /// against that repository — the one place its operator looks — and at most once per (hook, repository) per
+    /// <see cref="UnboundAuditWindow"/>: after an owner rename the old hook keeps delivering every event beside the new
+    /// one, and that steady duplicate is one fact, not one row per push.
+    /// </summary>
+    private async Task AuditRepositoryOutsideHookOwnerAsync(IngestionSubject subject, string hookOwnerPath, BoundRepository bound, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Connection webhook {WebhookId} on {OwnerPath} delivered an event for repository {RepositoryId}, bound under {NamespacePath}, which it does not cover", subject.WebhookId, hookOwnerPath, bound.Id, bound.NamespacePath);
+
+        await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
+        {
+            TeamId = subject.TeamId,
+            RepositoryId = bound.Id,
+            Reason = WorkflowRunRequestRejectionReasons.RepositoryOutsideHookOwner,
+            Detail = $"connection webhook {subject.WebhookId} on '{hookOwnerPath}' delivered an event for {bound.FullPath}, which is bound under '{bound.NamespacePath}' — outside this hook's owner. If it moved at the provider, opening the repository re-syncs its placement.",
+            SourceType = BuildSourceType(subject),
+            ExternalEventId = TryExtractDeliveryId(headers),    // sig already passed, headers are trusted
+            DedupKey = BuildOutsideOwnerDedupKey(subject.WebhookId, bound.Id),
+            RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>One key per (hook, bound repository, window) — keyed on the repository row, since this refusal already resolved one.</summary>
+    private static string BuildOutsideOwnerDedupKey(Guid connectionWebhookId, Guid repositoryId)
+    {
+        var window = DateTimeOffset.UtcNow.Ticks / UnboundAuditWindow.Ticks;
+
+        return $"outside-owner:{connectionWebhookId}:{repositoryId:N}:{window}";
     }
 
     /// <summary>

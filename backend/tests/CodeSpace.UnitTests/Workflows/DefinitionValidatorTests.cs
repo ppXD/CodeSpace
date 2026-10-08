@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Messages.Dtos.Workflows;
@@ -30,10 +31,12 @@ public class DefinitionValidatorTests
             new StubNode("chat.wait", NodeKind.Regular,
                 """{"type":"object","properties":{"action":{"type":"string"},"by":{"type":"string"},"comment":{"type":"string"},"values":{"type":"object"},"token":{"type":"string"}}}""",
                 new WaitOutputsSpec { OutputKeys = new[] { "action", "by", "comment", "values" }, WaitConfigKey = "waitForResponse", WaitConfigDefault = true, WaitConfigLabel = "Wait for a response" }),
+            // The node that makes a graph a SUPERVISOR run — the one operating mode holding Enforceable standing.
+            new StubNode("agent.supervisor", NodeKind.Regular),
             new StubNode("builtin.terminal", NodeKind.Terminal)
         };
 
-        return new DefinitionValidator(new NodeRegistry(nodes));
+        return new DefinitionValidator(new NodeRegistry(nodes), new ModeProfileRegistry());
     }
 
     [Fact]
@@ -60,8 +63,7 @@ public class DefinitionValidatorTests
     [Theory]
     [InlineData(null)]
     [InlineData(WorkflowDefinition.CompletionModeShadow)]
-    [InlineData(WorkflowDefinition.CompletionModeEnforced)]
-    public void A_known_or_absent_completion_mode_passes(string? completionMode)
+    public void A_shadow_or_absent_completion_mode_passes_on_any_graph(string? completionMode)
     {
         var definition = new WorkflowDefinition
         {
@@ -72,6 +74,53 @@ public class DefinitionValidatorTests
 
         BuildValidator().Validate(definition).IsValid.ShouldBeTrue();
     }
+
+    [Fact]
+    public void An_enforced_opt_in_passes_on_a_graph_whose_mode_is_enforceable()
+    {
+        BuildValidator().Validate(SupervisorShaped(WorkflowDefinition.CompletionModeEnforced)).IsValid.ShouldBeTrue();
+    }
+
+    [Fact]
+    public void An_enforced_opt_in_on_a_graph_whose_mode_is_not_enforceable_never_stores()
+    {
+        // Q3 makes 'enforced' a cohort privilege that RunStarter refuses at EVERY launch below the bar. Stored, it is a
+        // workflow that can never run — and a webhook activation of it refused every delivery it matched. The author
+        // gets the refusal here, naming the mode the graph runs as, instead of the first trigger getting it later.
+        var definition = new WorkflowDefinition
+        {
+            CompletionMode = WorkflowDefinition.CompletionModeEnforced,
+            Nodes = new List<NodeDefinition> { Node("t", "trigger.x"), Node("end", "builtin.terminal") },
+            Edges = new List<EdgeDefinition> { new() { From = "t", To = "end" } }
+        };
+
+        var result = BuildValidator().Validate(definition);
+
+        result.IsValid.ShouldBeFalse();
+        result.Errors.ShouldContain(e => e.Contains("mode 'generic'") && e.Contains(WorkflowDefinition.CompletionModeEnforced));
+    }
+
+    [Fact]
+    public void An_enforced_opt_in_on_the_snapshot_lane_is_left_to_launch_admission()
+    {
+        // The snapshot (tasks) lane derives its mode from a projection kind the validator never sees, and refuses
+        // synchronously to the user who launched — so the authored-lane rule must not second-guess it here.
+        var definition = new WorkflowDefinition
+        {
+            CompletionMode = WorkflowDefinition.CompletionModeEnforced,
+            Nodes = new List<NodeDefinition> { Node("t", "trigger.x"), Node("end", "builtin.terminal") },
+            Edges = new List<EdgeDefinition> { new() { From = "t", To = "end" } }
+        };
+
+        BuildValidator().Validate(definition, allowLaunchContract: true).IsValid.ShouldBeTrue();
+    }
+
+    private static WorkflowDefinition SupervisorShaped(string completionMode) => new()
+    {
+        CompletionMode = completionMode,
+        Nodes = new List<NodeDefinition> { Node("t", "trigger.x"), Node("s", "agent.supervisor"), Node("end", "builtin.terminal") },
+        Edges = new List<EdgeDefinition> { new() { From = "t", To = "s" }, new() { From = "s", To = "end" } }
+    };
 
     [Fact]
     public void An_unknown_completion_mode_errors()

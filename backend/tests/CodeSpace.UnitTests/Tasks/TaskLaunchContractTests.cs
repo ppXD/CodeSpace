@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
@@ -110,5 +111,5 @@ public class TaskLaunchContractTests
         DefinitionHash.Compute(Read(reordered.ToJsonString())).ShouldBe(DefinitionHash.Compute(definition));
     }
 
-    private static DefinitionValidator Validator() => new(new NodeRegistry([new TriggerManualNode(), new TerminalNode()]));
+    private static DefinitionValidator Validator() => new(new NodeRegistry([new TriggerManualNode(), new TerminalNode()]), new ModeProfileRegistry());
 }

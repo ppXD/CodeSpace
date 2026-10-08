@@ -34,6 +34,9 @@ namespace CodeSpace.Core.Services.Workflows.RunSources.Matchers;
 ///   <item>Legacy <c>repositoryId</c> not parseable as a Guid → true (preserves the pre-PR
 ///         no-filter behaviour for malformed configs).</item>
 /// </list>
+///
+/// <para>"No filter" is never wider than the activation's own team: <see cref="RunSourceDispatcher"/> offers an
+/// activation only events from repositories its team holds, so this filter only ever narrows within that set.</para>
 /// </summary>
 internal static class PrTriggerMatcherFilter
 {

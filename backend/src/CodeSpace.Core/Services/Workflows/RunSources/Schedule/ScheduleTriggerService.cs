@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Authority.Exceptions;
+using CodeSpace.Core.Services.Completion.Exceptions;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -60,6 +61,12 @@ public sealed class ScheduleTriggerService : IScheduleTriggerService, IScopedDep
             catch (AgentAuthorityDeniedException ex)
             {
                 _logger.LogWarning("Schedule activation authority refused. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Code={Code} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Code, ex.Reason);
+            }
+            catch (CompletionAdmissionRefusedException ex)
+            {
+                // A property of this one definition, like the authority refusal above: the tick is one transaction
+                // across every team's schedules, so letting it escape would roll back all of them.
+                _logger.LogWarning("Schedule activation completion admission refused. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Message);
             }
         }
 

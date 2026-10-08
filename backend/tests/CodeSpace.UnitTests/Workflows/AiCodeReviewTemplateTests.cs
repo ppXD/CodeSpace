@@ -1,5 +1,6 @@
 using System.Reflection;
 using System.Text.Json;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
@@ -53,7 +54,7 @@ public class AiCodeReviewTemplateTests
             new StubNode("llm.complete", NodeKind.Regular)
         };
 
-        var validator = new DefinitionValidator(new NodeRegistry(nodes));
+        var validator = new DefinitionValidator(new NodeRegistry(nodes), new ModeProfileRegistry());
         var result = validator.Validate(definition);
 
         if (!result.IsValid)

@@ -1,4 +1,5 @@
 using CodeSpace.Core.Services.Completion;
+using CodeSpace.Core.Services.Completion.Exceptions;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Dtos.Workflows;
 using Shouldly;
@@ -84,7 +85,9 @@ public class CompletionStampModeTests
     [InlineData(RunModeKeys.Generic, "no registered conformance profile")]         // no conformance story at all
     public void An_enforced_opt_in_for_an_unready_mode_refuses_to_launch(string mode, string expectedDetail)
     {
-        var ex = Should.Throw<InvalidOperationException>(() =>
+        // Typed, not a bare InvalidOperationException: the webhook dispatcher isolates exactly this refusal to the one
+        // activation it belongs to, and must never mistake an infrastructure failure for one.
+        var ex = Should.Throw<CompletionAdmissionRefusedException>(() =>
             CompletionPolicy.StampModeFor(WorkflowDefinition.CompletionModeEnforced, mode, new ModeProfileRegistry().Resolve(mode)));
 
         ex.Message.ShouldContain($"mode '{mode}'");
@@ -105,7 +108,7 @@ public class CompletionStampModeTests
     [InlineData("")]
     public void An_unreadable_opt_in_refuses_to_launch(string definitionMode)
     {
-        Should.Throw<InvalidOperationException>(() => CompletionPolicy.StampModeFor(definitionMode, RunModeKeys.Generic, profile: null))
+        Should.Throw<CompletionAdmissionRefusedException>(() => CompletionPolicy.StampModeFor(definitionMode, RunModeKeys.Generic, profile: null))
             .Message.ShouldContain("refusing to launch");
     }
 }

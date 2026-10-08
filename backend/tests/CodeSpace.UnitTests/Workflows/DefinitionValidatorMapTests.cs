@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Messages.Dtos.Workflows;
@@ -37,7 +38,7 @@ public class DefinitionValidatorMapTests
             new MapStubNode("builtin.terminal", NodeKind.Terminal),
         };
 
-        return new DefinitionValidator(new NodeRegistry(nodes));
+        return new DefinitionValidator(new NodeRegistry(nodes), new ModeProfileRegistry());
     }
 
     [Fact]

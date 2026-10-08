@@ -1,4 +1,5 @@
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Tasks.Contracts;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Runtime;
@@ -30,10 +31,12 @@ namespace CodeSpace.Core.Services.Workflows.Engine;
 public sealed class DefinitionValidator : IScopedDependency
 {
     private readonly INodeRegistry _nodeRegistry;
+    private readonly IModeProfileRegistry _modes;
 
-    public DefinitionValidator(INodeRegistry nodeRegistry)
+    public DefinitionValidator(INodeRegistry nodeRegistry, IModeProfileRegistry modes)
     {
         _nodeRegistry = nodeRegistry;
+        _modes = modes;
     }
 
     public ValidationResult Validate(WorkflowDefinition definition, bool allowLaunchContract = false)
@@ -42,6 +45,7 @@ public sealed class DefinitionValidator : IScopedDependency
 
         CheckSchemaVersion(definition, errors);
         CheckCompletionMode(definition, errors);
+        if (!allowLaunchContract) CheckAuthoredCompletionCohort(definition, errors);
         if (definition.LaunchContract is not null && !allowLaunchContract) errors.Add("launchContract is server-recorded task provenance and cannot be authored.");
         errors.AddRange(TaskLaunchContractSnapshot.Validate(definition.LaunchContract));
         CheckNodeIdsAndTypes(definition, errors);
@@ -68,6 +72,31 @@ public sealed class DefinitionValidator : IScopedDependency
     {
         if (definition.CompletionMode is not (null or WorkflowDefinition.CompletionModeShadow or WorkflowDefinition.CompletionModeEnforced))
             errors.Add($"Unknown completionMode '{definition.CompletionMode}'. Expected '{WorkflowDefinition.CompletionModeShadow}', '{WorkflowDefinition.CompletionModeEnforced}', or omitted.");
+    }
+
+    /// <summary>
+    /// Q3 made <c>enforced</c> a cohort privilege that <c>RunStarter</c> refuses at EVERY launch of a graph whose
+    /// operating mode lacks Enforceable standing. Stored, such a definition is a workflow that can never run — and an
+    /// activation of it refused every delivery it matched. Refusing it here gives the author the error instead of the
+    /// first trigger.
+    ///
+    /// <para>Authored definitions only (<c>allowLaunchContract</c> false — every caller that stores one). The authored
+    /// lane launches with no projection kind, so its mode IS the node-shape mode, derived exactly as
+    /// <c>RunStarter</c> derives it; the predicate is the policy's own <see cref="CompletionPolicy.IsEnforceable"/>, so
+    /// save and launch can never disagree. The snapshot lane's mode comes from a projection kind this validator never
+    /// sees, and it refuses synchronously to the user who launched, so it keeps its launch-time admission.</para>
+    /// </summary>
+    private void CheckAuthoredCompletionCohort(WorkflowDefinition definition, List<string> errors)
+    {
+        if (definition.CompletionMode != WorkflowDefinition.CompletionModeEnforced) return;
+
+        var mode = RunModeClassifier.Derive(projectionKind: null, definition);
+        var profile = _modes.Resolve(mode);
+
+        if (CompletionPolicy.IsEnforceable(profile)) return;
+
+        var standing = profile is null ? "has no registered conformance profile" : $"holds ProtocolReadiness.{profile.Readiness}";
+        errors.Add($"completionMode '{WorkflowDefinition.CompletionModeEnforced}' is admitted only for an Enforceable operating mode, and this graph runs as mode '{mode}', which {standing} — every launch would be refused. Omit completionMode or use '{WorkflowDefinition.CompletionModeShadow}'.");
     }
 
     private void CheckNodeIdsAndTypes(WorkflowDefinition definition, List<string> errors)

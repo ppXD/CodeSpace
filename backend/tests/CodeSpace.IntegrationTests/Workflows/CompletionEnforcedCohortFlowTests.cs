@@ -44,13 +44,27 @@ public class CompletionEnforcedCohortFlowTests
     public CompletionEnforcedCohortFlowTests(PostgresFixture fixture) => _fixture = fixture;
 
     [Fact]
-    public async Task An_enforced_opt_in_for_an_unready_mode_refuses_to_launch()
+    public async Task An_enforced_opt_in_for_an_unready_mode_never_stores()
     {
-        // Q3 upgraded this canary: a bare trigger→terminal graph is the GENERIC mode — no conformance story, so
-        // the Enforced opt-in no longer stamps-then-parks at the terminal; the REAL RunStarter refuses the launch
-        // itself, naming the mode and the standing it lacks (cheaper than burning a run to park, same fail-close).
+        // A bare trigger→terminal graph is the GENERIC mode — no conformance story — and RunStarter refuses EVERY
+        // launch of an Enforced opt-in below the cohort. Stored, it is a workflow that can never run; the author gets
+        // the refusal at save, naming the mode the graph runs as, instead of the first trigger getting it later.
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
-        var workflowId = await CreateWorkflowAsync(teamId, userId, Definition(WorkflowDefinition.CompletionModeEnforced));
+
+        var ex = await Should.ThrowAsync<WorkflowValidationException>(() => CreateWorkflowAsync(teamId, userId, Definition(WorkflowDefinition.CompletionModeEnforced)));
+
+        ex.Message.ShouldContain("mode 'generic'", customMessage: "the refusal must name the operating mode the admission would read");
+    }
+
+    [Fact]
+    public async Task A_stored_enforced_opt_in_for_an_unready_mode_still_refuses_to_launch()
+    {
+        // Q3's launch-time admission stays the backstop for a version saved before the save-time gate existed: the
+        // REAL RunStarter refuses the launch itself, naming the mode and the standing it lacks (cheaper than burning
+        // a run to park, same fail-close).
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId, Definition(completionMode: null));
+        await AppendVersionAsync(workflowId, Definition(WorkflowDefinition.CompletionModeEnforced));
 
         var ex = await Should.ThrowAsync<Exception>(() => RunManuallyAsync(teamId, userId, workflowId));
 
@@ -565,6 +579,21 @@ public class CompletionEnforcedCohortFlowTests
             Activations = new List<WorkflowActivationInput>(),
             Enabled = true,
         });
+    }
+
+    /// <summary>A version appended straight to the insert-only version table — the shape a save left behind before the validator refused it.</summary>
+    private async Task AppendVersionAsync(Guid workflowId, WorkflowDefinition definition)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var workflow = await db.Workflow.SingleAsync(w => w.Id == workflowId);
+        var json = JsonSerializer.Serialize(definition, WorkflowJson.Options);
+
+        workflow.LatestVersion += 1;
+        workflow.DefinitionJson = json;
+        db.WorkflowVersion.Add(new WorkflowVersion { WorkflowId = workflowId, Version = workflow.LatestVersion, DefinitionJson = json, DefinitionHash = DefinitionHash.Compute(definition), CommittedAt = DateTimeOffset.UtcNow, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = workflow.CreatedBy });
+
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> RunManuallyAsync(Guid teamId, Guid userId, Guid workflowId)

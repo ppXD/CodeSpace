@@ -41,4 +41,21 @@ public static class WorkflowRunRequestRejectionReasons
     /// Distinct from <see cref="WebhookInactive"/>, which is an operator turning a live hook off.
     /// </summary>
     public const string WebhookRetired = "webhook_retired";
+
+    /// <summary>
+    /// One activation matched the delivery but its workflow's completion opt-in refused to launch — <c>enforced</c>
+    /// on a graph whose operating mode is not Enforceable, or an unreadable value — so that activation started
+    /// nothing while every other one matching the same delivery still did. Fixed by editing the workflow, never by
+    /// redelivering.
+    /// </summary>
+    public const string CompletionAdmissionRefused = "completion_admission_refused";
+
+    /// <summary>
+    /// A connection-scoped (group / organization) hook delivered an event for a repository that IS bound, but under an
+    /// owner path the hook does not cover. Either the repository or its owner moved at the provider and the stored paths
+    /// no longer agree — opening the repository re-syncs its placement — or the body names a repository this hook's
+    /// secret may not speak for. Distinct from <see cref="RepositoryNotBound"/>, whose remedy is "bind it", and recorded
+    /// against the repository so its own Webhook tab says why its deliveries are refused.
+    /// </summary>
+    public const string RepositoryOutsideHookOwner = "repository_outside_hook_owner";
 }

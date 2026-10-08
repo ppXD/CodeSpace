@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Webhooks.Registration;
 using CodeSpace.Messages.Dtos.Projects;
 using CodeSpace.Messages.Dtos.Repositories;
 using CodeSpace.Messages.Enums;
@@ -17,13 +18,15 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
     private readonly IProviderRegistry _registry;
+    private readonly IConnectionWebhookCoverageService _hookCoverage;
     private readonly ILogger<RepositoryService> _logger;
 
-    public RepositoryService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IProviderRegistry registry, ILogger<RepositoryService> logger)
+    public RepositoryService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IProviderRegistry registry, IConnectionWebhookCoverageService hookCoverage, ILogger<RepositoryService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
         _registry = registry;
+        _hookCoverage = hookCoverage;
         _logger = logger;
     }
 
@@ -157,6 +160,11 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
     /// rate limit / network) is swallowed — the detail still renders from the last-known stored values
     /// rather than erroring over a freshness refresh. Uses the repo's OWN connection credential, so it
     /// needs no per-caller scope (membership is already enforced by the query's IRequireRepositoryAccess).
+    ///
+    /// <para>This is where CodeSpace learns a repository moved owners at the provider, and on a connection-scoped
+    /// instance the move takes it out from under the hook that covered its old path. So a hook for the new path is
+    /// staged in the SAME commit as the new path — a refresh that persisted the move without it would leave every
+    /// later delivery refused, and no later refresh would notice, because the path would no longer change.</para>
     /// </summary>
     private async Task RefreshMetadataBestEffortAsync(Guid repositoryId, CancellationToken cancellationToken)
     {
@@ -172,10 +180,15 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
             var catalog = _registry.Require<IRepositoryCatalogCapability>(repo.ProviderInstance.Provider);
             var context = new ProviderContext(repo.ProviderInstance, repo.Credential);
             var remote = await catalog.GetByExternalIdAsync(context, repo.ExternalId, cancellationToken).ConfigureAwait(false);
+            var previousNamespacePath = repo.NamespacePath;
 
             repo.ApplyRemoteMetadata(remote);
             repo.LastSyncedDate = DateTimeOffset.UtcNow;
+
+            var stagedHookId = await _hookCoverage.StageForMoveAsync(repo, previousNamespacePath, cancellationToken).ConfigureAwait(false);
+
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+            await _hookCoverage.DispatchAfterCommitAsync(stagedHookId, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {

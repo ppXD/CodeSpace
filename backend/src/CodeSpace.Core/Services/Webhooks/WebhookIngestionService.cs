@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Webhooks.Registration;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
@@ -50,6 +51,8 @@ public sealed partial class WebhookIngestionService : IWebhookIngestionService, 
         var subject = DescribeRepositoryHook(webhook);
 
         await EnsureActiveOrAuditAsync(webhook.Active, subject, headers, cancellationToken).ConfigureAwait(false);
+        await EnsureNotRetiredOrAuditAsync(webhook.RegistrationStatus, subject, headers, cancellationToken).ConfigureAwait(false);
+        await EnsureRepositoryHeldOrAuditAsync(webhook.Repository, subject, headers, cancellationToken).ConfigureAwait(false);
 
         var verifier = _registry.Require<IWebhookSignatureVerifier>(subject.Provider);
         var normalizer = _registry.Require<IWebhookEventNormalizer>(subject.Provider);
@@ -118,19 +121,45 @@ public sealed partial class WebhookIngestionService : IWebhookIngestionService, 
             return;
         }
 
-        var repositoryId = await MatchBoundRepositoryAsync(webhook.ProviderInstanceId, identity, cancellationToken).ConfigureAwait(false);
+        var repositoryId = await ResolveCoveredRepositoryOrAuditAsync(webhook, subject, identity, headers, cancellationToken).ConfigureAwait(false);
 
-        if (repositoryId == null)
-        {
-            await AuditRepositoryNotBoundAsync(subject, identity, headers, cancellationToken).ConfigureAwait(false);
-            return;
-        }
+        if (repositoryId == null) return;
 
         await PublishNormalizedEventAsync(normalizer, subject with { RepositoryId = repositoryId }, body, headers, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
-    /// Which bound repository this delivery is about, or null when it is none of ours.
+    /// The bound repository this delivery is about, when this hook covers it — otherwise null, with the refusal recorded.
+    ///
+    /// <para>The hook's secret authenticates a BODY, not a repository: the payload names the repository, and a
+    /// connection can carry hooks on several owners, each with its own secret. So a match on the connection alone
+    /// would let one owner's secret forge merge / push / label events for every other owner's repositories. The
+    /// repository must sit under the hook's own owner path, by the same ancestor rule the provisioner registered the
+    /// hook under.</para>
+    ///
+    /// <para>The two refusals are different news. Not bound at all is a group hook's ordinary traffic. Bound under an
+    /// owner this hook does not cover is either a move at the provider the stored paths have not caught up with, or a
+    /// body naming a repository this hook may not speak for — so it is recorded against that repository, where its
+    /// operator looks.</para>
+    /// </summary>
+    private async Task<Guid?> ResolveCoveredRepositoryOrAuditAsync(ConnectionWebhook webhook, IngestionSubject subject, WebhookRepositoryIdentity identity, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
+    {
+        var bound = await MatchBoundRepositoryAsync(webhook.ProviderInstanceId, identity, cancellationToken).ConfigureAwait(false);
+
+        if (bound == null)
+        {
+            await AuditRepositoryNotBoundAsync(subject, identity, headers, cancellationToken).ConfigureAwait(false);
+            return null;
+        }
+
+        if (OwnerPathHierarchy.Covers(webhook.OwnerPath, bound.NamespacePath)) return bound.Id;
+
+        await AuditRepositoryOutsideHookOwnerAsync(subject, webhook.OwnerPath, bound, headers, cancellationToken).ConfigureAwait(false);
+        return null;
+    }
+
+    /// <summary>
+    /// Which bound repository this delivery names, or null when it is none of ours.
     ///
     /// <para>The id is authoritative and EXCLUSIVE: when the payload carries one, a miss is the whole
     /// answer. Falling through to the path on a miss would be a spoofing hole, not a kindness — a
@@ -138,7 +167,7 @@ public sealed partial class WebhookIngestionService : IWebhookIngestionService, 
     /// bound, so a payload naming an id we do not know could otherwise be matched by path onto a
     /// repository we do. The path is consulted only for payload shapes that carry no id at all.</para>
     /// </summary>
-    private async Task<Guid?> MatchBoundRepositoryAsync(Guid providerInstanceId, WebhookRepositoryIdentity identity, CancellationToken cancellationToken)
+    private async Task<BoundRepository?> MatchBoundRepositoryAsync(Guid providerInstanceId, WebhookRepositoryIdentity identity, CancellationToken cancellationToken)
     {
         if (identity.ExternalId != null) return await FindBoundAsync(providerInstanceId, r => r.ExternalId == identity.ExternalId, cancellationToken).ConfigureAwait(false);
         if (identity.FullPath != null) return await FindBoundAsync(providerInstanceId, r => r.FullPath == identity.FullPath, cancellationToken).ConfigureAwait(false);
@@ -146,11 +175,11 @@ public sealed partial class WebhookIngestionService : IWebhookIngestionService, 
         return null;
     }
 
-    private async Task<Guid?> FindBoundAsync(Guid providerInstanceId, Expression<Func<Repository, bool>> match, CancellationToken cancellationToken) =>
+    private async Task<BoundRepository?> FindBoundAsync(Guid providerInstanceId, Expression<Func<Repository, bool>> match, CancellationToken cancellationToken) =>
         await _db.Repository.AsNoTracking()
             .Where(r => r.ProviderInstanceId == providerInstanceId && r.DeletedDate == null)
             .Where(match)
-            .Select(r => (Guid?)r.Id)
+            .Select(r => new BoundRepository(r.Id, r.FullPath, r.NamespacePath))
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     private async Task<RepositoryWebhook> LoadWebhookAsync(Guid webhookId, CancellationToken cancellationToken)
@@ -240,6 +269,9 @@ public sealed partial class WebhookIngestionService : IWebhookIngestionService, 
 
         return subject.RepositoryId.Value;
     }
+
+    /// <summary>A bound repository as the connection path needs it: its id, its path for the operator, and the owner path its hook coverage is decided by.</summary>
+    private sealed record BoundRepository(Guid Id, string FullPath, string NamespacePath);
 
     /// <summary>
     /// What the audit writers need to describe a delivery, independent of which table the hook lives

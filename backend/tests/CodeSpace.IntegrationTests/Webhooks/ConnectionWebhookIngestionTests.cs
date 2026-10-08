@@ -96,6 +96,58 @@ public class ConnectionWebhookIngestionTests
     }
 
     [Fact]
+    public async Task A_delivery_naming_a_bound_repository_outside_the_hooks_owner_path_is_dropped_and_audited()
+    {
+        // One connection, two owners, two hooks with independent secrets. The 'acme' hook's secret authenticates a
+        // body, not a repository — so a body it signs that names 'secretgroup/…' is a forgery of another owner's
+        // merge / push / label state, and must reach nothing even though that repository IS bound here.
+        var secret = $"gl-conn-{Guid.NewGuid():N}";
+        var seed = await SeedConnectionAsync(ProviderKind.GitLab, secret).ConfigureAwait(false);
+        var outside = await SeedRepositoryOnConnectionAsync(seed.ConnectionWebhookId, "secretgroup/payments").ConfigureAwait(false);
+        var deliveryId = $"gl-cross-owner-{Guid.NewGuid():N}";
+
+        var body = BuildGitLabPushBody(projectId: outside.ExternalId, path: outside.FullPath);
+        ClearCapturedEvents();
+
+        await IngestAsync(seed.ConnectionWebhookId, body, GitLabHeaders(secret, deliveryId)).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().OfType<PushReceivedEvent>().ShouldBeEmpty(
+            customMessage: "The 'acme' hook routed a repository it does not cover. Check RouteConnectionDeliveryAsync applies OwnerPathHierarchy.Covers(hook.OwnerPath, repository.NamespacePath).");
+
+        var audit = await LoadAuditAsync(deliveryId).ConfigureAwait(false);
+        audit.Error.ShouldStartWith(WorkflowRunRequestRejectionReasons.RepositoryOutsideHookOwner,
+            customMessage: "The repository IS bound — 'repository_not_bound' would tell the operator to bind what is already bound. It is bound under an owner this hook does not cover.");
+        audit.RepositoryId.ShouldBe(outside.Id,
+            customMessage: "Attributed to the repository, so its own Webhook tab shows why deliveries for it are being refused.");
+        audit.Error.ShouldContain(outside.FullPath);
+
+        // After an owner rename the stale hook repeats this for every event; that is one fact, not a row per push.
+        await IngestAsync(seed.ConnectionWebhookId, body, GitLabHeaders(secret)).ConfigureAwait(false);
+
+        (await CountRefusalsAsync(outside.Id, WorkflowRunRequestRejectionReasons.RepositoryOutsideHookOwner).ConfigureAwait(false)).ShouldBe(1,
+            customMessage: "A second delivery for the same (hook, repository) inside the window must not add a row.");
+    }
+
+    [Fact]
+    public async Task A_subgroup_repository_routes_through_its_ancestor_groups_hook()
+    {
+        // The ordinary GitLab shape: the provisioner registers no hook for a subgroup an ancestor already covers, so
+        // every event for acme/platform/* arrives on the 'acme' hook. Pinned on its own because Covers is asymmetric,
+        // and every other routing case here has OwnerPath == NamespacePath, where both argument orders agree.
+        var secret = $"gl-conn-{Guid.NewGuid():N}";
+        var seed = await SeedConnectionAsync(ProviderKind.GitLab, secret).ConfigureAwait(false);
+        var nested = await SeedRepositoryOnConnectionAsync(seed.ConnectionWebhookId, "acme/platform/web").ConfigureAwait(false);
+
+        var body = BuildGitLabPushBody(projectId: nested.ExternalId, path: nested.FullPath);
+        ClearCapturedEvents();
+
+        await IngestAsync(seed.ConnectionWebhookId, body, GitLabHeaders(secret)).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().OfType<PushReceivedEvent>().ShouldContain(e => e.RepositoryId == nested.Id,
+            customMessage: $"A repository under '{nested.NamespacePath}' must route through the 'acme' hook. Check MatchCoveredRepositoryAsync calls OwnerPathHierarchy.Covers(hook.OwnerPath, repository.NamespacePath) in that order.");
+    }
+
+    [Fact]
     public async Task Signature_is_verified_against_the_connection_rows_secret()
     {
         // The connection hook was registered with its own secret. A delivery signed with a
@@ -223,6 +275,20 @@ public class ConnectionWebhookIngestionTests
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
+    /// <summary>A bound repository on the hook's own connection, under whatever namespace <paramref name="fullPathPrefix"/> names.</summary>
+    private async Task<Repository> SeedRepositoryOnConnectionAsync(Guid connectionWebhookId, string fullPathPrefix)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var hook = await db.ConnectionWebhook.AsNoTracking().Include(w => w.ProviderInstance).SingleAsync(w => w.Id == connectionWebhookId).ConfigureAwait(false);
+        var repository = BuildRepository(hook.ProviderInstance.TeamId, hook.ProviderInstanceId, hook.CredentialId, $"3{DateTime.UtcNow.Ticks % 100000}", $"{fullPathPrefix}-{Guid.NewGuid():N}"[..(fullPathPrefix.Length + 9)]);
+
+        db.Repository.Add(repository);
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return repository;
+    }
+
     private async Task IngestDirectAsync(Guid connectionWebhookId, string body, IReadOnlyDictionary<string, string> headers)
     {
         using var scope = _fixture.BeginScope();
@@ -245,6 +311,14 @@ public class ConnectionWebhookIngestionTests
             .Where(r => r.Error != null && r.Error.Contains(connectionWebhookId.ToString()))
             .Select(r => r.Error!)
             .ToListAsync().ConfigureAwait(false);
+    }
+
+    private async Task<int> CountRefusalsAsync(Guid repositoryId, string reason)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunRequest.AsNoTracking()
+            .CountAsync(r => r.RepositoryId == repositoryId && r.Error != null && r.Error.StartsWith(reason))
+            .ConfigureAwait(false);
     }
 
     private async Task<int> CountNotBoundRowsAsync(string repositoryName)

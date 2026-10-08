@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Tasks.Projection.Builders.SingleAgent;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Core.Services.Workflows.Engine;
@@ -31,7 +32,7 @@ public class SingleAgentDefinitionBuilderTests
         new TriggerManualNode(),
         new AgentCodeNode(),
         new TerminalNode(),
-    }));
+    }), new ModeProfileRegistry());
 
     private static TaskBuildContext Context(TaskLaunchSeed seed, ResolvedAgentProfile? profile, decimal? maxCostUsd = null) => new()
     {

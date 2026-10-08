@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMap;
 using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapDynamic;
 using CodeSpace.Core.Services.Workflows.Engine;
@@ -36,7 +37,7 @@ public class PlanMapDynamicDefinitionBuilderTests
         new AgentCodeNode(),
         new GitIntegrateRunNode(null!, null!, null!, null!),
         new TerminalNode(),
-    }));
+    }), new ModeProfileRegistry());
 
     private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, Guid? seedRepo = null, RouteCaps? caps = null) => new()
     {
