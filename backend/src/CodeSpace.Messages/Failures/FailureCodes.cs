@@ -69,6 +69,9 @@ public static class FailureCodes
     public const string RerunUpstreamNotReusable = "rerun_upstream_not_reusable";
     public const string PackImportFailed = "pack_import_failed";
 
+    /// <summary>A workflow's outbound HTTP call was refused at connect time because its host resolves only to loopback, private, link-local, metadata or other non-public addresses. Remedy: point the call at a public destination, or have an operator commit the host or CIDR to <c>OutboundHttp:AllowedInternalDestinations</c> — a retry cannot help.</summary>
+    public const string OutboundDestinationRefused = "outbound_destination_refused";
+
     /// <summary>A settled cell's outputs were redacted for persistence and their encrypted recovery payload is not readable, so the originals exist nowhere. Remedy: re-run the workflow from that node — a resume can only ever offer the redaction placeholder.</summary>
     public const string WorkflowOutputsUnrecoverable = "workflow_outputs_unrecoverable";
 

@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Api.Filters;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.OutboundHttp;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Settings;
 using Microsoft.AspNetCore.Diagnostics.HealthChecks;
@@ -70,6 +71,11 @@ public class Startup
         // generation, no connection-lifetime tuning, no transient resilience. Register the hardened, resilient named
         // clients (generous tunable budget + SocketsHttpHandler + retry/Retry-After) — shared with the resilience test.
         services.AddLlmHttpClients();
+        // http.request sends to a URL that trigger text or an upstream model can write, so its client reaches only
+        // public addresses or ones committed to OutboundHttp:AllowedInternalDestinations, checked on every redirect hop,
+        // and a cross-origin redirect carries none of the author's headers. The allowlist is parsed here, at boot, so a
+        // malformed entry stops the host instead of failing every http.request call.
+        services.AddGuardedHttpClient(nameof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.HttpRequestNode), Configuration);
         // Periodic background work is uniformly IRecurringJob (Rule 14) — there is deliberately no AddHostedService
         // here. A hosted service runs its own timer on EVERY pod including the public API, outside the mediator
         // pipeline and invisible to the dashboard; a recurring job runs only where a Hangfire server does (the Worker

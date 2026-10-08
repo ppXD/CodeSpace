@@ -3,6 +3,7 @@ using Autofac;
 using Autofac.Extensions.DependencyInjection;
 using CodeSpace.Core;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.OutboundHttp;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Settings;
 using MediatR;
@@ -198,6 +199,9 @@ public sealed class PostgresFixture : IAsyncLifetime
         // is unaffected; a longer timeout is inert for any client that never makes a real slow call.
         services.AddHttpClient(nameof(CodeSpace.Core.Services.Workflows.Llm.Anthropic.AnthropicClient), c => c.Timeout = TimeSpan.FromSeconds(180));
         services.AddHttpClient(nameof(CodeSpace.Core.Services.Workflows.Llm.OpenAi.OpenAiClient), c => c.Timeout = TimeSpan.FromSeconds(180));
+        // The production http.request client, so every engine test that runs the node goes through the destination
+        // guard. The suite's committed allowlist (appsettings.json) admits 127.0.0.1 for its loopback responders.
+        services.AddGuardedHttpClient(nameof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.HttpRequestNode), configuration);
 
         var builder = new ContainerBuilder();
         builder.Populate(services);
