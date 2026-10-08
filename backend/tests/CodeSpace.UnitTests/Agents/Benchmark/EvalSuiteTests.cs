@@ -160,6 +160,30 @@ public class EvalSuiteTests
     }
 
     [Fact]
+    public void A_solve_the_grader_could_not_isolate_or_whose_judge_was_touched_is_counted_apart()
+    {
+        // The headline still counts every solve (the seed corpus's root-level shell judge is never isolated, and
+        // zeroing it would measure nothing), but a reader of the metrics must be able to see how many solves rest on a
+        // check the platform could not stand behind, and how many cells touched their judge.
+        var manifest = EvalSuite.ManifestFor(Corpus());
+        var results = new List<BenchmarkResult>
+        {
+            Result("t1", BenchmarkMode.HarnessCli, passed: true) with { Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed", OracleNote = "oracle: UNVERIFIED (check.sh lives at the repository root)" } },
+            Result("t1", BenchmarkMode.HarnessCliWithMcp, passed: true) with { Grade = new BenchmarkGrade { Passed = true, Detail = "tests-passed", OracleNote = "ORACLE TAMPER VOIDED — the cell changed its judge, restored from the frozen fixture: check.sh" } },
+            Result("t2", BenchmarkMode.HarnessCli, passed: false) with { Grade = new BenchmarkGrade { Passed = false, Detail = "tests-failed-exit-1", OracleNote = "ORACLE TAMPER VOIDED — x; oracle: UNVERIFIED (y)" } },
+            Result("t2", BenchmarkMode.HarnessCliWithMcp, passed: true),
+        };
+
+        var cells = EvalSuite.Classify(manifest, results, Array.Empty<CorpusBenchmarkError>());
+        var score = EvalSuite.Score(cells);
+
+        cells.Single(c => c is { TaskId: "t1", Mode: BenchmarkMode.HarnessCli }).OracleNote.ShouldBe("oracle: UNVERIFIED (check.sh lives at the repository root)", "the cell carries its grade's note to every reader of the outcome");
+        score.Solved.ShouldBe(3, "the verdicts themselves are unchanged");
+        score.SolvedUnverified.ShouldBe(1, "only a SOLVE resting on an unisolated check counts here");
+        score.TamperFlagged.ShouldBe(2, "every cell that touched its judge, whatever its verdict");
+    }
+
+    [Fact]
     public void An_empty_suite_scores_zero_never_throws()
     {
         var score = EvalSuite.Score(Array.Empty<CorpusCellOutcome>());

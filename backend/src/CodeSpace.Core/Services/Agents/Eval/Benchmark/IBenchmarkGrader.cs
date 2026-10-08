@@ -55,6 +55,9 @@ public sealed record BenchmarkGradingContext
     /// <summary>The model-backed producer whose artifact is being graded. Only its harness/provider observation can establish judge independence.</summary>
     public ReviewModelIdentity? ProducerModel { get; init; }
 
+    /// <summary>The repo-relative paths in <see cref="WorkspaceDirectory"/> the caller restored from PLATFORM-OWNED bytes (the base commit, the frozen fixture) before this grade — a directory ends with <c>/</c>. A judge whose directory is pinned runs isolated; anything else the check runs is reported as unverified (<see cref="Graders.OracleRuntime"/>). Empty when nothing was restored.</summary>
+    public IReadOnlyList<string> PinnedOraclePaths { get; init; } = Array.Empty<string>();
+
     /// <summary>
     /// Build a grading context for an AD-HOC command grade — a caller that holds only a test command + a prepared
     /// workspace + a runner, not a corpus <see cref="BenchmarkTask"/> (e.g. the supervisor's objective acceptance

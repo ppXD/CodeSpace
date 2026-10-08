@@ -69,13 +69,7 @@ public enum RoomOracleProtection
     /// </summary>
     None = 0,
 
-    /// <summary>
-    /// The judge COULD have been protected but had no base to restore from (no anchor). DEFINED, UNPOPULATED
-    /// today (mirrors <see cref="Protected"/>'s same precedent): the grader records this clause in
-    /// <c>OracleNote</c> (<c>AcceptanceOracleProtection.UnanchoredDetailMarker</c>), which no per-unit
-    /// <c>AcceptanceDetail</c> producer copies onto <see cref="RoomArtifactVerification.Detail"/> — never emitted
-    /// by this projection on real data.
-    /// </summary>
+    /// <summary>The judge COULD have been protected but had no base to restore from (no anchor) — read off the unit's oracle note (<c>AcceptanceOracleProtection.UnanchoredDetailMarker</c>).</summary>
     Unanchored,
 
     /// <summary>This grade ran, at least in part, on the candidate's OWN copy of a program file — self-graded, not a protected judge.</summary>
@@ -87,4 +81,7 @@ public enum RoomOracleProtection
     /// from <see cref="None"/> — a clean restore is deliberately silent on Detail. Never emitted by this projection.
     /// </summary>
     Protected,
+
+    /// <summary>The check ran, but the grader could not isolate it — a shell or node judge, a runner reading the graded tree's config, a judge whose directory holds the candidate's bytes — so its verdict may rest on bytes the platform does not own (<c>oracle: UNVERIFIED (…)</c> on the unit's oracle note).</summary>
+    Unverified,
 }

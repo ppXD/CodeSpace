@@ -54,6 +54,20 @@ public sealed class SupervisorRecitationTests
     }
 
     [Fact]
+    public void An_accepted_row_whose_check_was_not_isolated_says_so()
+    {
+        // "done (accepted)" alone reads as a verified pass; a check the grader could not isolate is not one.
+        var note = "oracle: UNVERIFIED (`make` runs against the graded tree, which can supply its configuration)";
+        var priors = new[]
+        {
+            Plan(1, ("s1", "First")),
+            Spawn(2, new[] { "s1" }, Result("Succeeded", acceptancePassed: true, acceptanceDetail: "tests-passed", acceptanceOracleNote: note)),
+        };
+
+        SupervisorRecitation.Render(priors)!.ShouldContain($"- [s1] First: done (accepted) — {AcceptanceOracleProtection.OracleNoteClausePhrase(note)}");
+    }
+
+    [Fact]
     public void A_retry_supersedes_the_original_spawn()
     {
         var priors = new[]
@@ -581,8 +595,8 @@ public sealed class SupervisorRecitationTests
             JsonSerializer.Serialize(new { subtaskIds }, AgentJson.Options),
             results.Length == 0 ? null : JsonSerializer.Serialize(new { agentResults = results }, AgentJson.Options));
 
-    private static object Result(string status, bool? acceptancePassed = null, string? error = null, string? acceptanceDetail = null) =>
-        new { agentRunId = Guid.NewGuid(), status, error, acceptancePassed, acceptanceDetail };
+    private static object Result(string status, bool? acceptancePassed = null, string? error = null, string? acceptanceDetail = null, string? acceptanceOracleNote = null) =>
+        new { agentRunId = Guid.NewGuid(), status, error, acceptancePassed, acceptanceDetail, acceptanceOracleNote };
 
     private static SupervisorPriorDecision Prior(int seq, string kind, string payloadJson, string? outcomeJson = null) => new()
     {

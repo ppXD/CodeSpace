@@ -145,6 +145,16 @@ public sealed record SupervisorAgentResult
     public string? AcceptanceDetail { get; init; }
 
     /// <summary>
+    /// The grade's oracle-integrity note (<c>BenchmarkGrade.OracleNote</c>): a voided tamper, a judge graded with nothing
+    /// anchoring it, or a check that could not run isolated (<c>oracle: UNVERIFIED (…)</c>). Rides beside
+    /// <see cref="AcceptanceDetail"/> rather than inside it, because a PASS carries nothing else to its readers: without it a
+    /// <c>make check</c> pass reached the Room and the decider as a plain, verified "tests-passed". Null-omitted, so a unit
+    /// whose grade owed no note serializes byte-identical to before.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AcceptanceOracleNote { get; init; }
+
+    /// <summary>
     /// The one <see cref="AcceptanceDetail"/> prefix NO grader mints: it marks a detail composed from
     /// <see cref="InfraExitReason"/> BEFORE any check ran (<c>infra:model_credential_broker_unavailable</c>), where
     /// every other convention — <c>grade-error:</c>, <c>clone-failed:</c>, <c>setup-failed:</c>,

@@ -120,7 +120,7 @@ public class AgentRunExecutorAcceptanceTests
     public async Task A_self_reported_failure_whose_check_also_fails_stays_failed_with_no_contradiction()
     {
         var evidenceId = Guid.NewGuid();
-        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = false, Detail = "tests-failed-exit-1", EvidenceArtifactId = evidenceId, EvidenceTail = "the current oracle diagnosis", Class = GradeFailureClass.Genuine });
+        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = false, Detail = "tests-failed-exit-1", EvidenceArtifactId = evidenceId, EvidenceTail = "the current oracle diagnosis", Class = GradeFailureClass.Genuine, OracleNote = "ORACLE TAMPER VOIDED \u2014 x" });
 
         var claimed = FailedWithWork();
         var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), claimed, workspace: null, CancellationToken.None);
@@ -131,6 +131,7 @@ public class AgentRunExecutorAcceptanceTests
         result.AcceptanceEvidenceId.ShouldBe(evidenceId);
         result.AcceptanceEvidenceTail.ShouldBe("the current oracle diagnosis");
         result.AcceptanceFailureClass.ShouldBe(GradeFailureClass.Genuine);
+        result.AcceptanceOracleNote.ShouldBe("ORACLE TAMPER VOIDED \u2014 x", "a voided tamper on a failing grade is as much the reader's business as on a passing one");
         result.Contradiction.ShouldBeNull("the claim and the verdict AGREE — an over-claim stamp here would be a lie");
         result.Error.ShouldBe(claimed.Error, "the agent's own failure text is not overwritten by the fail-closed sentence");
         result.ExitReason.ShouldBe(claimed.ExitReason, "the run failed on its own report, not on a fail-closed re-grade");
@@ -268,6 +269,40 @@ public class AgentRunExecutorAcceptanceTests
         result.Status.ShouldBe(AgentRunStatus.Succeeded);
         result.AcceptancePassed.ShouldBe(true, "every repo's own check passed — the run's acceptance is no longer left null on a multi-repo result");
         grader.Calls.ShouldBe(2, "each repo with a produced branch is graded independently");
+    }
+
+    [Fact]
+    public async Task A_grades_oracle_note_reaches_the_run_result()
+    {
+        // The note is the only thing separating a self-graded pass from a protected one; the fold used to drop it,
+        // so a forged scratch-lane pass read as a plain "tests-passed" to every downstream reader.
+        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "tests-passed", OracleNote = "oracle: UNVERIFIED (x)" });
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), Succeeded(), workspace: null, CancellationToken.None);
+
+        result.AcceptancePassed.ShouldBe(true);
+        result.AcceptanceOracleNote.ShouldBe("oracle: UNVERIFIED (x)");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_pass_keeps_every_repos_oracle_note_named_by_repo()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "exit 0" });
+        grader.GradeByBranch["agent/api"] = new BenchmarkGrade { Passed = true, Detail = "exit 0", OracleNote = "oracle: UNVERIFIED (x)" };
+
+        var multi = Succeeded() with
+        {
+            RepositoryResults = new[]
+            {
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "web", ProducedBranch = "agent/web" },
+                new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "api", ProducedBranch = "agent/api" },
+            },
+        };
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, workspace: null, CancellationToken.None);
+
+        result.AcceptanceDetail.ShouldBe("accepted");
+        result.AcceptanceOracleNote.ShouldBe("repo 'api': oracle: UNVERIFIED (x)", "the aggregate pass must not wash out what one repo's grade said about its own oracle");
     }
 
     [Fact]

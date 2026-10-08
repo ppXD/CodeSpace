@@ -188,6 +188,21 @@ public class SupervisorUnitAcceptanceTests
         SupervisorOutcome.HasSettledEvidence(new[] { SupervisorTurnService.InfraExitVerdict(ended)! }).ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData("oracle: UNVERIFIED (`make` runs against the graded tree, which can supply its configuration)")]
+    [InlineData(null)]
+    public void An_agent_graded_units_oracle_note_survives_the_compact(string? note)
+    {
+        // AgentRunResult.AcceptanceOracleNote had a writer and no reader: an agent-graded pass the grader labelled
+        // UNVERIFIED reached the supervisor tape, the Room and the decider as a plain "tests-passed".
+        var result = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", AcceptancePassed = true, AcceptanceDetail = "tests-passed", AcceptanceOracleNote = note };
+
+        var compact = SupervisorOutcome.ProjectCompact(Guid.NewGuid(), nameof(AgentRunStatus.Succeeded), rowError: null, JsonSerializer.Serialize(result, AgentJson.Options));
+
+        compact.AcceptanceOracleNote.ShouldBe(note);
+        JsonSerializer.Serialize(compact, AgentJson.Options).Contains("acceptanceOracleNote", StringComparison.Ordinal).ShouldBe(note is not null, "an un-noted unit stays byte-identical on the tape");
+    }
+
     /// <summary>
     /// One attempt as the tape actually records it: through the SAME <see cref="SupervisorOutcome.ProjectCompact"/>
     /// production folds a durable AgentRun row with, so a fixture can never carry an exit reason the projector would

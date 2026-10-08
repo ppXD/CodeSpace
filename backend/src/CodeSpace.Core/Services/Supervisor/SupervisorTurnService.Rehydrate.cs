@@ -862,6 +862,9 @@ public sealed partial class SupervisorTurnService
             {
                 AcceptancePassed = grade.Passed,
                 AcceptanceDetail = grade.Detail,
+                // The grade's integrity note rides beside the detail: a pass carries nothing else, so without it a check
+                // the grader labelled UNVERIFIED (or a voided tamper) reached the Room and the decider as a clean pass.
+                AcceptanceOracleNote = grade.OracleNote,
                 AcceptanceEvidenceId = grade.EvidenceArtifactId,
                 // P5-2: the diagnosis rides the tape ONLY on failure — a pass has nothing to repair, and the
                 // common green wave must not pay the tail's tape/prompt cost.
@@ -1703,7 +1706,9 @@ public sealed partial class SupervisorTurnService
             }
         }
 
-        return new BenchmarkGrade { Passed = true, Detail = Annotated("accepted", oracleNotes.Count == 0 ? null : string.Join("; ", oracleNotes)) };
+        var notes = oracleNotes.Count == 0 ? null : string.Join("; ", oracleNotes);
+
+        return new BenchmarkGrade { Passed = true, Detail = Annotated("accepted", notes), OracleNote = notes };
     }
 
     /// <summary>The verdict detail plus the oracle's integrity note, when there is one — the ONLY route a voided tamper or an unprotected judge has onto the durable stop outcome, which carries pass + detail and nothing else. No note ⇒ the detail verbatim (the dominant case stays byte-identical).</summary>

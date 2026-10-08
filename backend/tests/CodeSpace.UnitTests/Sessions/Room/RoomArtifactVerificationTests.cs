@@ -41,6 +41,19 @@ public class RoomArtifactVerificationTests
         verification.CheckKind.ShouldBe("acceptance");
     }
 
+    [Theory]
+    [InlineData("oracle: UNVERIFIED (`make` runs against the graded tree, which can supply its configuration)", "tests-passed", RoomOracleProtection.Unverified)]
+    [InlineData("ORACLE TAMPER VOIDED — candidate changed protected path(s), restored from base: tests/x; oracle: UNVERIFIED (y)", "tests-passed", RoomOracleProtection.Unverified)]
+    [InlineData("oracle: graded UNPROTECTED (no base recorded)", "tests-passed", RoomOracleProtection.Unanchored)]   // the grader's own carrier — now actually read
+    [InlineData("ORACLE TAMPER VOIDED — candidate changed protected path(s), restored from base: check.sh", "tests-passed", RoomOracleProtection.None)]   // the base's judge decided it — protected, not weakened
+    [InlineData("oracle: UNVERIFIED (x)", "tests-passed — graded on the candidate's own solution.sh", RoomOracleProtection.Subject)]   // the more specific claim wins
+    public void A_units_oracle_note_decides_its_rows_protection_tag(string note, string detail, RoomOracleProtection expected)
+    {
+        var verification = RoomProjector.ArtifactVerificationOf(Unit(true, detail) with { AcceptanceOracleNote = note }, "backend", NoLogs);
+
+        verification.OracleProtection.ShouldBe(expected);
+    }
+
     [Fact]
     public void A_WAIVED_unit_is_unrun_never_a_fabricated_pass_or_a_reported_rejection()
     {

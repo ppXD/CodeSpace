@@ -183,6 +183,10 @@ public sealed record AgentRunResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public Benchmark.GradeFailureClass? AcceptanceFailureClass { get; init; }
 
+    /// <summary>The acceptance grade's oracle-integrity note (<c>BenchmarkGrade.OracleNote</c>) — a voided tamper, a judge that ran unprotected, or a check that could not run isolated, so a self-graded pass is never read as a plain <c>tests-passed</c>. Null when the grade owed none; null-omitted so older rows stay byte-identical.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public string? AcceptanceOracleNote { get; init; }
+
     /// <summary>
     /// Whether this run's self-report contradicted its objective grade (P4-1) — a
     /// <c>CodeSpace.Core.Services.Agents.AgentContradiction</c> value. BOTH values are reachable on this lane:

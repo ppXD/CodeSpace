@@ -1705,6 +1705,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             : "      acceptance PASSED — this unit's definition-of-done check ran green against its branch; the work is objectively verified.");
 
         AppendSubjectClause(builder, result);
+        AppendOracleNoteClause(builder, result);
     }
 
     /// <summary>
@@ -1898,6 +1899,14 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         if (AcceptanceOracleProtection.SubjectFilesIn(result.AcceptanceDetail) is not { Length: > 0 } files) return;
 
         builder.AppendLine($"      {AcceptanceOracleProtection.SubjectClausePhrase(files)}.");
+    }
+
+    /// <summary>The grade's oracle note on a PASS (a check that could not run isolated, a voided tamper, an unanchored judge) — the pass branch renders no evidence, so this line is the only way the fact reaches the brain weighing a merge. Silent, byte-identical, when the grade owed none. Renders <see cref="AcceptanceOracleProtection.OracleNoteClausePhrase"/> verbatim, as the recitation does.</summary>
+    private static void AppendOracleNoteClause(StringBuilder builder, SupervisorAgentResult result)
+    {
+        if (result.AcceptanceOracleNote is not { Length: > 0 } note) return;
+
+        builder.AppendLine($"      {AcceptanceOracleProtection.OracleNoteClausePhrase(note)}");
     }
 
     /// <summary>

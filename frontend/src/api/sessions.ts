@@ -318,8 +318,9 @@ export interface WorkPlanConfirmationOutcome { resumed: boolean; approved: boole
 /// word the server has to find at the front of whatever language the operator typed.
 export type SupervisorAnswerDecision = "approve" | "revise" | "reject";
 /// Whether an objective check's judge program was protected from candidate tampering — read off the same Detail
-/// markers the supervisor decider prompt already decodes, never a second definition.
-export type RoomOracleProtection = "None" | "Unanchored" | "Subject" | "Protected";
+/// markers and oracle note the supervisor decider prompt already decodes, never a second definition. `Unverified`: the
+/// check ran, but the grader could not isolate it, so its verdict may rest on bytes the platform does not own.
+export type RoomOracleProtection = "None" | "Unanchored" | "Subject" | "Protected" | "Unverified";
 
 /// One PER-ARTIFACT / PER-REPOSITORY verification fact (Launch Extremis P21) — which check ran against THIS
 /// delivered artifact or repository, distinct from every OTHER one the same turn produced. Populated ONLY from

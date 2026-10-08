@@ -22,7 +22,7 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// oracle without duplicating either. Scoped because the workspace resolver injects the DbContext; the registries
 /// it resolves are singletons. Dormant until A3 folds its verdict at the supervisor's accept boundary.
 /// </summary>
-public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IScopedDependency
+public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IScopedDependency
 {
     /// <summary>
     /// The acceptance-evaluation machinery's version, stamped onto every receipt this funnel mints (Q-freeze
@@ -30,7 +30,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// the SAME PR as any change to grading semantics — oracle dispatch, restore/tamper behavior, evidence
     /// capture, fail-closed arms. Pinned by test; the literal is the wire value on durable receipts.
     /// </summary>
-    public const string EvaluatorVersion = "supervisor-acceptance/v9";   // v9: the setup and the check run under the PRODUCING run's posture (network, egress allowlist, memory/cpu ceilings), narrow-only; a request with none grades network-off under the Confined ceilings; a check killed at that ceiling grades tests-resource-exhausted (Environment) and a setup the sandbox severed grades setup-failed-network-severed. v8: every grade step runs under a bounded window
+    public const string EvaluatorVersion = "supervisor-acceptance/v10";   // v10: a derived judge's DIRECTORY is guarded (hooks a runtime auto-loads put back, the candidate's other changes kept and the grade labelled UNVERIFIED), the judge's scope is compared again after the setup step (platform bytes put back, setup outputs kept and reported) and after the check (a pass whose platform-owned judge bytes changed is voided as tests-judge-changed-during-check), and every check runs under the isolated oracle runtime (fixed PATH, platform-owned python behind -I); a check that could not be isolated (shell, node, a runner, a root judge) says so on OracleNote. v9: the setup and the check run under the PRODUCING run's posture (network, egress allowlist, memory/cpu ceilings), narrow-only; a request with none grades network-off under the Confined ceilings; a check killed at that ceiling grades tests-resource-exhausted (Environment) and a setup the sandbox severed grades setup-failed-network-severed. v8: every grade step runs under a bounded window
 
     /// <summary>The grading clone + oracle commands run on the worker host's own local runner. NOT the deployment
     /// default (<c>AgentDefaultRunnerSetting</c>): this funnel never reads a caller-supplied runner kind, and the
@@ -461,10 +461,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         if (removeFailure is not null) return OracleProtectionOutcome.Fail(removeFailure);
 
-        if (string.IsNullOrEmpty(tampered))
-            return OracleProtectionOutcome.Clean($"oracle: {paths.Count} protected path(s) restored from {baseSha[..Math.Min(12, baseSha.Length)]} (no candidate changes)").WithSubject(Subject(spec, anchor, paths));
-
-        return OracleProtectionOutcome.Tampered($"ORACLE TAMPER VOIDED \u2014 candidate changed protected path(s), restored from base:\n{tampered}", tampered!).WithSubject(Subject(spec, anchor, paths));
+        return await GuardJudgeDirectoriesAsync(new JudgeRestore(directory, spec, anchor, paths, string.IsNullOrEmpty(tampered) ? null : tampered), timeoutSeconds, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -487,7 +484,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// </summary>
     private static SubjectAccount? Subject(SupervisorAcceptanceSpec spec, OracleAnchor anchor, IReadOnlyList<string> protectedPaths)
     {
-        var ran = AcceptanceOracleProtection.CommandProgramCandidates(spec).Where(p => !protectedPaths.Contains(p, StringComparer.Ordinal)).ToList();
+        var ran = AcceptanceOracleProtection.CommandProgramCandidates(spec).Where(p => !AcceptanceOracleProtection.Covers(protectedPaths, p)).ToList();
 
         if (ran.Count == 0) return null;
 
@@ -536,7 +533,7 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
     /// oracle output a talkative check can push out of the bounded tail — and the SUBJECT clause a PASS carries on
     /// its detail, which is the only carrier a green verdict has (both folds drop the evidence tail on a pass).
     /// </summary>
-    private readonly record struct OracleProtectionOutcome(BenchmarkGrade? Failure, string? EvidenceNote, string? IntegrityNote, string? DetailSuffix = null)
+    private readonly record struct OracleProtectionOutcome(BenchmarkGrade? Failure, string? EvidenceNote, string? IntegrityNote, string? DetailSuffix = null, RestoredOracle? Restored = null)
     {
         public static readonly OracleProtectionOutcome None = new(null, null, null);
 
@@ -551,10 +548,26 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             };
 
         /// <summary>The oracle was protected and the candidate left it alone — legible in the evidence, and deliberately silent on the grade (the quiet, dominant case).</summary>
-        public static OracleProtectionOutcome Clean(string evidenceNote) => new(null, evidenceNote, null);
+        public static OracleProtectionOutcome Clean(string evidenceNote, RestoredOracle restored) => new(null, evidenceNote, null, Restored: restored);
 
-        public static OracleProtectionOutcome Tampered(string evidenceNote, string paths) =>
-            new(null, evidenceNote, $"ORACLE TAMPER VOIDED \u2014 candidate changed protected path(s), restored from base: {Flatten(paths)}");
+        public static OracleProtectionOutcome Tampered(string evidenceNote, string paths, RestoredOracle restored) =>
+            new(null, evidenceNote, $"{OracleGuard.TamperNoteMarker} \u2014 candidate changed protected path(s), restored from base: {Flatten(paths)}", Restored: restored);
+
+        /// <summary>One more fact about the judge's bytes, in both carriers: <paramref name="prefix"/> and every path at the end of the evidence, the prefix and a bounded list on the grade's integrity note. No paths ⇒ unchanged.</summary>
+        public OracleProtectionOutcome WithAccount(string prefix, IReadOnlyList<string> paths) => paths.Count == 0 ? this : this with
+        {
+            EvidenceNote = AppendLine(EvidenceNote, $"{prefix}\n{string.Join('\n', paths)}"),
+            IntegrityNote = OracleRuntime.CombineNotes(IntegrityNote, $"{prefix} {OracleGuard.Flatten(paths)}"),
+        };
+
+        /// <summary>Bytes the candidate (or its setup step) left beside the judge, kept as written: the grade is labelled UNVERIFIED because the judge may read them. No paths ⇒ unchanged.</summary>
+        public OracleProtectionOutcome WithKept(string reason, IReadOnlyList<string> paths) => paths.Count == 0 ? this : this with
+        {
+            EvidenceNote = AppendLine(EvidenceNote, $"{OracleRuntime.UnverifiedNote(reason)}:\n{string.Join('\n', paths)}"),
+            IntegrityNote = OracleRuntime.CombineNotes(IntegrityNote, OracleRuntime.UnverifiedNote($"{reason}: {OracleGuard.Flatten(paths)}")),
+        };
+
+        private static string AppendLine(string? existing, string line) => existing is { Length: > 0 } ? $"{existing}\n{line}" : line;
 
         /// <summary>
         /// A judge the contract names, graded with NOTHING anchoring it — said out loud ON THE GRADE so absence of
@@ -650,10 +663,12 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
             }
         }
 
-        // Untracked additions under the protected paths — the patch path's uncommitted apply. Best-effort: a clean
-        // that cannot run is not worth failing an otherwise gradeable candidate over, and the tracked sweep above has
-        // already closed the committed case.
-        await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "clean", "-fdq", "--" }.Concat(paths)), cancellationToken).ConfigureAwait(false);
+        // Untracked additions under the protected paths — the patch path's uncommitted apply. Ignored ones too (-x): a
+        // patch can carry a file the base's .gitignore matches (a legacy `json.pyc` beside a python judge imports as
+        // `json`), and before the setup step nothing honest is untracked here. Best-effort: a clean that cannot run is
+        // not worth failing an otherwise gradeable candidate over, and the tracked sweep above has already closed the
+        // committed case.
+        await runner.RunAsync(GitSpec(directory, timeoutSeconds, new[] { "clean", "-fdxq", "--" }.Concat(paths)), cancellationToken).ConfigureAwait(false);
 
         return null;
     }
@@ -693,14 +708,45 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         if (setupSpec is not null)
         {
+            // The setup runs the candidate's own code (an `npm ci` lifecycle script, a `pip install -e .`) AFTER the
+            // restore, so the judge's scope is fingerprinted first and compared again once it has run.
+            var beforeSetup = protection.Restored?.Fingerprint(directory);
+
             var setupFailure = await RunSetupCommandAsync(runner, setupSpec, severed: setupEgress == SandboxEgressMode.None, cancellationToken).ConfigureAwait(false);
             if (setupFailure is not null) return await CaptureEvidenceAsync(WithSetupNotice(setupFailure, setupNotice), teamId, cancellationToken).ConfigureAwait(false);
+
+            protection = await ReassertOracleAsync(directory, protection, beforeSetup, timeoutSeconds, cancellationToken).ConfigureAwait(false);
+            if (protection.Failure is not null) return protection.Failure;
         }
 
-        var context = BenchmarkGradingContext.ForAcceptance(spec, teamId, timeoutSeconds, directory, runner) with { ProducerModel = producerModel };
+        var grade = await RunGuardedCheckAsync(request, runner, timeoutSeconds, protection.Restored, cancellationToken).ConfigureAwait(false);
 
-        var grade = await _graders.Resolve(spec.Kind ?? BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
+        return await CaptureEvidenceAsync(Annotate(grade, protection, setupNotice), teamId, cancellationToken).ConfigureAwait(false);
+    }
 
+    /// <summary>
+    /// The check itself, guarded: the platform-owned bytes are sealed and pinned for the runtime, the scopes are
+    /// fingerprinted just before it runs, and the grade is concluded against a second fingerprint just after
+    /// (<see cref="OracleGuard.AfterCheck"/>). With nothing restored, the check simply runs.
+    /// </summary>
+    private async Task<BenchmarkGrade> RunGuardedCheckAsync(WorkspaceGradeRequest request, PostureBoundSandboxRunner runner, int timeoutSeconds, RestoredOracle? restored, CancellationToken cancellationToken)
+    {
+        var pins = restored?.Pins ?? Array.Empty<string>();
+
+        OracleTree.Seal(request.Directory, pins);
+
+        var before = restored?.Fingerprint(request.Directory);
+
+        var context = BenchmarkGradingContext.ForAcceptance(request.Spec, request.TeamId, timeoutSeconds, request.Directory, runner) with { ProducerModel = request.ProducerModel, PinnedOraclePaths = pins };
+
+        var grade = await _graders.Resolve(request.Spec.Kind ?? BenchmarkGradingKind.TestsPass).GradeAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return restored is null || before is null ? grade : OracleGuard.AfterCheck(grade, before, restored.Fingerprint(request.Directory), restored.IsPlatformOwned);
+    }
+
+    /// <summary>The finished check's grade with everything the protection and setup steps owe its reader: the protection's evidence line and the setup notice at the head of the evidence, the subject clause on a PASS's detail, and every integrity note on the grade itself.</summary>
+    private static BenchmarkGrade Annotate(BenchmarkGrade grade, OracleProtectionOutcome protection, string? setupNotice)
+    {
         if (protection.EvidenceNote is not null)
             grade = grade with { EvidenceText = $"{protection.EvidenceNote}\n{grade.EvidenceText}" };
 
@@ -715,11 +761,9 @@ public sealed class SupervisorAcceptanceGrader : ISupervisorAcceptanceGrader, IS
 
         // The integrity note rides the GRADE, not just the evidence: the run-level stop fold carries pass + detail
         // only, and the bounded evidence tail keeps the END of oracle output — a talkative check pushes a prepended
-        // note straight out of it. Without this the floor's own tamper never reached the journal or the decider.
-        if (protection.IntegrityNote is not null)
-            grade = grade with { OracleNote = protection.IntegrityNote };
-
-        return await CaptureEvidenceAsync(grade, teamId, cancellationToken).ConfigureAwait(false);
+        // note straight out of it. Without this the floor's own tamper never reached the journal or the decider. The
+        // check's own runtime note (a check it could not isolate) rides beside it, never instead of it.
+        return grade with { OracleNote = OracleRuntime.CombineNotes(protection.IntegrityNote, grade.OracleNote) };
     }
 
     private sealed record WorkspaceGradeRequest(string Directory, SupervisorAcceptanceSpec Spec, Guid TeamId, int TimeoutSeconds, AcceptanceGradingPosture? Posture, ReviewModelIdentity? ProducerModel = null, OracleProtectionOutcome Protection = default);

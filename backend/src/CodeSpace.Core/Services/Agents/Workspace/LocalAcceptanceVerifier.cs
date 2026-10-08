@@ -66,7 +66,7 @@ public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuth
         if (after.Failure != null) return after.Failure;
         if (grade.Passed && await CheckDeclaredReceiptsAsync(context, cancellationToken).ConfigureAwait(false) is { } captureFailure) return captureFailure;
         if (await CheckScopeAsync(request, cancellationToken).ConfigureAwait(false) is { } scopeFailure) return scopeFailure;
-        return grade with { OracleNote = context.Spec!.OraclePaths is { Count: > 0 } ? "Explicit oracle file digests unchanged at pre/post observations; path-based execution is not pinned." : "No oracle file snapshot was declared; exact argv was executed without inferred dependency protection." };
+        return grade with { OracleNote = Eval.Benchmark.Graders.OracleRuntime.CombineNotes(grade.OracleNote, context.Spec!.OraclePaths is { Count: > 0 } ? "Explicit oracle file digests unchanged at pre/post observations; path-based execution is not pinned." : "No oracle file snapshot was declared; the argv ran without inferred dependency protection.") };
     }
 
     /// <summary>

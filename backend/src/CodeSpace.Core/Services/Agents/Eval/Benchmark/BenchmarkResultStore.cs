@@ -55,6 +55,7 @@ public sealed class BenchmarkResultStore : IBenchmarkResultStore, IScopedDepende
             ObservationSession = request.ObservationSession,
             OutcomeState = pairedProjection?.OutcomeState ?? EvalSuite.ClassifyResult(result).ToString(),
             OutcomeDetail = pairedProjection?.OutcomeDetail ?? result.Grade.Detail,
+            OracleNote = result.Grade.OracleNote,
             AgentRunId = pairedProjection?.AgentRunId ?? result.AgentRunId,
             Solved = pairedProjection?.Solved ?? result.Grade.Passed,
             RunStatus = pairedProjection?.RunStatus ?? result.RunStatus.ToString(),

@@ -2996,6 +2996,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             AcceptanceEvidenceId = graded.AcceptanceEvidenceId,
             AcceptanceEvidenceTail = graded.AcceptanceEvidenceTail,
             AcceptanceFailureClass = graded.AcceptanceFailureClass,
+            AcceptanceOracleNote = graded.AcceptanceOracleNote,
         },
         null => graded,
     };
@@ -3087,7 +3088,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     private static AgentRunResult FoldGrade(AgentRunResult result, BenchmarkGrade grade) =>
-        (grade.Passed ? result : AcceptanceFailed(result, grade.Detail)) with { AcceptancePassed = grade.Passed, AcceptanceDetail = grade.Detail, AcceptanceEvidenceId = grade.EvidenceArtifactId, AcceptanceEvidenceTail = grade.Passed ? null : AcceptanceEvidenceRenderer.ClipTail(grade.EvidenceTail), AcceptanceFailureClass = grade.Class };
+        (grade.Passed ? result : AcceptanceFailed(result, grade.Detail)) with { AcceptancePassed = grade.Passed, AcceptanceDetail = grade.Detail, AcceptanceEvidenceId = grade.EvidenceArtifactId, AcceptanceEvidenceTail = grade.Passed ? null : AcceptanceEvidenceRenderer.ClipTail(grade.EvidenceTail), AcceptanceFailureClass = grade.Class, AcceptanceOracleNote = grade.OracleNote };
 
     /// <summary>
     /// The run's own ORACLE INVENTORY for the C3 restore narrowing. On THIS lane the task carries exactly ONE
@@ -3137,6 +3138,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         using var scope = _scopeFactory.CreateScope();
         var grader = scope.ServiceProvider.GetRequiredService<ISupervisorAcceptanceGrader>();
+        var oracleNotes = new List<string>();
 
         foreach (var target in targets)
         {
@@ -3159,11 +3161,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // supervisor twin's aggregate — without it this lane's multi-repo failure receipts stay evidence-less.
                 return FoldGrade(result, grade with { Detail = $"repo '{target.Alias}': {grade.Detail}" });
             }
+
+            if (grade.OracleNote is { Length: > 0 } note) oracleNotes.Add($"repo '{target.Alias}': {note}");
         }
 
         _logger.LogInformation("Agent run {RunId}: the acceptance check passed for every repo", run.Id);
 
-        return FoldGrade(result, new BenchmarkGrade { Passed = true, Detail = "accepted" });
+        return FoldGrade(result, new BenchmarkGrade { Passed = true, Detail = "accepted", OracleNote = oracleNotes.Count == 0 ? null : string.Join("; ", oracleNotes) });
     }
 
     /// <summary>Whether <paramref name="result"/> carries a recorded patch this executor could grade with (S2) — a base to anchor the independent clone on, PLUS either an inline diff or an offloaded artifact reference. Absent any one of these there is genuinely nothing to apply.</summary>

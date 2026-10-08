@@ -42,6 +42,12 @@ namespace CodeSpace.Core.Services.Supervisor;
 /// <c>SupervisorDecisionSchema</c>'s instruction never to name a file the subtask is expected to modify, not by
 /// anything enforced here.</para>
 ///
+/// <para><b>The grade guards the judge's directory, not just its file.</b> A derived program file is the judge and is
+/// restored from base; its <see cref="JudgeScope"/> — the directory around it — is GUARDED by the grader: a hook a runtime
+/// loads by its presence is put back, and anything else the candidate changed there is kept (it is often the work
+/// itself) while the grade is labelled unverified. The derivation below still names program FILES; the guard is the
+/// grader's, so this file's extraction rule stays the one thing it pins.</para>
+///
 /// <para>Pure by construction: repository existence is answered by a caller-supplied predicate, so the extraction
 /// rule is unit-testable without git and the production caller answers it off the clone it already has.</para>
 /// </summary>
@@ -64,6 +70,32 @@ public static class AcceptanceOracleProtection
     /// <summary>The repo-relative paths <paramref name="argv"/> makes RUN-OWNED oracle bytes: the program file(s) <paramref name="oracleFloorPrograms"/> also names, kept only when <paramref name="repoFileExists"/> says the repository actually holds that file at the graded base. A program the candidate CREATED is not the operator's judge and is deliberately not protected; neither is one the run's own floor never runs.</summary>
     public static IReadOnlyList<string> DeriveProtectedPaths(IReadOnlyList<string>? argv, IReadOnlyList<string>? oracleFloorPrograms, Func<string, bool> repoFileExists) =>
         RunOwned(ProgramCandidates(argv), oracleFloorPrograms).Where(repoFileExists).ToList();
+
+    /// <summary>
+    /// The bytes a judge program reaches for, as one repo-relative pathspec: its whole directory (<c>tests/check.py</c> →
+    /// <c>tests/</c>), because what decides a judge's verdict is rarely its file alone — the sibling it imports, the
+    /// case it runs, the hook its runner auto-loads all live beside it. A judge at the repository ROOT has only itself:
+    /// its directory is the candidate's whole tree, so the rest of what it reads cannot be told apart from the work, and
+    /// the grade says so instead.
+    ///
+    /// <para>Who owns that directory depends on the lane. A benchmark fixture owns it whole, so the cell's version of it
+    /// is replaced. On the repo lane it also holds honest work (a co-located test's subject, an expected output the goal
+    /// asked to update), so the grader guards it rather than restoring it, and labels a grade whose judge directory holds
+    /// the candidate's bytes.</para>
+    /// </summary>
+    public static string JudgeScope(string program)
+    {
+        var slash = program.LastIndexOf('/');
+
+        return slash < 0 ? program : program[..(slash + 1)];
+    }
+
+    /// <summary>Whether <paramref name="path"/> lies within <paramref name="paths"/> — equal to one of them, or under one that names a directory (a trailing <c>/</c>).</summary>
+    public static bool Covers(IEnumerable<string> paths, string path) =>
+        paths.Any(p => string.Equals(p, path, StringComparison.Ordinal) || p.EndsWith('/') && path.StartsWith(p, StringComparison.Ordinal));
+
+    /// <summary>A command token as the repo-relative path it names, or null when it cannot name a repository file (absolute, escaping, shell syntax, or a bare word) — the one normalization the grade's runtime and the derivation share.</summary>
+    public static string? RepoPath(string token) => Normalize(token);
 
     /// <summary>
     /// Whether <paramref name="spec"/> can be protected at all — an AUTHORED <c>ProtectedPaths</c> that is not just
@@ -142,6 +174,16 @@ public static class AcceptanceOracleProtection
 
     /// <summary>Whether <paramref name="acceptanceDetail"/> carries the <see cref="UnanchoredDetailMarker"/> — the ONE reader for a Room-level protection classification, mirroring <see cref="SubjectFilesIn"/>'s role for the subject case.</summary>
     public static bool IsUnanchored(string? acceptanceDetail) => acceptanceDetail?.Contains(UnanchoredDetailMarker, StringComparison.Ordinal) == true;
+
+    /// <summary>Whether <paramref name="oracleNote"/> says the check could not run isolated (<see cref="Agents.Eval.Benchmark.Graders.OracleRuntime.UnverifiedNoteMarker"/>) — the ONE reader for that classification, for the Room and the benchmark metrics alike.</summary>
+    public static bool IsUnverified(string? oracleNote) => oracleNote?.Contains(Agents.Eval.Benchmark.Graders.OracleRuntime.UnverifiedNoteMarker, StringComparison.Ordinal) == true;
+
+    /// <summary>
+    /// The clause a graded unit's ORACLE NOTE renders as in both prompt sections — the decider's verdict line and the
+    /// recitation's compact — so the two cannot disagree about a row. The note is self-describing (a voided tamper, an
+    /// unanchored judge, a check that could not run isolated); this only frames it.
+    /// </summary>
+    public static string OracleNoteClausePhrase(string oracleNote) => $"oracle note: {oracleNote}";
 
     /// <summary>
     /// The neutral clause a PASS carries for <paramref name="files"/> (from <see cref="SubjectFilesIn"/>) — worded
