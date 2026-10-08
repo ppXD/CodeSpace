@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Completion.Exceptions;
 using CodeSpace.Messages.Contracts;
 
 namespace CodeSpace.Core.Services.Completion;
@@ -65,7 +66,9 @@ public static class CompletionPolicy
     /// edit arguing accumulated conformance evidence), never a per-launch bypass, and silently stamping a weaker
     /// mode than the author declared stays the one unacceptable direction. Unknown vocabulary THROWS as before:
     /// the validator rejects it at authoring time; this throw is the launch-time backstop for rows that predate
-    /// (or evaded) it. Callers derive <paramref name="mode"/> with <c>RunModeClassifier</c> from the SAME
+    /// (or evaded) it — and so is the cohort refusal for an authored definition, which the validator also refuses
+    /// at save. Both throw <see cref="CompletionAdmissionRefusedException"/>, so a caller launching many definitions
+    /// from one event can isolate the refusal to its own definition. Callers derive <paramref name="mode"/> with <c>RunModeClassifier</c> from the SAME
     /// (projection kind, definition json) pair the run row will carry, so the admission decision and the
     /// terminal authority's later mode reading can never disagree.
     /// </summary>
@@ -74,7 +77,7 @@ public static class CompletionPolicy
         null => DefaultModeFor(profile),
         Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow => CompletionEnforcementMode.Shadow,
         Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced when IsEnforceable(profile) => CompletionEnforcementMode.Enforced,
-        Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced => throw new InvalidOperationException($"Definition opts into Enforced but mode '{mode}' {(profile is null ? "has no registered conformance profile" : $"holds ProtocolReadiness.{profile.Readiness}")} — the Enforced cohort admits only Enforceable modes; graduation is a reviewed ModeProfileRegistry edit arguing accumulated conformance evidence, never a launch-time bypass."),
-        _ => throw new InvalidOperationException($"Unknown definition completionMode '{definitionCompletionMode}' — expected '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow}' or '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced}'; refusing to launch with an unreadable enforcement opt-in."),
+        Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced => throw new CompletionAdmissionRefusedException($"Definition opts into Enforced but mode '{mode}' {(profile is null ? "has no registered conformance profile" : $"holds ProtocolReadiness.{profile.Readiness}")} — the Enforced cohort admits only Enforceable modes; graduation is a reviewed ModeProfileRegistry edit arguing accumulated conformance evidence, never a launch-time bypass."),
+        _ => throw new CompletionAdmissionRefusedException($"Unknown definition completionMode '{definitionCompletionMode}' — expected '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeShadow}' or '{Messages.Dtos.Workflows.WorkflowDefinition.CompletionModeEnforced}'; refusing to launch with an unreadable enforcement opt-in."),
     };
 }

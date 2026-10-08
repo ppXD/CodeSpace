@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
@@ -29,7 +30,7 @@ public class SupervisorDefinitionBuilderTests
         new TriggerManualNode(),
         new AgentSupervisorNode(null!),
         new TerminalNode(),
-    }));
+    }), new ModeProfileRegistry());
 
     private static TaskBuildContext Context(ResolvedAgentProfile? profile = null, RouteCaps? caps = null, Guid? brainModelId = null, bool brainModelPinIneligible = false, IReadOnlyList<Guid>? allowedModelIds = null, IReadOnlyList<Guid>? allowedAgentDefinitionIds = null, IReadOnlyList<string>? acceptanceChecks = null, bool brainModelPinned = false) => new()
     {

@@ -12,6 +12,7 @@ using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.RunSources;
+using CodeSpace.Core.Services.Workflows.RunSources.Matchers;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Core.Services.Workflows.Reconciliation;
 using CodeSpace.Messages.Agents;
@@ -162,6 +163,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     public async Task<Guid> CreateAsync(Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, bool enabled, CancellationToken cancellationToken)
     {
         EnsureValidDefinition(definition);
+        await EnsureActivationRepositoriesHeldAsync(teamId, activations, cancellationToken).ConfigureAwait(false);
 
         var slug = await DeriveAvailableSlugAsync(teamId, name, cancellationToken).ConfigureAwait(false);
 
@@ -219,6 +221,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     public async Task UpdateAsync(Guid workflowId, Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, CancellationToken cancellationToken)
     {
         EnsureValidDefinition(definition);
+        await EnsureActivationRepositoriesHeldAsync(teamId, activations, cancellationToken).ConfigureAwait(false);
 
         var workflow = await LoadWorkflowAsync(workflowId, teamId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"Workflow {workflowId} not found in team {teamId}.");
@@ -2136,6 +2139,29 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             result.Errors.Count, string.Join(" | ", result.Errors));
 
         throw new WorkflowValidationException(result.Errors);
+    }
+
+    /// <summary>
+    /// Every repository an activation names must be one this team holds. The dispatcher already offers a team only
+    /// its own repositories' events, so a foreign id can never fire — which is exactly why it must not be stored: it
+    /// would look like a configured trigger that silently never runs, and it is the shape a cross-tenant subscription
+    /// takes. Ownership, not liveness: a repository the team has since removed still belongs to it, and refusing
+    /// that would block every later edit of the workflow over a reference the ingestion gate already makes inert.
+    /// </summary>
+    private async Task EnsureActivationRepositoriesHeldAsync(Guid teamId, IReadOnlyList<WorkflowActivationInput> activations, CancellationToken cancellationToken)
+    {
+        var named = activations.SelectMany(a => ActivationRepositoryReferences.Read(a.Config)).Distinct().ToList();
+
+        if (named.Count == 0) return;
+
+        var held = await _db.Repository.AsNoTracking().Where(r => r.TeamId == teamId && named.Contains(r.Id)).Select(r => r.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var foreign = named.Except(held).ToList();
+
+        if (foreign.Count == 0) return;
+
+        _logger.LogWarning("Workflow activations rejected: they name repositories outside the team. TeamId={TeamId} Repositories={Repositories}", teamId, string.Join(", ", foreign));
+
+        throw new WorkflowValidationException(foreign.Select(id => $"An activation names repository {id}, which is not a repository of this team.").ToList());
     }
 
     // ── Slug generation ── the workflow's clean-URL handle. Display-only (never a variable-path

@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Messages.Constants;
@@ -41,7 +42,7 @@ public class DefinitionValidatorContainerHardeningTests
             new StubNode("builtin.terminal", NodeKind.Terminal),
         };
 
-        return new DefinitionValidator(new NodeRegistry(nodes));
+        return new DefinitionValidator(new NodeRegistry(nodes), new ModeProfileRegistry());
     }
 
     // ─── 1. Body-reachable-from-start (generic: map / loop / try) ─────────────────

@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Authority.Exceptions;
+using CodeSpace.Core.Services.Completion.Exceptions;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -25,8 +26,9 @@ namespace CodeSpace.Core.Services.Workflows.RunSources;
 ///   2. add one more <c>INotificationHandler&lt;NewEvent&gt;</c> line + a tiny pass-through method
 ///
 /// Two lines per new event type. The matcher does the matching; the dispatcher's job is
-/// "load activations of this type, fire matches, persist a request + run, hand to the
-/// background-job dispatcher."
+/// "load the event repository's team's activations of this type, fire matches, persist a
+/// request + run, hand to the background-job dispatcher." A delivery never reaches another
+/// team's activations — an activation is a subscription inside its own team.
 ///
 /// Pipeline per match: insert <see cref="WorkflowRunRequest"/> (Consumed) → insert
 /// <see cref="WorkflowRun"/> (Pending) pointing at the request → call <c>IWorkflowRunDispatcher</c>
@@ -74,6 +76,17 @@ public sealed class RunSourceDispatcher :
 
     private async Task DispatchAsync(NormalizedEvent normalizedEvent, CancellationToken cancellationToken)
     {
+        var teamId = await ResolveEventTeamAsync(normalizedEvent, cancellationToken).ConfigureAwait(false);
+
+        if (teamId == null)
+        {
+            // Normalization only ever names a repository its hook resolved, so this is a repository removed (or
+            // never held) between receipt and dispatch: no team may run it, and there is no team to attribute an
+            // audit row to.
+            _logger.LogWarning("Dispatcher: {EventType} names repository {RepositoryId}, which no team holds — nothing to start or audit", normalizedEvent.GetType().Name, normalizedEvent.RepositoryId);
+            return;
+        }
+
         var candidateMatchers = _matcherRegistry.All.Where(m => CanHandle(m, normalizedEvent)).ToList();
 
         if (candidateMatchers.Count == 0)
@@ -81,27 +94,62 @@ public sealed class RunSourceDispatcher :
             // No matcher knows about this event type at all — that's a normalizer bug or a
             // matcher missing for a newly-added event. Audit it; the engine has no built-in
             // matcher catalog so this surface only fires for malformed registrations.
-            await WriteNoMatchAuditAsync(normalizedEvent, cancellationToken).ConfigureAwait(false);
+            await _auditor.WriteNoMatchRejectedAsync(normalizedEvent, teamId.Value, cancellationToken).ConfigureAwait(false);
             return;
         }
 
         var activationTypeKeys = candidateMatchers.Select(m => m.TypeKey).ToList();
-        var activations = await LoadActiveActivationsAsync(activationTypeKeys, cancellationToken).ConfigureAwait(false);
+        var activations = await LoadActiveActivationsAsync(teamId.Value, activationTypeKeys, cancellationToken).ConfigureAwait(false);
 
         if (activations.Count == 0)
         {
             // At least one matcher could classify this event, but no workflow subscribes to
             // it. Write a Rejected audit row so the operator sees "your PR was detected but
             // no workflow listens for it" instead of silence.
-            await WriteNoMatchAuditAsync(normalizedEvent, cancellationToken).ConfigureAwait(false);
+            await _auditor.WriteNoMatchRejectedAsync(normalizedEvent, teamId.Value, cancellationToken).ConfigureAwait(false);
             return;
         }
 
+        var (firedRunIds, anyRefused) = await FireEachAsync(activations, candidateMatchers, normalizedEvent, cancellationToken).ConfigureAwait(false);
+
+        // All activations of the right type existed, but their CONFIG filters (e.g.
+        // repositoryId scope) excluded this event. Audit the no-fire outcome so the operator
+        // can see "your activation didn't match because its repositoryId filter excluded this PR".
+        if (firedRunIds.Count == 0 && !anyRefused)
+            await _auditor.WriteNoMatchRejectedAsync(normalizedEvent, teamId.Value, cancellationToken).ConfigureAwait(false);
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+        await DispatchAfterCommitAsync(firedRunIds, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The team holding the event's repository — the ONLY team whose activations may receive it. Resolved once,
+    /// before any activation is read: an activation is a subscription inside its own team, so one naming no
+    /// repository means "any repository of this team", never "any repository anywhere". A removed repository is
+    /// held by no team; nothing it delivers may start a run.
+    /// </summary>
+    private async Task<Guid?> ResolveEventTeamAsync(NormalizedEvent normalizedEvent, CancellationToken cancellationToken) =>
+        await _db.Repository.AsNoTracking()
+            .Where(r => r.Id == normalizedEvent.RepositoryId && r.DeletedDate == null)
+            .Select(r => (Guid?)r.TeamId)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Fire every activation, each in isolation. A refusal that belongs to ONE activation — its publisher's authority,
+    /// its definition's completion opt-in — costs that activation's run and leaves a Rejected row naming it; every
+    /// sibling still starts. Anything else (a database or job-store failure) is not that activation's property and
+    /// propagates, so the delivery rolls back and the provider redelivers.
+    /// </summary>
+    private async Task<(List<Guid> FiredRunIds, bool AnyRefused)> FireEachAsync(IReadOnlyList<WorkflowActivation> activations, IReadOnlyList<IRunSourceMatcher> candidateMatchers, NormalizedEvent normalizedEvent, CancellationToken cancellationToken)
+    {
         var firedRunIds = new List<Guid>();
-        var authorityRefused = false;
+        var anyRefused = false;
+
         foreach (var activation in activations)
         {
             var matcher = candidateMatchers.First(m => m.TypeKey == activation.TypeKey);
+
             try
             {
                 var runId = await FireIfMatchesAsync(activation, matcher, normalizedEvent, cancellationToken).ConfigureAwait(false);
@@ -109,32 +157,41 @@ public sealed class RunSourceDispatcher :
             }
             catch (AgentAuthorityDeniedException ex)
             {
-                authorityRefused = true;
+                anyRefused = true;
                 _logger.LogWarning("Webhook activation authority refused. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Code={Code} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Code, ex.Reason);
-                await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
-                {
-                    TeamId = activation.Workflow.TeamId, RepositoryId = normalizedEvent.RepositoryId, SourceType = activation.TypeKey,
-                    ExternalEventId = normalizedEvent.ProviderEventId, Reason = ex.Code,
-                    Detail = $"Activation {activation.Id} workflow {activation.WorkflowId}: {ex.Reason}",
-                    DedupKey = $"rejected:authority:{activation.Id:N}:{normalizedEvent.ProviderEventId}",
-                }, cancellationToken).ConfigureAwait(false);
+                await AuditRefusalAsync(activation, normalizedEvent, ex.Code, ex.Reason, "authority", cancellationToken).ConfigureAwait(false);
+            }
+            catch (CompletionAdmissionRefusedException ex)
+            {
+                anyRefused = true;
+                _logger.LogWarning("Webhook activation completion admission refused. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Message);
+                await AuditRefusalAsync(activation, normalizedEvent, WorkflowRunRequestRejectionReasons.CompletionAdmissionRefused, ex.Message, "admission", cancellationToken).ConfigureAwait(false);
             }
         }
 
-        // All activations of the right type existed, but their CONFIG filters (e.g.
-        // repositoryId scope) excluded this event. Audit the no-fire outcome so the operator
-        // can see "your activation didn't match because its repositoryId filter excluded this PR".
-        if (firedRunIds.Count == 0 && !authorityRefused)
-            await WriteNoMatchAuditAsync(normalizedEvent, cancellationToken).ConfigureAwait(false);
+        return (firedRunIds, anyRefused);
+    }
 
-        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    /// <summary>One Rejected row per (activation, delivery, refusal kind), so a provider's redelivery of the same refused event collapses onto it.</summary>
+    private async Task AuditRefusalAsync(WorkflowActivation activation, NormalizedEvent normalizedEvent, string reason, string detail, string refusalKind, CancellationToken cancellationToken) =>
+        await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
+        {
+            TeamId = activation.Workflow.TeamId, RepositoryId = normalizedEvent.RepositoryId, SourceType = activation.TypeKey,
+            ExternalEventId = normalizedEvent.ProviderEventId, Reason = reason,
+            Detail = $"Activation {activation.Id} workflow {activation.WorkflowId}: {detail}",
+            DedupKey = $"rejected:{refusalKind}:{activation.Id:N}:{normalizedEvent.ProviderEventId}",
+        }, cancellationToken).ConfigureAwait(false);
 
-        // Dispatch each matched run AFTER commit. RunAfterCommitAsync defers into the post-commit drain
-        // while a transaction is open (the ReceiveWebhookCommand path), so a worker can't pick up a
-        // runId before its row is visible — the exact race the previous inline dispatch hit, since the
-        // SaveChanges above only flushes within the still-open command transaction. With no ambient
-        // transaction (an event published directly, e.g. in tests) it runs inline. Reconciler covers any
-        // row whose dispatch is dropped (e.g. Hangfire transient outage).
+    /// <summary>
+    /// Dispatch each matched run AFTER commit. RunAfterCommitAsync defers into the post-commit drain
+    /// while a transaction is open (the ReceiveWebhookCommand path), so a worker can't pick up a
+    /// runId before its row is visible — the exact race the previous inline dispatch hit, since the
+    /// SaveChanges above only flushes within the still-open command transaction. With no ambient
+    /// transaction (an event published directly, e.g. in tests) it runs inline. Reconciler covers any
+    /// row whose dispatch is dropped (e.g. Hangfire transient outage).
+    /// </summary>
+    private async Task DispatchAfterCommitAsync(IReadOnlyList<Guid> firedRunIds, CancellationToken cancellationToken)
+    {
         foreach (var runId in firedRunIds)
         {
             try
@@ -146,30 +203,6 @@ public sealed class RunSourceDispatcher :
                 _logger.LogWarning(ex, "Webhook dispatcher: failed to dispatch run {RunId}; reconciler will retry", runId);
             }
         }
-    }
-
-    /// <summary>
-    /// Look up the team that owns the event's repository, then write the Rejected audit row.
-    /// Best-effort: if the repository was deleted between webhook receipt and dispatch, we
-    /// skip the audit row (no team to attribute it to).
-    /// </summary>
-    private async Task WriteNoMatchAuditAsync(NormalizedEvent normalizedEvent, CancellationToken cancellationToken)
-    {
-        var teamId = await _db.Repository.AsNoTracking()
-            .Where(r => r.Id == normalizedEvent.RepositoryId)
-            .Select(r => (Guid?)r.TeamId)
-            .SingleOrDefaultAsync(cancellationToken)
-            .ConfigureAwait(false);
-
-        if (teamId == null)
-        {
-            _logger.LogWarning(
-                "Dispatcher: no-match for {EventType} on repository {RepositoryId}, but repository was deleted — skipping audit",
-                normalizedEvent.GetType().Name, normalizedEvent.RepositoryId);
-            return;
-        }
-
-        await _auditor.WriteNoMatchRejectedAsync(normalizedEvent, teamId.Value, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>True iff this matcher knows the event TYPE (cheap probe; type-check only, no DB hit).</summary>
@@ -187,11 +220,12 @@ public sealed class RunSourceDispatcher :
         }
     }
 
-    private async Task<IReadOnlyList<WorkflowActivation>> LoadActiveActivationsAsync(IReadOnlyList<string> typeKeys, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<WorkflowActivation>> LoadActiveActivationsAsync(Guid teamId, IReadOnlyList<string> typeKeys, CancellationToken cancellationToken)
     {
         return await _db.WorkflowActivation
             .Include(a => a.Workflow)
-            .Where(a => typeKeys.Contains(a.TypeKey)
+            .Where(a => a.Workflow.TeamId == teamId
+                        && typeKeys.Contains(a.TypeKey)
                         && a.Enabled
                         && a.DeletedDate == null
                         && a.Workflow.Enabled

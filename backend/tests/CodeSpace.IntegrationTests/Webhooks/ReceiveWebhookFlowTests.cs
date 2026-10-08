@@ -328,6 +328,40 @@ public class ReceiveWebhookFlowTests
         SnapshotCapturedEvents().ShouldBeEmpty();
     }
 
+    [Theory]
+    [InlineData(true)]    // the hook an unbind / scope switch CAS'd to Cancelled because the provider never let us delete it
+    [InlineData(false)]   // the repository removed while its hook row is still in service
+    public async Task A_retired_hook_or_removed_repository_publishes_nothing_and_records_why(bool cancelHook)
+    {
+        // The per-repository path used to check only `active`, which nobody switches off on an unbind — so a hook the
+        // operator finished by hand (no remote id, nothing for the unbind to delete) kept starting runs for a
+        // repository the team had removed. Same gate the connection path already had, same reason on the row.
+        var secret = $"gh-sec-{Guid.NewGuid():N}";
+        var body = @"{""ref"":""refs/heads/main"",""before"":""b"",""after"":""a"",""pusher"":{""name"":""o"",""email"":""o@x""},""sender"":{""id"":1,""login"":""o""},""commits"":[]}";
+        var headers = new Dictionary<string, string>
+        {
+            ["X-GitHub-Event"] = "push",
+            ["X-GitHub-Delivery"] = $"retired-{Guid.NewGuid():N}",
+            ["X-Hub-Signature-256"] = ComputeGitHubSignature(body, secret)
+        };
+
+        var (webhookId, repositoryId) = await SeedAsync(ProviderKind.GitHub, secret).ConfigureAwait(false);
+        await RetireAsync(webhookId, repositoryId, cancelHook).ConfigureAwait(false);
+        ClearCapturedEvents();
+
+        await Should.ThrowAsync<InvalidOperationException>(() => SendReceiveWebhookAsync(webhookId, body, headers)).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().ShouldBeEmpty(customMessage: "a retired hook must start nothing — check WebhookIngestionService.IngestAsync's lifecycle and repository gates");
+
+        using var verify = _fixture.BeginScope();
+        var errors = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunRequest.AsNoTracking()
+            .Where(r => r.RepositoryId == repositoryId && r.Status == WorkflowRunRequestStatus.Rejected)
+            .Select(r => r.Error!)
+            .ToListAsync().ConfigureAwait(false);
+        errors.ShouldContain(e => e.StartsWith(WorkflowRunRequestRejectionReasons.WebhookRetired, StringComparison.Ordinal),
+            customMessage: "the refusal must be recorded under the reason the connection path already uses, attributed to the repository");
+    }
+
     [Fact]
     public async Task Unknown_webhook_id_throws_InvalidOperation()
     {
@@ -406,6 +440,17 @@ public class ReceiveWebhookFlowTests
         await db.SaveChangesAsync().ConfigureAwait(false);
 
         return (webhook.Id, repo.Id);
+    }
+
+    private async Task RetireAsync(Guid webhookId, Guid repositoryId, bool cancelHook)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        if (cancelHook)
+            await db.RepositoryWebhook.Where(w => w.Id == webhookId).ExecuteUpdateAsync(s => s.SetProperty(w => w.RegistrationStatus, RepositoryWebhookRegistrationStatus.Cancelled)).ConfigureAwait(false);
+        else
+            await db.Repository.Where(r => r.Id == repositoryId).ExecuteUpdateAsync(s => s.SetProperty(r => r.DeletedDate, (DateTimeOffset?)DateTimeOffset.UtcNow)).ConfigureAwait(false);
     }
 
     private async Task SendReceiveWebhookAsync(Guid webhookId, string body, IReadOnlyDictionary<string, string> headers)

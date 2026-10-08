@@ -12,7 +12,7 @@ namespace CodeSpace.Core.Services.Workflows.RunSources.Matchers;
 /// <para>Config schema (current shape):</para>
 /// <code>
 /// {
-///   "repositoryId": "&lt;uuid&gt;",       // optional — absent ⇒ any repository
+///   "repositoryId": "&lt;uuid&gt;",       // optional — absent ⇒ any repository of the activation's team
 ///   "branches": ["main", "release"]    // optional — absent/empty ⇒ any branch
 /// }
 /// </code>
@@ -27,6 +27,9 @@ namespace CodeSpace.Core.Services.Workflows.RunSources.Matchers;
 ///         a leading <c>refs/heads/</c> stripped) must equal one listed branch (OR, case-
 ///         sensitive per Git). Empty/absent/non-array → no branch filter.</item>
 /// </list>
+///
+/// <para>"No filter" is never wider than the activation's own team: <see cref="RunSourceDispatcher"/> offers an
+/// activation only events from repositories its team holds, so this filter only ever narrows within that set.</para>
 /// </summary>
 internal static class PushTriggerMatcherFilter
 {

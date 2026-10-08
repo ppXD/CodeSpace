@@ -35,6 +35,13 @@
   </ItemGroup>
 
   <ItemGroup>
+    <!-- The loopback provider API the integration and unit tiers already drive the real GitHub / GitLab classes over.
+         Linked rather than referenced because it is internal to the integration assembly; one source, so what "the
+         provider answered" means cannot drift between tiers. -->
+    <Compile Include="..\CodeSpace.IntegrationTests\Webhooks\StubProviderHost.cs" Link="Webhooks\StubProviderHost.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="..\..\src\CodeSpace.Api\CodeSpace.Api.csproj" />
     <ProjectReference Include="..\..\src\CodeSpace.Core\CodeSpace.Core.csproj" />
     <ProjectReference Include="..\..\src\CodeSpace.Messages\CodeSpace.Messages.csproj" />

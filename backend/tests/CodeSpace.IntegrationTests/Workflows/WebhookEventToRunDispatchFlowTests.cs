@@ -2,11 +2,13 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Events.PullRequest;
@@ -65,6 +67,15 @@ public class WebhookEventToRunDispatchFlowTests
         Opened,
         Updated,
         Merged,
+        Push,
+    }
+
+    /// <summary>Every non-infrastructure way one activation can refuse to launch — each must cost only its own run.</summary>
+    public enum RefusalKind
+    {
+        RevokedPublisher,
+        UnknownPublisher,
+        EnforcedOptInBelowItsCohort,
     }
 
     // ─── Payload contents (per-trigger Facts — keys differ between matchers) ────
@@ -274,21 +285,46 @@ public class WebhookEventToRunDispatchFlowTests
     [InlineData(TriggerKind.Opened)]
     [InlineData(TriggerKind.Updated)]
     [InlineData(TriggerKind.Merged)]
-    public async Task MatchAll_config_creates_run_regardless_of_event_repository(TriggerKind trigger)
+    public async Task MatchAll_config_fires_for_any_repository_of_its_own_team(TriggerKind trigger)
     {
         // Match-all in production is signalled by an activation config with NO
         // `repositories` key at all (the picker's "Match every repository" checkbox emits
-        // this via undefined → JSON.stringify drop). Matcher rule #4 returns true
-        // unconditionally for this trigger type.
+        // this via undefined → JSON.stringify drop). Matcher rule #4 returns true for it —
+        // and the dispatcher only ever offers it events from its OWN team's repositories.
         var ctx = await SeedAsync();
-        // Event from a DIFFERENT repository than the seeded one — still must fire because
-        // the activation didn't scope to anything.
-        var (typeKey, ev) = BuildForTrigger(trigger, repositoryId: Guid.NewGuid());
+        // Event from a DIFFERENT repository of the same team than the seeded one — still
+        // must fire because the activation didn't scope to anything.
+        var otherRepositoryId = await SeedRepositoryAsync(ctx.TeamId);
+        var (typeKey, ev) = BuildForTrigger(trigger, otherRepositoryId);
         await SeedActivationAsync(ctx, typeKey, configJson: "{}");
 
         await PublishAndCommitAsync(ev);
 
         await AssertRunCountAsync(ctx.WorkflowId, expected: 1);
+    }
+
+    [Theory]
+    [InlineData(TriggerKind.Opened)]
+    [InlineData(TriggerKind.Updated)]
+    [InlineData(TriggerKind.Merged)]
+    [InlineData(TriggerKind.Push)]
+    public async Task MatchAll_config_in_another_team_never_receives_this_teams_event(TriggerKind trigger)
+    {
+        // The cross-tenant leak: a {} activation in ANY team used to match every team's deliveries, and the run
+        // it started stored the other tenant's private PR / push payload in the subscriber's team.
+        var owner = await SeedAsync();
+        var outsider = await SeedAsync();
+        var (typeKey, ev) = BuildForTrigger(trigger, owner.RepositoryId);
+        await SeedActivationAsync(outsider, typeKey, configJson: "{}");
+        await SeedActivationAsync(owner, typeKey, configJson: "{}");
+
+        await PublishAndCommitAsync(ev);
+
+        await AssertRunCountAsync(outsider.WorkflowId, expected: 0);
+        await AssertRunCountAsync(owner.WorkflowId, expected: 1);
+        using var verify = _fixture.BeginScope();
+        var outsiderRows = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunRequest.AsNoTracking().CountAsync(r => r.TeamId == outsider.TeamId && r.ExternalEventId == ev.ProviderEventId);
+        outsiderRows.ShouldBe(0, customMessage: "no request row — fired or rejected — may land in a team that does not hold the event's repository");
     }
 
     // ─── No-match contract (parametrized) ──────────────────────────────────────
@@ -402,21 +438,17 @@ public class WebhookEventToRunDispatchFlowTests
     // ─── Test fixture infrastructure ───────────────────────────────────────────
 
     [Theory]
-    [InlineData(false)]
-    [InlineData(true)]
-    public async Task A_refused_activation_is_durably_audited_without_blocking_another_team_or_repeating_its_run(bool unknownPublisher)
+    [InlineData(RefusalKind.RevokedPublisher, "agent.authority_denied")]
+    [InlineData(RefusalKind.UnknownPublisher, "agent.authority_denied")]
+    [InlineData(RefusalKind.EnforcedOptInBelowItsCohort, WorkflowRunRequestRejectionReasons.CompletionAdmissionRefused)]
+    public async Task A_refused_activation_is_durably_audited_without_blocking_its_sibling_or_repeating_its_run(RefusalKind refusal, string expectedReason)
     {
-        var denied = await SeedAsync();
         var valid = await SeedAsync();
+        var denied = await SeedSiblingAsync(valid);
         var config = JsonSerializer.Serialize(new { repositories = new[] { new { repositoryId = valid.RepositoryId } } });
         await SeedActivationAsync(denied, "trigger.pr.opened", config);
         await SeedActivationAsync(valid, "trigger.pr.opened", config);
-        using (var revoke = _fixture.BeginScope())
-        {
-            var db = revoke.Resolve<CodeSpaceDbContext>();
-            if (unknownPublisher) await db.WorkflowActivation.Where(a => a.WorkflowId == denied.WorkflowId).ExecuteUpdateAsync(s => s.SetProperty(a => a.CreatedBy, SystemUsers.SeederId).SetProperty(a => a.LastModifiedBy, SystemUsers.SeederId));
-            else await db.TeamMembership.Where(m => m.TeamId == denied.TeamId && m.UserId == denied.UserId).ExecuteDeleteAsync();
-        }
+        await RefuseAsync(denied, refusal);
         var delivery = BuildOpenedEvent(valid.RepositoryId, []);
 
         await PublishAndCommitAsync(delivery);
@@ -427,7 +459,7 @@ public class WebhookEventToRunDispatchFlowTests
         using var verify = _fixture.BeginScope();
         var audits = await verify.Resolve<CodeSpaceDbContext>().WorkflowRunRequest.AsNoTracking().Where(r => r.TeamId == denied.TeamId && r.Status == WorkflowRunRequestStatus.Rejected && r.ExternalEventId == delivery.ProviderEventId).ToListAsync();
         var audit = audits.ShouldHaveSingleItem();
-        audit.Error.ShouldContain("agent.authority_denied");
+        audit.Error.ShouldContain(expectedReason);
         audit.Error.ShouldContain(denied.WorkflowId.ToString());
     }
 
@@ -435,7 +467,7 @@ public class WebhookEventToRunDispatchFlowTests
     public async Task A_webhook_infrastructure_failure_propagates_and_the_callers_transaction_rolls_back_staged_runs()
     {
         var first = await SeedAsync();
-        var second = await SeedAsync();
+        var second = await SeedSiblingAsync(first);
         var config = JsonSerializer.Serialize(new { repositories = new[] { new { repositoryId = first.RepositoryId } } });
         await SeedActivationAsync(first, "trigger.pr.opened", config);
         await SeedActivationAsync(second, "trigger.pr.opened", config);
@@ -473,6 +505,7 @@ public class WebhookEventToRunDispatchFlowTests
         TriggerKind.Opened => ("trigger.pr.opened", BuildOpenedEvent(repositoryId, labels, providerEventId)),
         TriggerKind.Updated => ("trigger.pr.updated", BuildSynchronizedEvent(repositoryId, labels, providerEventId)),
         TriggerKind.Merged => ("trigger.pr.merged", BuildMergedEvent(repositoryId, labels, providerEventId)),
+        TriggerKind.Push => ("trigger.push", BuildPushEvent(repositoryId, "refs/heads/main", providerEventId)),
         _ => throw new ArgumentOutOfRangeException(nameof(kind), kind, "Unknown trigger kind"),
     };
 
@@ -575,6 +608,73 @@ public class WebhookEventToRunDispatchFlowTests
         }
 
         return new SeedContext(teamId, userId, workflowId, repoId);
+    }
+
+    /// <summary>A second member of the same team publishing a second workflow — the shape every same-delivery sibling test needs now that a delivery only ever reaches its own team.</summary>
+    private async Task<SeedContext> SeedSiblingAsync(SeedContext context)
+    {
+        var userId = Guid.NewGuid();
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.User.Add(new User { Id = userId, Email = $"sibling-{userId:N}@test.local", Name = $"sibling-{userId:N}", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+            db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = context.TeamId, UserId = userId, Role = TeamRole.Admin, CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+            await db.SaveChangesAsync().ConfigureAwait(false);
+        }
+
+        var workflowId = await CreateWorkflowAsync(context.TeamId, userId);
+
+        return context with { UserId = userId, WorkflowId = workflowId };
+    }
+
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var repositoryId = Guid.NewGuid();
+        var providerId = Guid.NewGuid();
+
+        db.ProviderInstance.Add(new ProviderInstance { Id = providerId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "GH", BaseUrl = $"https://gh-{Guid.NewGuid():N}.local" });
+        db.Repository.Add(new Repository { Id = repositoryId, TeamId = teamId, ProviderInstanceId = providerId, ExternalId = $"ext-{Guid.NewGuid():N}", NamespacePath = "acme", Name = "web", FullPath = "acme/web", WebUrl = "https://gh.local/acme/web" });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+        return repositoryId;
+    }
+
+    /// <summary>
+    /// Put the activation's launch out of reach the way each refusal really arises: the publisher loses the team, the
+    /// row names no publisher, or the workflow carries an Enforced opt-in its graph's mode cannot honour — the last
+    /// appended as a raw version, the shape a save left behind before the validator refused it.
+    /// </summary>
+    private async Task RefuseAsync(SeedContext denied, RefusalKind refusal)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        switch (refusal)
+        {
+            case RefusalKind.RevokedPublisher:
+                await db.TeamMembership.Where(m => m.TeamId == denied.TeamId && m.UserId == denied.UserId).ExecuteDeleteAsync().ConfigureAwait(false);
+                break;
+            case RefusalKind.UnknownPublisher:
+                await db.WorkflowActivation.Where(a => a.WorkflowId == denied.WorkflowId).ExecuteUpdateAsync(s => s.SetProperty(a => a.CreatedBy, SystemUsers.SeederId).SetProperty(a => a.LastModifiedBy, SystemUsers.SeederId)).ConfigureAwait(false);
+                break;
+            case RefusalKind.EnforcedOptInBelowItsCohort:
+                await AppendEnforcedVersionAsync(db, denied.WorkflowId).ConfigureAwait(false);
+                break;
+        }
+    }
+
+    private static async Task AppendEnforcedVersionAsync(CodeSpaceDbContext db, Guid workflowId)
+    {
+        var workflow = await db.Workflow.SingleAsync(w => w.Id == workflowId).ConfigureAwait(false);
+        var enforced = JsonSerializer.Serialize(WorkflowsTestSeed.MinimalDefinition() with { CompletionMode = WorkflowDefinition.CompletionModeEnforced }, WorkflowJson.Options);
+
+        workflow.LatestVersion += 1;
+        workflow.DefinitionJson = enforced;
+        db.WorkflowVersion.Add(new WorkflowVersion { WorkflowId = workflowId, Version = workflow.LatestVersion, DefinitionJson = enforced, DefinitionHash = "legacy", CommittedAt = DateTimeOffset.UtcNow, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = workflow.CreatedBy });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
     }
 
     private async Task<Guid> CreateWorkflowAsync(Guid teamId, Guid userId)

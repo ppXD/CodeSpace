@@ -2,11 +2,13 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.RunSources.Schedule;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -119,9 +121,77 @@ public class ScheduleTriggerFlowTests
         (await verifyDb.WorkflowRunExecutionAuthority.CountAsync(r => r.TeamId == valid.TeamId)).ShouldBe(1);
     }
 
+    [Fact]
+    public async Task A_schedule_whose_completion_opt_in_refuses_does_not_roll_back_another_teams_tick()
+    {
+        // Through the mediator, not the service: FireDueScheduleTriggersCommand is transactional, so a refusal that
+        // escapes the per-activation catch rolls back EVERY team's runs in the tick. Only the command shows that.
+        var refusing = await SeedAsync();
+        await SeedScheduleActivationAsync(refusing, EveryMinute);
+        var healthy = await SeedAsync();
+        await SeedScheduleActivationAsync(healthy, EveryMinute);
+
+        await AppendLegacyEnforcedVersionAsync(refusing.WorkflowId);
+
+        try
+        {
+            await Should.NotThrowAsync(FireThroughCommandAsync, "one activation whose completion opt-in refuses must cost only its own run, never the tick. Check ScheduleTriggerService.FireDueSchedulesAsync catches CompletionAdmissionRefusedException per activation.");
+
+            await AssertRunCountAsync(refusing.WorkflowId, expected: 0);
+            (await CountRunsAsync(healthy.WorkflowId)).ShouldBeGreaterThan(0, "another team's due schedule was rolled back with the refusal.");
+        }
+        finally
+        {
+            // The command fires at the real clock, so these every-minute schedules would still be due in the sibling
+            // tests' fixed-clock sweeps and inflate the tallies they assert. Take them out of the shared database.
+            await DisableScheduleActivationsAsync(refusing.WorkflowId, healthy.WorkflowId);
+        }
+    }
+
     // ─── Infrastructure ─────────────────────────────────────────────────────────
 
+    private const string EveryMinute = "* * * * *";
+
     private sealed record SeedContext(Guid TeamId, Guid UserId, Guid WorkflowId);
+
+    private async Task FireThroughCommandAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IMediator>().Send(new FireDueScheduleTriggersCommand()).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// A version stored before the save-time gate refused <c>completionMode: enforced</c> on a graph whose mode is not
+    /// Enforceable — appended directly, because no API path can produce it any more. Versions are insert-only, so this is
+    /// the same shape a pre-gate save left behind.
+    /// </summary>
+    private async Task AppendLegacyEnforcedVersionAsync(Guid workflowId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var workflow = await db.Workflow.SingleAsync(w => w.Id == workflowId).ConfigureAwait(false);
+        var current = await db.WorkflowVersion.AsNoTracking().SingleAsync(v => v.WorkflowId == workflowId && v.Version == workflow.LatestVersion).ConfigureAwait(false);
+        var definition = JsonSerializer.Deserialize<WorkflowDefinition>(current.DefinitionJson, WorkflowJson.Options)! with { CompletionMode = WorkflowDefinition.CompletionModeEnforced };
+        var enforced = JsonSerializer.Serialize(definition, WorkflowJson.Options);
+
+        workflow.LatestVersion += 1;
+        workflow.DefinitionJson = enforced;
+        db.WorkflowVersion.Add(new WorkflowVersion { WorkflowId = workflowId, Version = workflow.LatestVersion, DefinitionJson = enforced, DefinitionHash = DefinitionHash.Compute(definition), CommittedAt = DateTimeOffset.UtcNow, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = workflow.CreatedBy });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+    }
+
+    private async Task DisableScheduleActivationsAsync(params Guid[] workflowIds)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<CodeSpaceDbContext>().WorkflowActivation.Where(a => workflowIds.Contains(a.WorkflowId)).ExecuteUpdateAsync(s => s.SetProperty(a => a.Enabled, false)).ConfigureAwait(false);
+    }
+
+    private async Task<int> CountRunsAsync(Guid workflowId)
+    {
+        using var verify = _fixture.BeginScope();
+        return await verify.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().CountAsync(r => r.WorkflowId == workflowId).ConfigureAwait(false);
+    }
 
     private async Task<int> FireAsync(DateTimeOffset now)
     {

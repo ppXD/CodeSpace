@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Core.Services.Workflows.Llm;
@@ -643,7 +644,7 @@ public class WorkflowPlannerTests
             new TerminalNode(),
         };
 
-        return new DefinitionValidator(new NodeRegistry(nodes));
+        return new DefinitionValidator(new NodeRegistry(nodes), new ModeProfileRegistry());
     }
 
     private sealed class RecordingPlanner : IWorkflowPlanner
