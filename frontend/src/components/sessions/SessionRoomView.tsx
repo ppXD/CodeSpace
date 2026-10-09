@@ -1486,7 +1486,7 @@ function FinalAnswer({ answer }: { answer: FinalAnswerBlock }) {
       {answer.text && <p className="room-final-text"><Inline text={answer.text} /></p>}
       {images.length > 0 && (
         <div className="room-final-gallery">
-          {images.map((a, i) => <a key={i} href={a.url ?? a.previewUrl ?? "#"} target="_blank" rel="noreferrer"><img className="room-final-img" src={a.previewUrl ?? a.url ?? ""} alt={a.label} /></a>)}
+          {images.map((a, i) => <a key={i} href={a.url ?? a.previewUrl ?? "#"} target="_blank" rel="noreferrer"><img className="room-final-img" src={a.previewUrl ?? a.url ?? ""} alt={a.label} referrerPolicy="no-referrer" /></a>)}
         </div>
       )}
       {files.length > 0 && (

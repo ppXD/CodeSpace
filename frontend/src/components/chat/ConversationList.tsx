@@ -73,7 +73,7 @@ function ConversationAvatar({ conversation, members, myId }: { conversation: Con
   const otherId = conversation.memberUserIds.find(id => id !== myId) ?? conversation.memberUserIds[0];
   const other = otherId != null ? members.get(otherId) : undefined;
 
-  if (other?.avatarUrl) return <img className="chat-conv-av" src={other.avatarUrl} alt="" />;
+  if (other?.avatarUrl) return <img className="chat-conv-av" src={other.avatarUrl} alt="" referrerPolicy="no-referrer" />;
   return <span className="chat-conv-av chat-conv-av-initial">{(other?.name ?? "?").charAt(0).toUpperCase()}</span>;
 }
 

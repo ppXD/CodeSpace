@@ -5,6 +5,7 @@ import remarkGfm from "remark-gfm";
 
 import { ApiError } from "@/api/request";
 import type { LabelRef, PullRequestState, RemoteIssue, RemoteIssueComment, RemoteIssueEvent, RemotePullRequest, RemotePullRequestCheck, RemotePullRequestCommit, RemotePullRequestFile, RemoteRelease, RemoteTag } from "@/api/types";
+import { MarkdownImage } from "@/components/markdown/MarkdownImage";
 import { useProviderInstances } from "@/hooks/use-credentials";
 import {
   PR_PAGE_SIZE,
@@ -666,7 +667,7 @@ function CommentCard({ author, date, body, emptyText }: { author: string; date: 
       </div>
       <div className="prd-card-b">
         {body && body.trim().length > 0
-          ? <div className="prd-body prd-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children, ...rest }) => <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a> }}>{body}</ReactMarkdown></div>
+          ? <div className="prd-body prd-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children, ...rest }) => <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a>, img: MarkdownImage }}>{body}</ReactMarkdown></div>
           : <div className="prd-body-empty">{emptyText}</div>}
       </div>
     </div>
@@ -796,7 +797,7 @@ function ReleaseCard({ release, onSelect }: { release: RemoteRelease; onSelect: 
       </div>
       {release.body && release.body.trim().length > 0 && (
         <div className="rel-card-b prd-markdown">
-          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children, ...rest }) => <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a> }}>
+          <ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children, ...rest }) => <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a>, img: MarkdownImage }}>
             {release.body}
           </ReactMarkdown>
         </div>
@@ -903,7 +904,7 @@ export function ReleaseDetailRoute({ repoId, tag, onBack }: ReleaseDetailRoutePr
         <div className="prd-card">
           <div className="prd-card-b">
             {r.body && r.body.trim().length > 0
-              ? <div className="prd-body prd-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children, ...rest }) => <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a> }}>{r.body}</ReactMarkdown></div>
+              ? <div className="prd-body prd-markdown"><ReactMarkdown remarkPlugins={[remarkGfm]} components={{ a: ({ href, children, ...rest }) => <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a>, img: MarkdownImage }}>{r.body}</ReactMarkdown></div>
               : <div className="prd-body-empty">No release notes.</div>}
           </div>
         </div>
@@ -1531,6 +1532,7 @@ function PrBodyCard({ pr }: { pr: RemotePullRequest }) {
                   a: ({ href, children, ...rest }) => (
                     <a href={href} target="_blank" rel="noopener noreferrer" {...rest}>{children}</a>
                   ),
+                  img: MarkdownImage,
                 }}
               >
                 {pr.body}
