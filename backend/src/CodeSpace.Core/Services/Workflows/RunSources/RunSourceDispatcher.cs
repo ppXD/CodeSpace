@@ -2,6 +2,8 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using CodeSpace.Core.Services.Completion.Exceptions;
+using CodeSpace.Core.Services.Workflows.RunSources.Admission;
+using CodeSpace.Core.Services.Workflows.RunSources.Admission.Exceptions;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -49,9 +51,10 @@ public sealed class RunSourceDispatcher :
     private readonly Dispatch.IWorkflowRunDispatcher _runDispatcher;
     private readonly IIngestionAuditor _auditor;
     private readonly IPostCommitActions _postCommit;
+    private readonly IPullRequestTriggerAdmission _admission;
     private readonly ILogger<RunSourceDispatcher> _logger;
 
-    public RunSourceDispatcher(CodeSpaceDbContext db, IRunSourceMatcherRegistry matcherRegistry, IRunStarter runStarter, Dispatch.IWorkflowRunDispatcher runDispatcher, IIngestionAuditor auditor, IPostCommitActions postCommit, ILogger<RunSourceDispatcher> logger)
+    public RunSourceDispatcher(CodeSpaceDbContext db, IRunSourceMatcherRegistry matcherRegistry, IRunStarter runStarter, Dispatch.IWorkflowRunDispatcher runDispatcher, IIngestionAuditor auditor, IPostCommitActions postCommit, IPullRequestTriggerAdmission admission, ILogger<RunSourceDispatcher> logger)
     {
         _db = db;
         _matcherRegistry = matcherRegistry;
@@ -59,6 +62,7 @@ public sealed class RunSourceDispatcher :
         _runDispatcher = runDispatcher;
         _auditor = auditor;
         _postCommit = postCommit;
+        _admission = admission;
         _logger = logger;
     }
 
@@ -159,28 +163,44 @@ public sealed class RunSourceDispatcher :
             {
                 anyRefused = true;
                 _logger.LogWarning("Webhook activation authority refused. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Code={Code} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Code, ex.Reason);
-                await AuditRefusalAsync(activation, normalizedEvent, ex.Code, ex.Reason, "authority", cancellationToken).ConfigureAwait(false);
+                await AuditRefusalAsync(activation, normalizedEvent, ex.Code, ex.Reason, PerDeliveryRefusalKey("authority", activation, normalizedEvent), cancellationToken).ConfigureAwait(false);
             }
             catch (CompletionAdmissionRefusedException ex)
             {
                 anyRefused = true;
                 _logger.LogWarning("Webhook activation completion admission refused. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Message);
-                await AuditRefusalAsync(activation, normalizedEvent, WorkflowRunRequestRejectionReasons.CompletionAdmissionRefused, ex.Message, "admission", cancellationToken).ConfigureAwait(false);
+                await AuditRefusalAsync(activation, normalizedEvent, WorkflowRunRequestRejectionReasons.CompletionAdmissionRefused, ex.Message, PerDeliveryRefusalKey("admission", activation, normalizedEvent), cancellationToken).ConfigureAwait(false);
+            }
+            catch (PullRequestAuthorRefusedException ex)
+            {
+                anyRefused = true;
+                _logger.LogInformation("Webhook activation refused a pull request author. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Message);
+                await AuditRefusalAsync(activation, normalizedEvent, WorkflowRunRequestRejectionReasons.AuthorNotMember, ex.Message, ex.AuditKey, cancellationToken).ConfigureAwait(false);
+            }
+            catch (PullRequestTriggerDebouncedException ex)
+            {
+                anyRefused = true;
+                _logger.LogInformation("Webhook activation debounced a pull request. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Message);
+                await AuditRefusalAsync(activation, normalizedEvent, WorkflowRunRequestRejectionReasons.PullRequestDebounced, ex.Message, ex.AuditKey, cancellationToken).ConfigureAwait(false);
             }
         }
 
         return (firedRunIds, anyRefused);
     }
 
-    /// <summary>One Rejected row per (activation, delivery, refusal kind), so a provider's redelivery of the same refused event collapses onto it.</summary>
-    private async Task AuditRefusalAsync(WorkflowActivation activation, NormalizedEvent normalizedEvent, string reason, string detail, string refusalKind, CancellationToken cancellationToken) =>
+    /// <summary>One Rejected row per <paramref name="dedupKey"/>, so a provider's redelivery of the same refused event collapses onto it.</summary>
+    private async Task AuditRefusalAsync(WorkflowActivation activation, NormalizedEvent normalizedEvent, string reason, string detail, string dedupKey, CancellationToken cancellationToken) =>
         await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
         {
             TeamId = activation.Workflow.TeamId, RepositoryId = normalizedEvent.RepositoryId, SourceType = activation.TypeKey,
             ExternalEventId = normalizedEvent.ProviderEventId, Reason = reason,
             Detail = $"Activation {activation.Id} workflow {activation.WorkflowId}: {detail}",
-            DedupKey = $"rejected:{refusalKind}:{activation.Id:N}:{normalizedEvent.ProviderEventId}",
+            DedupKey = dedupKey,
         }, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>One row per (activation, delivery, refusal kind) — a refusal that is the activation's own property and rare.</summary>
+    private static string PerDeliveryRefusalKey(string refusalKind, WorkflowActivation activation, NormalizedEvent normalizedEvent) =>
+        $"rejected:{refusalKind}:{activation.Id:N}:{normalizedEvent.ProviderEventId}";
 
     /// <summary>
     /// Dispatch each matched run AFTER commit. RunAfterCommitAsync defers into the post-commit drain
@@ -220,6 +240,11 @@ public sealed class RunSourceDispatcher :
         }
     }
 
+    /// <summary>
+    /// Ordered by id: firing an activation can take a row lock that is held until the delivery commits (the pull-request
+    /// debounce claim), so two concurrent deliveries must visit activations in the same order or each could hold what the
+    /// other waits for.
+    /// </summary>
     private async Task<IReadOnlyList<WorkflowActivation>> LoadActiveActivationsAsync(Guid teamId, IReadOnlyList<string> typeKeys, CancellationToken cancellationToken)
     {
         return await _db.WorkflowActivation
@@ -230,6 +255,7 @@ public sealed class RunSourceDispatcher :
                         && a.DeletedDate == null
                         && a.Workflow.Enabled
                         && a.Workflow.DeletedDate == null)
+            .OrderBy(a => a.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
@@ -238,6 +264,12 @@ public sealed class RunSourceDispatcher :
         var config = JsonDocument.Parse(activation.ConfigJson).RootElement;
 
         if (!matcher.Match(normalizedEvent, config)) return null;
+
+        var idempotencyKey = SynthesiseProviderIdempotencyKey(matcher.TypeKey, normalizedEvent.ProviderEventId, activation.Id);
+
+        if (await IsAlreadyStartedAsync(idempotencyKey, cancellationToken).ConfigureAwait(false)) return SkipDuplicate(activation, normalizedEvent);
+
+        await _admission.EnsureAdmittedAsync(activation, normalizedEvent, config, cancellationToken).ConfigureAwait(false);
 
         var payload = matcher.BuildPayload(normalizedEvent);
 
@@ -263,21 +295,31 @@ public sealed class RunSourceDispatcher :
             ActivationId = activation.Id,
             ActivationSnapshotJson = ActivationAuthoritySnapshot.Serialize(activation),
             ExternalEventId = normalizedEvent.ProviderEventId,
-            IdempotencyKey = SynthesiseProviderIdempotencyKey(matcher.TypeKey, normalizedEvent.ProviderEventId, activation.Id),
+            IdempotencyKey = idempotencyKey,
         }, cancellationToken).ConfigureAwait(false);
 
-        if (runId == Guid.Empty)
-        {
-            _logger.LogInformation(
-                "Skipped duplicate provider delivery: workflow {WorkflowId} activation {ActivationId} delivery {DeliveryId}",
-                activation.WorkflowId, activation.Id, normalizedEvent.ProviderEventId);
-            return null;
-        }
+        if (runId == Guid.Empty) return SkipDuplicate(activation, normalizedEvent);
 
         _logger.LogInformation(
             "Fired workflow {WorkflowId} via activation {TypeKey} → run {RunId}",
             activation.WorkflowId, activation.TypeKey, runId);
         return runId;
+    }
+
+    /// <summary>
+    /// A delivery this activation already started a run for — the provider redelivering it, an operator pressing
+    /// Redeliver, a captured body posted again under its own id — is a duplicate before it is anything else. Answered
+    /// here, ahead of admission, it cannot take the pull-request debounce claim a second time (which would restart the
+    /// window and swallow the next real event) or send a provider another standing lookup. Two copies racing each other
+    /// both pass this read; RunStarter's unique index still keeps one.
+    /// </summary>
+    private async Task<bool> IsAlreadyStartedAsync(string idempotencyKey, CancellationToken cancellationToken) =>
+        await _db.WorkflowRunRequest.AsNoTracking().AnyAsync(r => r.IdempotencyKey == idempotencyKey, cancellationToken).ConfigureAwait(false);
+
+    private Guid? SkipDuplicate(WorkflowActivation activation, NormalizedEvent normalizedEvent)
+    {
+        _logger.LogInformation("Skipped duplicate provider delivery: workflow {WorkflowId} activation {ActivationId} delivery {DeliveryId}", activation.WorkflowId, activation.Id, normalizedEvent.ProviderEventId);
+        return null;
     }
 
     /// <summary>

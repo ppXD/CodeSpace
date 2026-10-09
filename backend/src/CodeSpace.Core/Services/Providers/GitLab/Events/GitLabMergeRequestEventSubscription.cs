@@ -50,10 +50,49 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
             AuthorExternalId = user.GetProperty("id").GetRawText(),
             AuthorName = user.GetProperty("username").GetString()!,
             WebUrl = attrs.GetProperty("url").GetString()!,
+            HeadSha = ReadLastCommitId(attrs),
             Labels = ExtractLabels(root),
-            IsDraft = ReadIsDraft(attrs)
+            IsDraft = ReadIsDraft(attrs),
+            Origin = ReadOrigin(attrs, root)
         };
     }
+
+    /// <summary><c>object_attributes.last_commit.id</c> — the MR's head commit. Null when the payload omits it.</summary>
+    private static string? ReadLastCommitId(JsonElement attrs) =>
+        attrs.TryGetProperty("last_commit", out var commit) && commit.ValueKind == JsonValueKind.Object && commit.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String ? id.GetString() : null;
+
+    /// <summary>On an update that moved the head, <c>user</c> is whoever pushed — the one MR delivery whose actor made the code what it is. Null when the payload omits it.</summary>
+    private static string? ReadPusherId(JsonElement root) =>
+        root.TryGetProperty("user", out var user) && user.ValueKind == JsonValueKind.Object && user.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.Number ? id.GetRawText() : null;
+
+    /// <summary>
+    /// Who wrote the MR and where its source branch lives. The author is <c>object_attributes.author_id</c>, not
+    /// <c>user</c> — that is whoever caused THIS delivery, and a maintainer reopening an outsider's MR must not lend it
+    /// their standing. GitLab's payload carries no standing at all, so the association stays Unknown here and is looked
+    /// up at dispatch, when a trigger needs it.
+    /// </summary>
+    private static PullRequestOrigin ReadOrigin(JsonElement attrs, JsonElement root) => new()
+    {
+        AuthorExternalId = attrs.TryGetProperty("author_id", out var authorId) && authorId.ValueKind == JsonValueKind.Number ? authorId.GetRawText() : null,
+        IsFork = ReadIsFork(attrs),
+        HeadRepositoryFullName = attrs.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.Object && source.TryGetProperty("path_with_namespace", out var path) && path.ValueKind == JsonValueKind.String ? path.GetString() : null,
+        RepositoryVisibility = root.TryGetProperty("project", out var project) && project.ValueKind == JsonValueKind.Object && project.TryGetProperty("visibility_level", out var level) && level.ValueKind == JsonValueKind.Number ? MapVisibilityLevel(level.GetRawText()) : null
+    };
+
+    /// <summary>A fork MR is one whose source project is not its target project. Absent ids say nothing, so they are not a fork.</summary>
+    private static bool ReadIsFork(JsonElement attrs) =>
+        attrs.TryGetProperty("source_project_id", out var source) && source.ValueKind == JsonValueKind.Number
+        && attrs.TryGetProperty("target_project_id", out var target) && target.ValueKind == JsonValueKind.Number
+        && source.GetRawText() != target.GetRawText();
+
+    /// <summary>GitLab's <c>visibility_level</c>: 0 private, 10 internal, 20 public. Any other value is not guessed at.</summary>
+    private static RepositoryVisibility? MapVisibilityLevel(string level) => level switch
+    {
+        "0" => RepositoryVisibility.Private,
+        "10" => RepositoryVisibility.Internal,
+        "20" => RepositoryVisibility.Public,
+        _ => null
+    };
 
     /// <summary>
     /// GitLab fires <c>action:"update"</c> for ANY merge-request mutation — label / assignee /
@@ -84,7 +123,8 @@ public sealed class GitLabMergeRequestEventSubscription : IProviderEventSubscrip
             PreviousHeadSha = oldRev,
             NewHeadSha = newRev,
             Labels = ExtractLabels(root),
-            IsDraft = ReadIsDraft(attrs)
+            IsDraft = ReadIsDraft(attrs),
+            Origin = ReadOrigin(attrs, root) with { PusherExternalId = ReadPusherId(root) }
         };
     }
 

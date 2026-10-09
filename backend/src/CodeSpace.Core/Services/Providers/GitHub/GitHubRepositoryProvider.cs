@@ -22,7 +22,7 @@ using RepositoryRole = CodeSpace.Messages.Enums.RepositoryRole;
 
 namespace CodeSpace.Core.Services.Providers.GitHub;
 
-public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer
+public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapability, IPullRequestCatalogCapability, IPullRequestCommentCapability, IPullRequestReviewCapability, IPullRequestWriteCapability, IIssueCatalogCapability, IIssueWriteCapability, IReleaseCatalogCapability, IRepositoryAccessCapability, IRepositorySourceCapability, IRepositoryInsightsCapability, IRepositoryHistoryCapability, IRepositoryMarkdownRenderCapability, ICredentialProbeCapability, IWebhookRegistrationCapability, IWebhookSignatureVerifier, IWebhookEventNormalizer, IWebhookDeliveryIdentity
 {
     private readonly IProviderAuthResolver _authResolver;
     private readonly IExternalCallResilience _resilience;
@@ -984,6 +984,8 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
     public bool VerifySignature(string body, IReadOnlyDictionary<string, string> headers, string secret) => _signatureVerifier.Verify(body, headers, secret);
 
     public NormalizedEvent? Normalize(Guid repositoryId, string body, IReadOnlyDictionary<string, string> headers) => _eventNormalizer.Normalize(repositoryId, body, headers);
+
+    public string DeliveryIdHeader => Events.GitHubDelivery.Header;
 
     // ── Repository source (Code browser): branches, one tree level, single file ──
 

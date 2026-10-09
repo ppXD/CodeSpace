@@ -14,7 +14,7 @@ public sealed class TriggerPrUpdatedNode : INodeRuntime
         Kind = NodeKind.Trigger,
         IconKey = "git-commit-horizontal",
         Description = "Starts the workflow when new commits are pushed to a pull/merge request.",
-        ConfigSchema = SchemaBuilder.Parse(PrTriggerSchemas.RepositoriesConfigSchemaJson),
+        ConfigSchema = SchemaBuilder.Parse(PrTriggerSchemas.OutsiderReachableConfigSchemaJson),
         InputSchema = SchemaBuilder.EmptyObject(),
         OutputSchema = SchemaBuilder.Parse("""
             {
@@ -25,7 +25,10 @@ public sealed class TriggerPrUpdatedNode : INodeRuntime
                 "previousHeadSha": { "type": "string" },
                 "newHeadSha": { "type": "string" },
                 "labels": { "type": "array", "items": { "type": "string" } },
-                "isDraft": { "type": "boolean" }
+                "isDraft": { "type": "boolean" },
+                "authorAssociation": { "type": "string", "enum": ["member", "contributor", "none", "unknown"] },
+                "isFork": { "type": "boolean" },
+                "headRepositoryFullName": { "type": ["string","null"] }
               }
             }
             """)
