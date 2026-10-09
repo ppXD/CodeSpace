@@ -28,9 +28,10 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
     private readonly ICurrentTeam _currentTeam;
     private readonly ICurrentUser _currentUser;
     private readonly IUserProviderIdentityService _identityService;
+    private readonly ICredentialSuccessionService _succession;
     private readonly OAuthCallbackUrlSetting _callbackUrlSetting;
 
-    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, OAuthCallbackUrlSetting callbackUrlSetting)
+    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, ICredentialSuccessionService succession, OAuthCallbackUrlSetting callbackUrlSetting)
     {
         _db = db;
         _oauthClients = oauthClients;
@@ -41,6 +42,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         _currentTeam = currentTeam;
         _currentUser = currentUser;
         _identityService = identityService;
+        _succession = succession;
         _callbackUrlSetting = callbackUrlSetting;
     }
 
@@ -87,6 +89,8 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
 
         var token = await ExchangeCodeAsync(instance, clientId, clientSecret, code, pending.CodeVerifier, cancellationToken).ConfigureAwait(false);
         var credential = PersistCredential(pending, instance, token);
+
+        await _succession.CarryForwardAsync(credential, cancellationToken).ConfigureAwait(false);
 
         if (pending.IntendedOwnerUserId is Guid ownerId)
             await LinkActorIdentityBestEffortAsync(instance, credential, ownerId, cancellationToken).ConfigureAwait(false);

@@ -20,6 +20,10 @@ internal sealed class StubOAuthClient : IOAuthClient
     public ProviderKind Kind { get; }
     public OAuthTokenResponse ExchangeResult { get; set; }
     public OAuthTokenResponse? RefreshResult { get; set; }
+
+    /// <summary>When set, the token endpoint rejects every refresh with it — a grant the provider no longer honours.</summary>
+    public Exception? RefreshFailure { get; set; }
+
     public Uri AuthorizeUrlTemplate { get; set; }
 
     public OAuthAuthorizeInput? LastAuthorize { get; private set; }
@@ -41,6 +45,9 @@ internal sealed class StubOAuthClient : IOAuthClient
     public Task<OAuthTokenResponse> RefreshAsync(OAuthRefreshInput input, CancellationToken cancellationToken)
     {
         LastRefresh = input;
+
+        if (RefreshFailure != null) throw RefreshFailure;
+
         return Task.FromResult(RefreshResult ?? ExchangeResult);
     }
 

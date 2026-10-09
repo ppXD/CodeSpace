@@ -75,6 +75,7 @@ public class RequestAuthorizationInventoryTests
         ["SweepBudgetSettlementCommand"] = "sweep",
         ["SweepCompletionShadowCommand"] = "sweep",
         ["BackfillPackCloneUrlsCommand"] = "seals the clone URL of pack rows that still hold a pasted token in plaintext, across every team, in bounded batches; it changes where a pack's existing credential is kept, never which source a pack clones or what any user can reach, and a sealed row is no longer a candidate.",
+        ["RepairDisconnectedCredentialBindingsCommand"] = "moves repositories and group hooks still bound to a disconnected credential onto the credential that credential's own owner connected afterwards on the same provider instance and team, across every team, in bounded batches; it never moves a binding off a live credential or onto another person's, so it only completes a reconnect the owner already made, and a moved binding is no longer a candidate.",
         ["BackfillRunScorecardsCommand"] = "projects the observation-only north-star row for terminal runs that terminalized before the table existed, across every team, in bounded batches; a run that already has a row is not a candidate, so it can only ever add a measurement of a settled run — it authors nothing a user owns and changes no run's outcome.",
         ["SweepStaleAgentWorkspacesCommand"] = "sweep",
         ["TierStaleModelCapabilitiesCommand"] = "sweep",
