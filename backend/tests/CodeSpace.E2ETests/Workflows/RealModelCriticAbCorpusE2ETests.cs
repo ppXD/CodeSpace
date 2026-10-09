@@ -35,9 +35,10 @@ namespace CodeSpace.E2ETests.Workflows;
 /// undercount</b> — the token total is agent+revise only (the critic's own model tokens land nowhere on a standalone
 /// benchmark run), reported with a LOUD label that Arm A's true cost is strictly higher. (4) <b>Intervention sign</b> —
 /// scoped to <c>ExitReason=="output-flagged"</c> and crossed with the grade into trueCatches / falseFlags / leaks, so a
-/// higher flag count WITH higher correctness reads as the critic WORKING, never as burden. (5) <b>Fail-open silent
-/// null</b> — a critic-fired guard FAILS LOUD if Arm A shows zero flags AND zero revise rounds (the reviewer never ran),
-/// so a null delta can never masquerade as "the critic doesn't help".</para>
+/// higher flag count WITH higher correctness reads as the critic WORKING, never as burden; a result held because its
+/// review could not examine it (<c>output-unreviewed</c>) is its own class, neither a flag nor a miss. (5) <b>Silent
+/// null</b> — a critic-fired guard FAILS LOUD if Arm A shows zero flags AND zero revise rounds (the reviewer never reached
+/// a verdict), so a null delta can never masquerade as "the critic doesn't help".</para>
 ///
 /// <para>Double opt-in (skip ≠ pass, LOUD): needs the <c>CODESPACE_LLM_*</c> secrets AND the explicit
 /// <see cref="OptInEnvVar"/> — two live corpus passes are ≈2–3× a single-arm job, so it stays OFF the default
@@ -102,10 +103,11 @@ public sealed class RealModelCriticAbCorpusE2ETests
             if (RanCleanly(bRun) == 0 || RanCleanly(aRun) == 0)
                 throw new AgentExecutionInfraException("a whole arm failed to execute (gateway/execution infra)");
 
-            // Critic-fired guard (fatal-confound #5): the live critic fails OPEN — if the reviewer never resolved, Arm A ≡ Arm B
-            // and a null delta would lie as "the critic doesn't help". Demand PROOF the critic actually ran, else FAIL LOUD as infra.
+            // Critic-fired guard (fatal-confound #5): a reviewer that never resolves no longer fails open — it holds every
+            // result output-unreviewed — but that is still a critic that never JUDGED anything, and its holds would read as
+            // the critic's burden. Demand PROOF the critic reached a verdict (a flag or a revise round), else FAIL LOUD as infra.
             var aReviseTotal = aRun.Results.Sum(r => r.ReviseRounds);
-            var aFlagged = aRun.Results.Count(r => r.ExitReason == "output-flagged");
+            var aFlagged = aRun.Results.Count(r => r.ExitReason == CriticInterventions.FlaggedExitReason);
             if (aReviseTotal == 0 && aFlagged == 0)
                 throw new AgentExecutionInfraException($"Arm A critic NEVER FIRED (0 flags, 0 revise rounds) — reviewer model/pool row {reviewerRowId} likely unresolved or no structured client registered; a null delta here would falsely read as 'critic has no effect'");
 
@@ -120,13 +122,11 @@ public sealed class RealModelCriticAbCorpusE2ETests
             // ran under Improve (ReviseRounds > 0) OR the run ended still-flagged (output-flagged). This is deliberately
             // BROADER than the final ExitReason: the critic's HEADLINE value — flag → agent revises → final code PASSES —
             // ends with ExitReason "completed", so scoping only to "output-flagged" (as a naive 2×2 does) makes the
-            // catch-AND-fix invisible and undercounts the critic. Crossed with the OBJECTIVE final grade:
-            bool Flagged(BenchmarkResult r) => r.ReviseRounds > 0 || r.ExitReason == "output-flagged";
-            var catchAndResolve = aRun.Results.Count(r => Flagged(r) && r.Grade.Passed && r.ExitReason != "output-flagged");   // flagged → revised → correct + shipped: the critic's productive VALUE (incl. false alarms the revise cleared — the oracle can't split the two)
-            var trueHold = aRun.Results.Count(r => r.ExitReason == "output-flagged" && !r.Grade.Passed);                       // caught a broken change, held for a human: VALUE
-            var falseHold = aRun.Results.Count(r => r.ExitReason == "output-flagged" && r.Grade.Passed);                      // held a CORRECT change for a human: the burden
-            var aMissed = aRun.Results.Count(r => !Flagged(r) && !r.Grade.Passed);                                            // critic stayed silent on a broken change: a MISS
-            var bLeaks = bRun.Results.Count(r => !r.Grade.Passed);                                                            // Arm B has no critic: every broken change ships unblocked
+            // catch-AND-fix invisible and undercounts the critic. A result its review could not examine (output-unreviewed)
+            // is held too, but by no judgement of the critic's — its own class, never a flag and never a miss. Crossed
+            // with the OBJECTIVE final grade (CriticInterventions, pinned by a unit test):
+            var interventions = CriticInterventions.Decompose(aRun.Results);
+            var bLeaks = bRun.Results.Count(r => !r.Grade.Passed);   // Arm B has no critic: every broken change ships unblocked
 
             // ── Cost: tokensPerSolve (agent+revise ONLY — critic's own tokens land nowhere on a standalone run) + usage coverage ──
             var (aTok, aCov) = TokensPerSolve(aRun, aSolved);
@@ -141,7 +141,7 @@ public sealed class RealModelCriticAbCorpusE2ETests
                 $"CRITIC A/B over {SeedBenchmarkCorpus.Tasks.Count} tasks × modes — " +
                 $"SOLVE (objective grade, arm-stable): Arm A {aSolved}/{aN} ({aRate:P0}) vs Arm B {bSolved}/{bN} ({bRate:P0}); " +
                 $"paired discordant A-only:{aOnly} B-only:{bOnly} over {paired} shared pairs (delta rests on {Math.Abs(aOnly - bOnly)} net task(s) — REPORT-ONLY, not significance-tested at n≈18). " +
-                $"INTERVENTIONS (Arm A): catchAndResolve {catchAndResolve} (flagged → revised → correct+shipped — the critic's productive VALUE, incl. false alarms the revise cleared), trueHold {trueHold} (caught broken, held for a human — VALUE), falseHold {falseHold} (held a CORRECT change — the burden), critic-missed {aMissed} broken; Arm B leaks {bLeaks} broken shipped unblocked. Critic value = catchAndResolve + trueHold; a higher flag count WITH a higher solve rate is the critic WORKING, not burden. " +
+                $"INTERVENTIONS (Arm A): catchAndResolve {interventions.CatchAndResolve} (flagged → revised → correct+shipped — the critic's productive VALUE, incl. false alarms the revise cleared), trueHold {interventions.TrueHold} (caught broken, held for a human — VALUE), falseHold {interventions.FalseHold} (held a CORRECT change — the burden), unreviewed holds {interventions.TrueUnreviewedHold} broken / {interventions.FalseUnreviewedHold} correct (the review could not examine them — held by the fail-closed rule, not by a judgement), critic-missed {interventions.Missed} broken; Arm B leaks {bLeaks} broken shipped unblocked. Critic value = catchAndResolve + trueHold; a higher flag count WITH a higher solve rate is the critic WORKING, not burden. " +
                 $"RETRY DISCLOSURE: Arm A ΣReviseRounds {aReviseTotal} over {aRoundsPairs} pair(s) — the A−B delta is critic + its triggered retry COMBINED, not critic alone. " +
                 $"COST: tokensPerSolve A {aTok} (coverage {aCov}) vs B {bTok} (coverage {bCov}) — Arm A total EXCLUDES critic/reviewer/co-sign model tokens (uncaptured on standalone runs); true Arm-A cost is strictly higher. " +
                 $"per-mode A[{StrataOf(aRun)}] B[{StrataOf(bRun)}]. " +

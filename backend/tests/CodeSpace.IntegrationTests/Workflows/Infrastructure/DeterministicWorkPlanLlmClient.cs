@@ -143,10 +143,10 @@ public sealed class WorkPlanPlanScript
     /// <summary>When true, the plan is the HETEROGENEOUS three-item shape (<c>DeterministicWorkPlanLlmClient.HeterogeneousItems</c>) — one research + two code kinds, for the dynamic fan-out's mode mapping.</summary>
     public bool AuthorHeterogeneousKinds { get; set; }
 
-    /// <summary>When true, the plan is ONE research item carrying an <c>LlmJudge</c> acceptance (triad S7): deliverable <c>DeterministicWorkPlanLlmClient.RubricDeliverablePath</c>, one criterion <c>RubricCriterionId</c>, judge pinned to <see cref="RubricJudgeModelId"/>.</summary>
+    /// <summary>When true, the plan is ONE research item carrying an <c>LlmJudge</c> acceptance (triad S7): deliverable <c>DeterministicWorkPlanLlmClient.RubricDeliverablePath</c>, one criterion <c>RubricCriterionId</c>, and a judge pin naming <see cref="RubricJudgeModelId"/>.</summary>
     public bool AuthorRubricContract { get; set; }
 
-    /// <summary>The judge pool row the rubric-contract plan pins (the test seeds the row, then sets this — the fake can't know the guid).</summary>
+    /// <summary>The judge row the rubric-contract plan NAMES in <c>judgeModelId</c> — a model-authored pin, which the planner's acceptance boundary strips, so the judge never runs on it (the test seeds the row, then sets this — the fake can't know the guid).</summary>
     public Guid? RubricJudgeModelId { get; set; }
 
     /// <summary>Custom plan instructions (one subtask per entry, no contracts) — for arms that need goal-keyed CLI behavior (e.g. a same-file conflict via alpha/beta markers). Null ⇒ the default two-item plan, byte-identical.</summary>

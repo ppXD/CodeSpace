@@ -227,17 +227,30 @@ public sealed record AgentRunResult
     [System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)]
     public AgentModelEscalation? ProposedEscalation { get; init; }
 
-    /// <summary>The output critic's rationale + issues when it flagged this run (<c>ExitReason</c> "output-flagged") — WHY a human should look, persisted on the result (not only a timeline event), and the food the S6 revise loop feeds back to the agent under <c>ReviewMode.Improve</c>. Null when the critic approved, failed open, or never ran.</summary>
+    /// <summary>The output critic's rationale + issues when it flagged this run (<c>ExitReason</c> "output-flagged") — WHY a human should look, persisted on the result (not only a timeline event), and the food the S6 revise loop feeds back to the agent under <c>ReviewMode.Improve</c>. Null when the critic approved, could not run, or never ran.</summary>
     public string? ReviewFeedback { get; init; }
 
     /// <summary>
     /// 5.6 residual: WHY a configured output review never produced a verdict — both the S8 agent-reviewer rung and
-    /// the in-process model-critic rung exhausted (an unavailable reviewer, a staging fault, a faulted call). Distinct
-    /// from <see cref="ReviewFeedback"/> (a review that RAN and objected): this result was never examined at all, so
-    /// reporting nothing here is exactly the fail-open silence that let an unreviewed change ship indistinguishably
-    /// from a reviewed one. Null when the review was never configured, ran to a verdict, or the run is not Succeeded.
+    /// the in-process model-critic rung exhausted (an unavailable reviewer, a staging fault, a faulted call), the
+    /// agent reviewer's approval found no independent co-sign, the reviewed render had to omit part of the result, or
+    /// the run ended in a way that skipped the review (it failed, left a decision open, or was recovered after a
+    /// restart). Distinct from <see cref="ReviewFeedback"/> (a review that RAN and objected): this result was never
+    /// fully examined (<see cref="OutputReview"/> <see cref="OutputReviewState.Unreviewed"/>), and every PR-open,
+    /// change-set and head door refuses it. A would-be Succeeded result held this way is re-graded to
+    /// <see cref="AgentRunStatus.NeedsReview"/> (exit reason <c>output-unreviewed</c>). Null when the review was never
+    /// configured or ran to a verdict over the whole result.
     /// </summary>
     public string? UnreviewedReason { get; init; }
+
+    /// <summary>
+    /// Where the configured output review left this result: <see cref="OutputReviewState.Approved"/> only when it ran
+    /// over the whole result and approved it. Every door that takes a reviewed unit's work reads this, so a path that
+    /// skipped the review cannot pass for one that approved. Null when no review was configured, or the run produced
+    /// nothing to review. Null-omitted, so an unreviewed-by-configuration result serializes byte-identical.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public OutputReviewState? OutputReview { get; init; }
 
     /// <summary>How many S6 revise rounds actually executed inside this run (0 = the first attempt stood). Each round is a same-session harness continuation after an oracle failure or an Improve-critic flag, re-verified through the full push→grade→review chain.</summary>
     public int ReviseRounds { get; init; }

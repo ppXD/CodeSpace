@@ -1,4 +1,3 @@
-using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
@@ -17,8 +16,12 @@ namespace CodeSpace.Core.Services.Review;
 /// <see cref="CriticVerdict.Failed"/> verdict (never throws, cancellation aside), so the caller keeps the producer's
 /// original output. The reviewer is the operator-pinned model, else the team's auto-picked brain. A different configured
 /// name alone does not establish independence: gateways may alias the same backing model.
+///
+/// <para>An artifact too large for one call is reviewed in parts sized to the picked row's declared window
+/// (<see cref="CriticArtifactParts"/>): every part must approve, and a part that cannot be reviewed fails the whole
+/// review. One part — every artifact that fits — is the one call it always was.</para>
 /// </summary>
-public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
+public sealed partial class LlmStructuredCritic : IStructuredCritic, IScopedDependency
 {
     private readonly ILLMClientRegistry _clientRegistry;
     private readonly IModelPoolSelector _modelSelector;
@@ -74,16 +77,29 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
 
             if (structured == null) return await SkippedAsync(request, "No structured-output provider for the reviewer model.").ConfigureAwait(false);
 
-            var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick), cancellationToken).ConfigureAwait(false);
+            // The artifact in parts the picked row's window holds (CriticArtifactParts) — one part, and so one call with
+            // the byte-identical prompt, whenever it fits.
+            if (PartsOf(request, pick) is not { Count: <= CriticArtifactParts.MaxParts } parts)
+                return await SkippedAsync(request, $"The {request.ArtifactKind} does not fit {CriticArtifactParts.MaxParts} review calls on the reviewer model's {(pick.ContextWindowTokens is { } window ? $"declared {window}-token context window" : "default per-call size")}, so it was not reviewed.").ConfigureAwait(false);
 
-            var verdict = Project(request.Mode, completion.Json);
+            var verdicts = new List<CriticVerdict>();
+            string? observedModel = null;
+
+            for (var part = 0; part < parts.Count; part++)
+            {
+                var completion = await structured.CompleteStructuredAsync(BuildRequest(request, pick, parts, part), cancellationToken).ConfigureAwait(false);
+                var verdict = Project(request.Mode, completion.Json);
+
+                if (verdict.Failed) return await SkippedAsync(request, parts.Count == 1 ? verdict.Rationale : $"part {part + 1} of {parts.Count}: {verdict.Rationale}").ConfigureAwait(false);
+
+                observedModel ??= completion.ObservedModel;
+                verdicts.Add(verdict);
+            }
 
             // Only the provider-reported identity can accompany a completed review. A missing observation stays unknown;
             // the selected alias and compatibility Model fallback cannot establish reviewer diversity.
-            if (verdict.Failed) return await SkippedAsync(request, verdict.Rationale).ConfigureAwait(false);
-
-            var reviewerModel = ObservedLlmModel.FromWire(completion.ObservedModel, pick.Credential);
-            return verdict with { ReviewerModel = reviewerModel, Independence = IndependenceOf(request.ProducerModel?.ObservedModel, reviewerModel) };
+            var reviewerModel = ObservedLlmModel.FromWire(observedModel, pick.Credential);
+            return CriticArtifactParts.Merge(request.Mode, verdicts) with { ReviewerModel = reviewerModel, Independence = IndependenceOf(request.ProducerModel?.ObservedModel, reviewerModel) };
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -218,68 +234,4 @@ public sealed class LlmStructuredCritic : IStructuredCritic, IScopedDependency
     }
 
     private static string Rationale(string? raw) => string.IsNullOrWhiteSpace(raw) ? "(the reviewer gave no rationale)" : raw;
-
-    private static StructuredLLMCompletionRequest BuildRequest(CriticRequest request, ModelPoolPick pick) => new()
-    {
-        Model = pick.ModelId,
-        SystemPrompt = request.Mode == ReviewMode.Improve ? ImproveSystemPrompt : GateSystemPrompt,
-        UserPrompt = BuildUserPrompt(request),
-        JsonSchema = request.Mode == ReviewMode.Improve ? CriticSchema.ImproveSchema : CriticSchema.GateSchema,
-        MaxOutputTokens = 2048,
-        Temperature = 0.2,
-        Credential = pick.Credential,
-    };
-
-    /// <summary>Internal test accessor (InternalsVisibleTo) — pins the prompt framing without a real LLM round-trip.</summary>
-    internal static string BuildUserPromptForTest(CriticRequest request) => BuildUserPrompt(request);
-
-    private static string BuildUserPrompt(CriticRequest request)
-    {
-        var builder = new StringBuilder();
-
-        if (!string.IsNullOrWhiteSpace(request.Goal))
-        {
-            builder.AppendLine($"Goal the {request.ArtifactKind} should serve:");
-            builder.AppendLine(request.Goal);
-            builder.AppendLine();
-        }
-
-        builder.AppendLine($"The {request.ArtifactKind} to review:");
-        builder.AppendLine(request.Artifact);
-        builder.AppendLine();
-
-        // ⑧ plan-review satisfiability: when the artifact is a PLAN, add the acceptance-verifiability check — the error
-        // class (an acceptance that can NEVER pass as written) that dooms a subtask to endless retry. Scoped by the
-        // SHARED CriticArtifactKinds.WorkflowPlan constant (an EXACT match, not a "plan" substring that a future kind
-        // like "explanation" would trip), so the generic critic is byte-identical for every other kind. The model judges
-        // STRUCTURAL satisfiability from the plan text (a rubric/schema check with no rubric/schema, an artifact-dependent
-        // check the plan never produces); the grounded reviewer — which has the real code — catches the code-dependent cases.
-        if (string.Equals(request.ArtifactKind, CriticArtifactKinds.WorkflowPlan, StringComparison.OrdinalIgnoreCase))
-            builder.AppendLine("Also check ACCEPTANCE SATISFIABILITY: for each subtask, can the way the plan declares it 'done' be verified AS WRITTEN? Treat as a BLOCKER any acceptance that can never pass — a rubric / citation / schema check with no rubric or schema supplied, or one requiring an artifact (a repo binding, a built binary, a produced branch) the plan never creates. An unsatisfiable acceptance dooms its subtask to endless retry.");
-
-        builder.AppendLine(request.Mode == ReviewMode.Improve
-            ? "Critique it: what is weak, missing, or wrong, and specifically how to improve it to better serve the goal. Return ONLY the schema-constrained JSON."
-            : "Judge it: does it soundly achieve the goal? Score it, approve only if there is no material flaw, and list concrete issues. Return ONLY the schema-constrained JSON.");
-
-        return builder.ToString();
-    }
-
-    private const string GateSystemPrompt =
-        "You are an INDEPENDENT reviewer. You did not write the artifact under review; judge it strictly and fairly on " +
-        "its own merits against the stated goal. Ground EVERY issue in evidence (quote the offending part or name its " +
-        "precise location — an unevidenced issue is an opinion, not a finding) AND classify its SEVERITY: 'blocker' = " +
-        "the artifact is UNFIT for its goal (it would produce wrong, broken, unsafe, or incomplete results, or fails a " +
-        "hard requirement); 'major' = a real problem worth fixing that does NOT make it unfit; 'minor' = a nitpick or " +
-        "style preference. Set approved=false if and ONLY if you list at least one BLOCKER — a major or minor issue is " +
-        "worth surfacing but is not, on its own, grounds to halt. Do NOT inflate severity: reserve 'blocker' for genuine " +
-        "unfitness, so a sound artifact with a cosmetic flaw is not blocked. Always give a rationale. Return ONLY the " +
-        "schema-constrained JSON.";
-
-    private const string ImproveSystemPrompt =
-        "You are an INDEPENDENT reviewer helping improve an artifact you did not write. Critique it against the stated " +
-        "goal: identify what is weak, missing, or wrong, and give SPECIFIC, ACTIONABLE guidance the author can apply to " +
-        "produce a better revision. Ground every itemised issue in evidence — quote the artifact or name the precise " +
-        "location — AND classify its severity ('blocker' = makes it unfit; 'major' = a real problem to fix; 'minor' = a " +
-        "nitpick). If the only problems are minor nitpicks, say so plainly — do not manufacture a substantive revision " +
-        "for style preferences. Be concrete, not vague. Return ONLY the schema-constrained JSON.";
 }

@@ -1146,8 +1146,16 @@ public partial class AgentRunExecutorTests
         public void Dispose() => _holder.Dispose();
     }
 
-    [Fact]
-    public async Task A_drained_run_lands_with_the_files_its_agent_actually_changed()
+    /// <summary>
+    /// The drain lands what the agent changed — and, under a configured output review, says that review never ran. The
+    /// landing folds the dead agent's spool and captures its diff, but it runs inside the host's shutdown budget and
+    /// never reaches the review, so a captured patch used to land with nothing on the result to say no reviewer read it:
+    /// the supervisor's merge folds a unit by its base and patch, so it took the work unreviewed.
+    /// </summary>
+    [Theory]
+    [InlineData(ReviewMode.None, null)]
+    [InlineData(ReviewMode.Gate, OutputReviewState.Unreviewed)]
+    public async Task A_drained_run_lands_with_the_files_its_agent_actually_changed(ReviewMode review, OutputReviewState? expectedReview)
     {
         if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
 
@@ -1157,7 +1165,7 @@ public partial class AgentRunExecutorTests
         var teamId = await SeedTeamAsync();
         var credId = await SeedModelCredentialAsync(teamId, BrokeredProvider, "sk-drain-diff-fixture");
         var repoId = await SeedClonableRepositoryAsync(teamId, remote.RemoteUrl);
-        var runId = await CreateRepoBackedRunAsync(teamId, credId, repoId);
+        var runId = await CreateRepoBackedRunAsync(teamId, credId, repoId, review);
 
         // Addressless, like the drain test above and for the same reason: the diff capture under test belongs to the
         // LANDING, and only a run whose address cannot be handed on is landed by a drain any more.
@@ -1194,6 +1202,15 @@ public partial class AgentRunExecutorTests
 
         CodeSpace.Core.Services.Agents.AgentWorkPresence.ShowsWork(result).ShouldBeTrue(
             "this is the reading the supervisor's grade keys on — false here is the no-progress-budget regression this landing exists to avoid");
+
+        run.Status.ShouldBe(AgentRunStatus.Failed, "the lost lease is the run's own verdict, with or without a review");
+        result.OutputReview.ShouldBe(expectedReview);
+
+        var unit = CodeSpace.Core.Services.Supervisor.SupervisorOutcome.ProjectCompact(runId, run.Status.ToString(), run.Error, run.ResultJson);
+        CodeSpace.Core.Services.Supervisor.SupervisorOutcome.IsWithheldFromHead(unit).ShouldBe(review != ReviewMode.None,
+            "the merge takes a unit by its captured base and patch, so only the result can say no reviewer read them");
+
+        if (review != ReviewMode.None) result.UnreviewedReason.ShouldBe(AgentRunExecutor.DrainLandedUnreviewedReason);
     }
 
     /// <summary>The file the drained agent writes into its clone before hanging.</summary>
@@ -1326,11 +1343,11 @@ public partial class AgentRunExecutorTests
         return repoId;
     }
 
-    private async Task<Guid> CreateRepoBackedRunAsync(Guid teamId, Guid modelCredentialId, Guid repositoryId)
+    private async Task<Guid> CreateRepoBackedRunAsync(Guid teamId, Guid modelCredentialId, Guid repositoryId, ReviewMode outputReview = ReviewMode.None)
     {
         using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
         var run = await scope.Resolve<IAgentRunService>().CreateAsync(
-            new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId, RepositoryId = repositoryId, TimeoutSeconds = 1800 },
+            new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId, RepositoryId = repositoryId, TimeoutSeconds = 1800, OutputReviewMode = outputReview },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
     }

@@ -1028,7 +1028,7 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
         }
         catch (JsonException ex)
         {
-            _logger.LogWarning(ex, "AgentRunReconciler: agent run {RunId} has an unparseable TaskJson — skipping the acceptance-contract check", runId);
+            _logger.LogWarning(ex, "AgentRunReconciler: agent run {RunId} has an unparseable TaskJson — skipping the acceptance-contract and output-review checks", runId);
             return null;
         }
     }
@@ -1099,20 +1099,43 @@ public sealed class AgentRunReconcilerService : IAgentRunReconcilerService, ISco
     /// contract-bearing task recovered from the spool has no published branch to grade (the workspace died with the
     /// worker), so it fails CLOSED rather than landing Succeeded ungraded because the backend restarted at the right
     /// moment. A1 wins: a NeedsDecision re-grade is no longer a would-be Succeeded.
+    ///
+    /// <para>The output review is the third mirror (<see cref="UnreviewedAfterRecovery"/>): it runs after the push, so a
+    /// worker that died between the two left a branch on the remote and a manifest row naming it, with no review.</para>
     /// </summary>
     private async Task<AgentRunResult> ApplyRecoveryContractAsync(Guid runId, AgentRunResult result, CancellationToken cancellationToken)
+    {
+        var spoolTask = await ReadTaskAsync(runId, cancellationToken).ConfigureAwait(false);
+
+        return UnreviewedAfterRecovery(await ApplyCompletionContractAsync(runId, result, spoolTask, cancellationToken).ConfigureAwait(false), spoolTask);
+    }
+
+    /// <summary>A1, then the acceptance contract, over the spool's would-be result.</summary>
+    private async Task<AgentRunResult> ApplyCompletionContractAsync(Guid runId, AgentRunResult result, AgentTask? spoolTask, CancellationToken cancellationToken)
     {
         if (result.Status != AgentRunStatus.Succeeded) return result;
 
         var pendingDecisionId = await _ledger.FindBlockingDecisionIdAsync(runId, cancellationToken).ConfigureAwait(false);
         result = AgentCompletionContract.ApplyPendingDecision(result, pendingDecisionId);
 
-        if (result.Status != AgentRunStatus.Succeeded || await ReadTaskAsync(runId, cancellationToken).ConfigureAwait(false) is not { } spoolTask || !AgentAcceptanceContract.RequiresGrade(spoolTask)) return result;
+        if (result.Status != AgentRunStatus.Succeeded || spoolTask is null || !AgentAcceptanceContract.RequiresGrade(spoolTask)) return result;
 
         _logger.LogWarning("AgentRunReconciler: agent run {RunId} carries an acceptance contract but was recovered from the spool with no gradable branch — failing closed", runId);
 
         return AgentAcceptanceContract.FailClosed(result, "no-branch-or-repo (recovered from spool — the branch never published)");
     }
+
+    /// <summary>Why a spool-recovered run that configured an output review is unreviewed. Pinned by a test.</summary>
+    internal const string SpoolRecoveredUnreviewedReason = "The run was recovered after its worker stopped, before its configured output review ran: nothing it produced was reviewed.";
+
+    /// <summary>
+    /// A run that configured an output review and was recovered from its spool was never reviewed: the review runs after
+    /// the push, so whatever branch the dead worker published is unreviewed work its manifest row still names. Marked
+    /// unreviewed whatever its status, so no door — the plan-map integrator reads the manifest, not the spool — may
+    /// take it; a would-be success is HELD for a human, exactly as the live path holds one its review never examined.
+    /// </summary>
+    private static AgentRunResult UnreviewedAfterRecovery(AgentRunResult result, AgentTask? spoolTask) =>
+        spoolTask is null ? result : AgentOutputReviewHold.NeverReviewed(result, spoolTask.OutputReviewMode, SpoolRecoveredUnreviewedReason);
 
     /// <summary>
     /// The abandon's terminal write, and the place its spend claims are closed — right after the CAS, so a claim cannot be

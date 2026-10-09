@@ -119,6 +119,7 @@ public sealed class AgentReviewRunner : IScopedDependency
         ReviewerAgent = false,
         MaxReviseRounds = 0,
         Acceptance = null,
+        ExcludeRepositoryInstructions = spec.ExcludeRepositoryInstructions,
     };
 
     /// <summary>The shared final-message contract footer every review goal ends with — evidence AND severity REQUIRED per issue (P1: the agent reviewer's Gate is severity-authoritative, uniform with the in-process critic).</summary>
@@ -207,4 +208,7 @@ public sealed record AgentReviewSpec
 
     /// <summary>The operator's reviewer model pin (a credentialed-model ROW id); null ⇒ the harness default resolve.</summary>
     public Guid? ReviewerModelId { get; init; }
+
+    /// <summary>Load none of the clone's own instruction files into the reviewer's harness (<see cref="AgentTask.ExcludeRepositoryInstructions"/>) — set when the clone is a branch the reviewed party wrote, so its <c>CLAUDE.md</c> / <c>AGENTS.md</c> cannot instruct its own reviewer. A plan review clones the base, whose instructions are the repository's own, and keeps them.</summary>
+    public bool ExcludeRepositoryInstructions { get; init; }
 }
