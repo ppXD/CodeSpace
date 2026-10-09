@@ -28,9 +28,10 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
     private readonly IProviderRegistry _registry;
     private readonly IProviderModuleCatalog _modules;
     private readonly IScopeChecker _scopeChecker;
+    private readonly ICredentialSuccessionService _succession;
     private readonly ILogger<CredentialService> _logger;
 
-    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthClientRegistry oauthClients, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ILogger<CredentialService> logger)
+    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthClientRegistry oauthClients, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ILogger<CredentialService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
@@ -40,6 +41,7 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         _registry = registry;
         _modules = modules;
         _scopeChecker = scopeChecker;
+        _succession = succession;
         _logger = logger;
     }
 
@@ -165,6 +167,8 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         };
 
         await _db.Credential.AddAsync(credential, cancellationToken).ConfigureAwait(false);
+        await _succession.CarryForwardAsync(credential, cancellationToken).ConfigureAwait(false);
+
         return credential.Id;
     }
 

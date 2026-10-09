@@ -74,6 +74,7 @@ public class FailureTaxonomyTests
         FailureCodes.ProviderUnauthorized.ShouldBe("provider_unauthorized");
         FailureCodes.ProviderError.ShouldBe("provider_error");
         FailureCodes.RateLimited.ShouldBe("rate_limited");
+        FailureCodes.CredentialDisconnected.ShouldBe("credential_disconnected");
         FailureCodes.WorkflowDefinitionInvalid.ShouldBe("workflow_definition_invalid");
         FailureCodes.TaskRouteConfirmationRequired.ShouldBe("task_route_confirmation_required");
         FailureCodes.WorkspaceUnresolvable.ShouldBe("workspace_unresolvable");

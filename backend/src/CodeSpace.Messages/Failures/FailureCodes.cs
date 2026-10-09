@@ -52,6 +52,9 @@ public static class FailureCodes
     public const string ProviderError = "provider_error";
     public const string RateLimited = "rate_limited";
 
+    /// <summary>Something tried to authenticate through a credential that was disconnected — revoked, its token material destroyed. Remedy: reconnect the provider (bound repositories follow their owner's reconnect) or re-link to an active credential; a retry as-is reads the same dead row.</summary>
+    public const string CredentialDisconnected = "credential_disconnected";
+
     // ── Workflows and runs ─────────────────────────────────────────────────────────
     public const string WorkflowDefinitionInvalid = "workflow_definition_invalid";
     public const string TaskRouteConfirmationRequired = "task_route_confirmation_required";

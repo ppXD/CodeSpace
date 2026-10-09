@@ -19,8 +19,9 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
     private readonly IPayloadEncryptor _encryptor;
     private readonly ICredentialPayloadSerializer _serializer;
     private readonly IProviderRegistry _registry;
+    private readonly ICredentialSuccessionService _succession;
 
-    public UserProviderIdentityService(CodeSpaceDbContext db, ICurrentUser currentUser, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IProviderRegistry registry)
+    public UserProviderIdentityService(CodeSpaceDbContext db, ICurrentUser currentUser, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IProviderRegistry registry, ICredentialSuccessionService succession)
     {
         _db = db;
         _currentUser = currentUser;
@@ -28,6 +29,7 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
         _encryptor = encryptor;
         _serializer = serializer;
         _registry = registry;
+        _succession = succession;
     }
 
     public async Task<UserProviderIdentitySummary> LinkByPatAsync(Guid providerInstanceId, string accessToken, CancellationToken cancellationToken)
@@ -51,6 +53,8 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
         await ReplaceExistingLinkAsync(userId, providerInstanceId, cancellationToken).ConfigureAwait(false);
 
         await _db.Credential.AddAsync(credential, cancellationToken).ConfigureAwait(false);
+        await _succession.CarryForwardAsync(credential, cancellationToken).ConfigureAwait(false);
+
         var identity = BuildIdentity(userId, providerInstanceId, credential.Id, profile);
         await _db.UserProviderIdentity.AddAsync(identity, cancellationToken).ConfigureAwait(false);
 

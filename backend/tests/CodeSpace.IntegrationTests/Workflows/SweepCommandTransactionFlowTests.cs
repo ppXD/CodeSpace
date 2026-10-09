@@ -8,6 +8,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Agents;
+using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Commands.Storage;
 using CodeSpace.Messages.Commands.Webhooks;
 using CodeSpace.Messages.Commands.Workflows;
@@ -135,6 +136,7 @@ public class SweepCommandTransactionFlowTests
     [InlineData(typeof(ReconcileStuckAgentRunsCommand))]
     [InlineData(typeof(ReconcileStuckRunsCommand))]
     [InlineData(typeof(ReconcileStuckWebhookRegistrationsCommand))]
+    [InlineData(typeof(RepairDisconnectedCredentialBindingsCommand))]
     [InlineData(typeof(ResumeAbandonedArtifactTransfersCommand))]
     [InlineData(typeof(SweepBudgetSettlementCommand))]
     [InlineData(typeof(SweepCompletionShadowCommand))]
