@@ -21,7 +21,7 @@ public sealed class CredentialPayloadWriter : ICredentialPayloadWriter, IScopedD
         _connectionString = connectionString;
     }
 
-    public async Task UpdatePayloadAsync(Credential credential, CredentialPayload newPayload, CancellationToken cancellationToken)
+    public async Task<bool> UpdatePayloadAsync(Credential credential, string expectedEncryptedPayload, CredentialPayload newPayload, CancellationToken cancellationToken)
     {
         var json = _serializer.Serialize(newPayload);
         var encrypted = _encryptor.Encrypt(json);
@@ -35,14 +35,15 @@ public sealed class CredentialPayloadWriter : ICredentialPayloadWriter, IScopedD
         await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
 
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "UPDATE credential SET encrypted_payload = @enc, expires_date = @exp, last_modified_date = @now, last_modified_by = @user WHERE id = @id";
+        cmd.CommandText = "UPDATE credential SET encrypted_payload = @enc, expires_date = @exp, last_modified_date = @now, last_modified_by = @user WHERE id = @id AND encrypted_payload = @expected";
         cmd.Parameters.AddWithValue("@enc", encrypted);
         cmd.Parameters.AddWithValue("@exp", (object?)expiresDate ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@now", now);
         cmd.Parameters.AddWithValue("@user", SystemUsers.SeederId);
         cmd.Parameters.AddWithValue("@id", credential.Id);
+        cmd.Parameters.AddWithValue("@expected", expectedEncryptedPayload);
 
-        await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
+        if (await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0) return false;
 
         // Mutate caller's tracked entity so any subsequent read in the same scope reflects
         // the new token. EF doesn't see this as a change; the row in the DB is already updated.
@@ -50,5 +51,7 @@ public sealed class CredentialPayloadWriter : ICredentialPayloadWriter, IScopedD
         credential.ExpiresDate = expiresDate;
         credential.LastModifiedDate = now;
         credential.LastModifiedBy = SystemUsers.SeederId;
+
+        return true;
     }
 }

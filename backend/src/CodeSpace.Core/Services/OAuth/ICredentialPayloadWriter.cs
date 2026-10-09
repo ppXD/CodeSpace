@@ -12,5 +12,10 @@ namespace CodeSpace.Core.Services.OAuth;
 /// </summary>
 public interface ICredentialPayloadWriter
 {
-    Task UpdatePayloadAsync(Credential credential, CredentialPayload newPayload, CancellationToken cancellationToken);
+    /// <summary>
+    /// Stores <paramref name="newPayload"/> only if the row still holds <paramref name="expectedEncryptedPayload"/> — the
+    /// payload the refresh started from — and returns whether it did. Revocation empties the row without taking the refresh
+    /// lock, so an unconditional write would put a live token back into a revoked row.
+    /// </summary>
+    Task<bool> UpdatePayloadAsync(Credential credential, string expectedEncryptedPayload, CredentialPayload newPayload, CancellationToken cancellationToken);
 }
