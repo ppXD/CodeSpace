@@ -128,6 +128,7 @@ public class SweepCommandTransactionFlowTests
     [InlineData(typeof(ProbeStaleModelAvailabilityCommand))]
     [InlineData(typeof(ProbeStaleStorageDestinationsCommand))]
     [InlineData(typeof(ProbeUnknownModelCapabilitiesCommand))]
+    [InlineData(typeof(PurgeExpiredWebhookClaimsCommand))]
     [InlineData(typeof(ReapAgentRunOrphansCommand))]
     [InlineData(typeof(ReapAgentRunSpoolsCommand))]
     [InlineData(typeof(ReapUnreferencedArtifactsCommand))]

@@ -1,6 +1,6 @@
 namespace CodeSpace.Messages.Events.PullRequest;
 
-public sealed class PullRequestSynchronizedEvent : NormalizedEvent
+public sealed class PullRequestSynchronizedEvent : NormalizedEvent, IPullRequestOriginEvent
 {
     public required string ExternalPullRequestId { get; init; }
     public required int Number { get; init; }
@@ -23,4 +23,9 @@ public sealed class PullRequestSynchronizedEvent : NormalizedEvent
     /// Surfaced as <c>{{trigger.isDraft}}</c> so a workflow can gate on it.
     /// </summary>
     public bool IsDraft { get; init; }
+
+    /// <summary>Who wrote the PR and where its head lives — see <see cref="PullRequestOrigin"/>. Defaults to nothing known.</summary>
+    public PullRequestOrigin Origin { get; set; } = new();
+
+    string? IPullRequestOriginEvent.HeadSha => NewHeadSha;
 }

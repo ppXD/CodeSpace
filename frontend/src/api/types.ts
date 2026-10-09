@@ -291,6 +291,7 @@ export interface RepositoryWebhookSecret {
 export type RejectionReason =
   | "signature_invalid" | "webhook_inactive" | "event_not_mapped" | "malformed_payload" | "no_matching_activation"
   | "repository_not_bound" | "webhook_retired"
+  | "delivery_id_missing" | "delivery_replayed" | "author_not_member" | "pull_request_debounced"
   | (string & {});
 
 /** One delivery that arrived and was refused. Every field here was captured at rejection with secrets already stripped. */

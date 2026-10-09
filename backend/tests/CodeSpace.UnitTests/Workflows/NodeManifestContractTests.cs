@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
@@ -360,21 +361,25 @@ public class NodeManifestContractTests
         new HttpRequestNode(null!).Manifest.CanSuspend.ShouldBeFalse("http.request runs synchronously (side-effecting but not parking)");
     }
 
-    // PR-trigger schema dedup: every PR trigger must use the SAME serialised ConfigSchema JSON string.
-    // If any node drifts (e.g. someone copy-edits one description and forgets the others), this
-    // test fails — preventing a subtle activation-model regression where one trigger has different
-    // filter semantics from the rest.
+    // PR-trigger schema dedup: the triggers an outsider can cause (opened, updated) share ONE ConfigSchema, and it is the
+    // merged trigger's repositories filter plus the authors filter — so the repository/label semantics cannot drift between
+    // any of the three, and only the triggers an outsider can reach offer a choice about outsiders.
     [Fact]
-    public void Pr_trigger_nodes_share_identical_ConfigSchema()
+    public void Pr_trigger_nodes_share_one_repositories_filter_and_only_outsider_reachable_ones_filter_authors()
     {
-        var opened = new TriggerPrOpenedNode().Manifest.ConfigSchema.GetRawText();
-        var updated = new TriggerPrUpdatedNode().Manifest.ConfigSchema.GetRawText();
-        var merged = new TriggerPrMergedNode().Manifest.ConfigSchema.GetRawText();
-        updated.ShouldBe(opened,
-            "trigger.pr.opened and trigger.pr.updated must use the same ConfigSchema (PrTriggerSchemas.RepositoriesConfigSchemaJson); " +
-            "drift in repo-filter semantics between the two triggers is a silent activation regression");
-        merged.ShouldBe(opened,
-            "trigger.pr.merged must use the same ConfigSchema (PrTriggerSchemas.RepositoriesConfigSchemaJson) as the other PR triggers; " +
-            "drift in repo-filter semantics is a silent activation regression");
+        var openedRaw = new TriggerPrOpenedNode().Manifest.ConfigSchema.GetRawText();
+        var opened = JsonNode.Parse(openedRaw)!.AsObject();
+        var merged = JsonNode.Parse(new TriggerPrMergedNode().Manifest.ConfigSchema.GetRawText())!.AsObject();
+
+        new TriggerPrUpdatedNode().Manifest.ConfigSchema.GetRawText().ShouldBe(openedRaw,
+            "trigger.pr.opened and trigger.pr.updated must use the same ConfigSchema; drift between the two is a silent activation regression");
+
+        var authors = opened["properties"]!["authors"]!.AsObject();
+        authors["enum"]!.AsArray().Select(v => v!.GetValue<string>()).ShouldBe(new[] { "any", "members" });
+        authors.ContainsKey("default").ShouldBeFalse("no default: an activation naming none takes its repository's default (members on public or internal, anyone on private), and a schema default would be written into every config the editor saves");
+
+        opened["properties"]!.AsObject().Remove("authors");
+        merged.ToJsonString().ShouldBe(opened.ToJsonString(),
+            "trigger.pr.merged must use the same repositories filter as the other PR triggers, and no authors filter: a merge needs a member's hand");
     }
 }

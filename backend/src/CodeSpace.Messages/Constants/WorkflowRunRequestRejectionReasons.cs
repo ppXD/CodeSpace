@@ -58,4 +58,32 @@ public static class WorkflowRunRequestRejectionReasons
     /// against the repository so its own Webhook tab says why its deliveries are refused.
     /// </summary>
     public const string RepositoryOutsideHookOwner = "repository_outside_hook_owner";
+
+    /// <summary>
+    /// A correctly signed delivery from a provider that stamps every delivery with an id (GitHub's <c>X-GitHub-Delivery</c>)
+    /// arrived without one. A real provider never sends that; a tool replaying a captured body does, because without an
+    /// id every post of the same body would read as a new delivery.
+    /// </summary>
+    public const string DeliveryIdMissing = "delivery_id_missing";
+
+    /// <summary>
+    /// This hook already accepted the identical signed body under a different delivery id. The signature covers the body
+    /// only, so a captured body stays valid for as long as the secret does; a fresh id on an old body is a replay, not a
+    /// new event. A provider redelivery keeps its id and is not refused.
+    /// </summary>
+    public const string DeliveryReplayed = "delivery_replayed";
+
+    /// <summary>
+    /// A pull-request trigger that admits only members — explicitly, or by default on a public or internal repository —
+    /// saw a PR whose author holds no role there, or new commits pushed to a fork head by someone other than the author
+    /// who holds none. Started nothing for that activation; every other matching activation still ran.
+    /// </summary>
+    public const string AuthorNotMember = "author_not_member";
+
+    /// <summary>
+    /// The same activation already started a run for this pull request at the same head commit moments ago. Events for
+    /// one head within the debounce window start one run, not one per event, so closing and reopening a PR cannot be used
+    /// to start runs on demand; a push moves the head, so new commits are never held back.
+    /// </summary>
+    public const string PullRequestDebounced = "pull_request_debounced";
 }

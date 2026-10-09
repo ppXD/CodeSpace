@@ -544,4 +544,54 @@ describe("repository webhooks panel", () => {
     expect(toneOf("The hook was retired and is still sending")).toBe("bad");
     expect(screen.getByText(/Remove the hook by hand at GitLab/)).toBeTruthy();
   });
+
+  it("reads a pull request from outside the repository as the trigger's own filter, and names the setting that widens it", async () => {
+    // A members-only trigger doing its job — by default on a public or internal repository. Not a fault, but
+    // the one setting that changes it has to be named, or an operator who expected a run cannot get one.
+    renderPanel([hook()], { provider: "GitHub", refusals: [refusal({ reason: "author_not_member", detail: "Activation a1 workflow w1: pull request #7 was written by an author whose standing is 'none'", verificationResultJson: null })] });
+
+    const copy = rejectionCopy("author_not_member", "GitHub");
+    await waitFor(() => expect(screen.getByText(copy.headline)).toBeTruthy());
+
+    expect(toneOf(copy.headline)).toBe("idle");
+    expect(screen.getByText(/for new commits, pushed by the author or by someone with a role/)).toBeTruthy();
+    expect(screen.getByText(/on a public or internal repository unless told otherwise/)).toBeTruthy();
+    expect(screen.getByText(/set “Pull requests from” to Anyone/)).toBeTruthy();
+    expect(screen.getByText(/At most one of these is recorded per pull request per day/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("author_not_member");
+  });
+
+  it("reads a debounced pull request as the same commit arriving again, and never as new commits held back", async () => {
+    renderPanel([hook()], { provider: "GitHub", refusals: [refusal({ reason: "pull_request_debounced", detail: "Activation a1 workflow w1: pull request #7 at 3f2c already started a run from this trigger in the last 60 seconds", verificationResultJson: null })] });
+
+    const copy = rejectionCopy("pull_request_debounced", "GitHub");
+    await waitFor(() => expect(screen.getByText(copy.headline)).toBeTruthy());
+
+    expect(toneOf(copy.headline)).toBe("idle");
+    expect(screen.getByText(/at the same head commit less than a minute earlier/)).toBeTruthy();
+    expect(screen.getByText(/New commits always start their own run/)).toBeTruthy();
+    expect(document.body.textContent).not.toContain("push again");
+  });
+
+  it("reads a body replayed under a fresh delivery id as something the provider does not do, and points at the secret", async () => {
+    renderPanel([hook()], { provider: "GitHub", refusals: [refusal({ reason: "delivery_replayed", detail: "delivery attacker-2 to webhook 7f3a carries a signed body this hook already accepted under another delivery id", verificationResultJson: null })] });
+
+    const copy = rejectionCopy("delivery_replayed", "GitHub");
+    await waitFor(() => expect(screen.getByText(copy.headline)).toBeTruthy());
+
+    expect(toneOf(copy.headline)).toBe("bad");
+    expect(screen.getByText(/GitHub keeps a delivery's id when it redelivers/)).toBeTruthy();
+    expect(screen.getByText(/rotate the hook's secret/)).toBeTruthy();
+  });
+
+  it("reads a signed delivery with no delivery id as malformed for its provider, not as a signature fault", async () => {
+    renderPanel([hook()], { provider: "GitHub", refusals: [refusal({ reason: "delivery_id_missing", detail: "a signed delivery to webhook 7f3a carried no X-GitHub-Delivery", verificationResultJson: null })] });
+
+    const copy = rejectionCopy("delivery_id_missing", "GitHub");
+    await waitFor(() => expect(screen.getByText(copy.headline)).toBeTruthy());
+
+    expect(toneOf(copy.headline)).toBe("bad");
+    expect(screen.getByText(/GitHub sends an id with every delivery/)).toBeTruthy();
+    expect(screen.queryByText("The signature did not match")).toBeNull();
+  });
 });

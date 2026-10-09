@@ -70,6 +70,53 @@ public class ConnectionWebhookIngestionTests
     }
 
     [Fact]
+    public async Task A_github_organization_delivery_without_a_delivery_id_is_refused_and_starts_nothing()
+    {
+        var secret = $"gh-conn-{Guid.NewGuid():N}";
+        var seed = await SeedConnectionAsync(ProviderKind.GitHub, secret).ConfigureAwait(false);
+        var body = BuildGitHubPushBody(repositoryId: seed.SecondExternalId, fullName: seed.SecondFullPath);
+        var headers = GitHubHeaders(body, secret);
+        headers.Remove("X-GitHub-Delivery");
+        ClearCapturedEvents();
+
+        await Should.ThrowAsync<CodeSpace.Core.Services.Webhooks.Exceptions.WebhookDeliveryUnidentifiedException>(() => IngestAsync(seed.ConnectionWebhookId, body, headers)).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().ShouldBeEmpty();
+        (await LoadErrorsForHookAsync(seed.ConnectionWebhookId).ConfigureAwait(false)).ShouldContain(e => e.StartsWith(WorkflowRunRequestRejectionReasons.DeliveryIdMissing));
+    }
+
+    [Fact]
+    public async Task A_github_organization_body_replayed_under_a_fresh_delivery_id_is_not_published_again()
+    {
+        var secret = $"gh-conn-{Guid.NewGuid():N}";
+        var seed = await SeedConnectionAsync(ProviderKind.GitHub, secret).ConfigureAwait(false);
+        var body = BuildGitHubPushBody(repositoryId: seed.SecondExternalId, fullName: seed.SecondFullPath);
+        ClearCapturedEvents();
+
+        await IngestAsync(seed.ConnectionWebhookId, body, GitHubHeaders(body, secret, "org-captured-1")).ConfigureAwait(false);
+        await IngestAsync(seed.ConnectionWebhookId, body, GitHubHeaders(body, secret, "org-attacker-2")).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().OfType<PushReceivedEvent>().Select(e => e.ProviderEventId).ShouldBe(new[] { "org-captured-1" });
+        (await CountRefusalsAsync(seed.SecondRepositoryId, WorkflowRunRequestRejectionReasons.DeliveryReplayed).ConfigureAwait(false)).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_gitlab_group_body_posted_twice_is_published_twice_because_its_token_already_signs_anything()
+    {
+        // GitLab authenticates with a static token header, so whoever holds it can sign any body — a replay check would
+        // stop nothing the token does not already allow, and an older GitLab sends no delivery id to hold a claim with.
+        var secret = $"gl-conn-{Guid.NewGuid():N}";
+        var seed = await SeedConnectionAsync(ProviderKind.GitLab, secret).ConfigureAwait(false);
+        var body = BuildGitLabPushBody(projectId: seed.SecondExternalId, path: seed.SecondFullPath);
+        ClearCapturedEvents();
+
+        await IngestAsync(seed.ConnectionWebhookId, body, GitLabHeaders(secret)).ConfigureAwait(false);
+        await IngestAsync(seed.ConnectionWebhookId, body, GitLabHeaders(secret)).ConfigureAwait(false);
+
+        SnapshotCapturedEvents().OfType<PushReceivedEvent>().Count().ShouldBe(2);
+    }
+
+    [Fact]
     public async Task A_delivery_for_an_unbound_repository_is_dropped_and_audited()
     {
         // A group hook covers every project in the group and we asked for two of them. The rest is

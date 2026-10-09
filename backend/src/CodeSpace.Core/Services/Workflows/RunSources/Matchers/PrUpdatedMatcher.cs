@@ -32,7 +32,10 @@ public sealed class PrUpdatedMatcher : IRunSourceMatcher
             previousHeadSha = synced.PreviousHeadSha,
             newHeadSha = synced.NewHeadSha,
             labels = synced.Labels,
-            isDraft = synced.IsDraft
+            isDraft = synced.IsDraft,
+            authorAssociation = PullRequestOriginPayload.Association(synced.Origin),
+            isFork = synced.Origin.IsFork,
+            headRepositoryFullName = synced.Origin.HeadRepositoryFullName
         };
 
         return JsonSerializer.SerializeToElement(payload);

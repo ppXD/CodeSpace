@@ -1,20 +1,23 @@
 using CodeSpace.Core.Handlers.CommandHandlers.Auth;
 using CodeSpace.Core.Handlers.CommandHandlers.Credentials;
+using CodeSpace.Core.Handlers.CommandHandlers.Webhooks;
 using CodeSpace.Core.Jobs.RecurringJobs;
 using CodeSpace.Core.Services.Auth;
 using CodeSpace.Core.Services.OAuth;
+using CodeSpace.Core.Services.Webhooks;
 using CodeSpace.Messages.Commands.Auth;
 using CodeSpace.Messages.Commands.OAuth;
+using CodeSpace.Messages.Commands.Webhooks;
 using MediatR;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Jobs;
 
 /// <summary>
-/// 🟢 Unit: the two periodic janitors that used to be <c>BackgroundService</c>s are now the standard
-/// job → command → service chain (Rule 14 + Rule 16). Each job sends exactly its command on its cadence and holds no
-/// logic; each handler forwards to its service and returns its count and holds no logic. Hand-rolled recording
-/// doubles (no mocking lib, matching the codebase convention).
+/// 🟢 Unit: the periodic janitors — two that used to be <c>BackgroundService</c>s, and the webhook-claim sweep — are the
+/// standard job → command → service chain (Rule 14 + Rule 16). Each job sends exactly its command on its cadence and
+/// holds no logic; each handler forwards to its service and returns its count and holds no logic. Hand-rolled
+/// recording doubles (no mocking lib, matching the codebase convention).
 /// </summary>
 [Trait("Category", "Unit")]
 public class PeriodicJanitorDispatchTests
@@ -71,6 +74,32 @@ public class PeriodicJanitorDispatchTests
         result.Unrotated.ShouldBe(2, "the handler surfaces the audit's unrotated count verbatim");
     }
 
+    [Fact]
+    public async Task The_webhook_claim_sweep_dispatches_its_command_every_five_minutes()
+    {
+        var mediator = new RecordingMediator();
+        var job = new WebhookClaimPurgeRecurringJob(mediator);
+
+        job.JobId.ShouldBe(nameof(WebhookClaimPurgeRecurringJob));
+        job.CronExpression.ShouldBe("*/5 * * * *", "claims are taken over in place when they lapse, so the sweep only bounds the table; five minutes keeps it near one window of deliveries");
+
+        await job.Execute();
+
+        mediator.Sent.ShouldHaveSingleItem().ShouldBeOfType<PurgeExpiredWebhookClaimsCommand>("the job is a thin dispatcher — it only sends the command");
+    }
+
+    [Fact]
+    public async Task The_webhook_claim_handler_forwards_to_the_claim_store_and_returns_its_count()
+    {
+        var claims = new RecordingClaimStore { ToReturn = 3 };
+        var handler = new PurgeExpiredWebhookClaimsCommandHandler(claims);
+
+        var result = await handler.Handle(new PurgeExpiredWebhookClaimsCommand(), CancellationToken.None);
+
+        claims.PurgeCalls.ShouldBe(1, "the handler delegates the whole sweep to the store (Rule 16)");
+        result.Deleted.ShouldBe(3, "the handler surfaces the store's deleted count verbatim");
+    }
+
     /// <summary>Records the requests sent through the mediator; the rest of the surface is unreachable in these tests.</summary>
     private sealed class RecordingMediator : IMediator
     {
@@ -109,6 +138,21 @@ public class PeriodicJanitorDispatchTests
         public Task<int> DeleteExpiredAsync(CancellationToken cancellationToken)
         {
             Calls++;
+            return Task.FromResult(ToReturn);
+        }
+    }
+
+    /// <summary>Records the sweep call + returns a canned count; a claim is never taken in these tests.</summary>
+    private sealed class RecordingClaimStore : IWebhookClaimStore
+    {
+        public int PurgeCalls;
+        public int ToReturn;
+
+        public Task<bool> TryClaimAsync(string key, string holder, TimeSpan holdFor, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<int> PurgeExpiredAsync(CancellationToken cancellationToken)
+        {
+            PurgeCalls++;
             return Task.FromResult(ToReturn);
         }
     }

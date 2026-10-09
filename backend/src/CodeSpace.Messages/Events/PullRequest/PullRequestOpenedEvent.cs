@@ -1,6 +1,6 @@
 namespace CodeSpace.Messages.Events.PullRequest;
 
-public sealed class PullRequestOpenedEvent : NormalizedEvent
+public sealed class PullRequestOpenedEvent : NormalizedEvent, IPullRequestOriginEvent
 {
     public required string ExternalPullRequestId { get; init; }
     public required int Number { get; init; }
@@ -11,6 +11,9 @@ public sealed class PullRequestOpenedEvent : NormalizedEvent
     public required string AuthorExternalId { get; init; }
     public required string AuthorName { get; init; }
     public required string WebUrl { get; init; }
+
+    /// <summary>The head commit when the PR was opened or reopened. Provider source: GitHub <c>pull_request.head.sha</c>; GitLab <c>object_attributes.last_commit.id</c>. Null when the payload omits it.</summary>
+    public string? HeadSha { get; init; }
 
     /// <summary>
     /// Label names attached to the PR at the moment the webhook fired. Provider source:
@@ -30,4 +33,7 @@ public sealed class PullRequestOpenedEvent : NormalizedEvent
     /// level — mirroring how GitHub/GitLab deliver the event and let the consumer filter.
     /// </summary>
     public bool IsDraft { get; init; }
+
+    /// <summary>Who wrote the PR and where its head lives — see <see cref="PullRequestOrigin"/>. Defaults to nothing known.</summary>
+    public PullRequestOrigin Origin { get; set; } = new();
 }

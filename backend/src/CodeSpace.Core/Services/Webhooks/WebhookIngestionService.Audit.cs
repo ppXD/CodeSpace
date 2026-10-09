@@ -22,6 +22,25 @@ public sealed partial class WebhookIngestionService
     /// <summary>How long one event type nothing acts on collapses into a single audit row. See <see cref="AuditEventNotMappedAsync"/>.</summary>
     private static readonly TimeSpan UnmappedAuditWindow = TimeSpan.FromDays(1);
 
+    /// <summary>
+    /// How long one (hook, reason) refusal that anyone can cause collapses into a single row: an inactive or retired hook,
+    /// a bad signature, a missing delivery id. Whoever knows a hook's URL can post as often as they like before anything is
+    /// authenticated, and a row per post once pushed every genuine refusal out of the operator's newest-fifty list. One row
+    /// a day still says "this is happening", as the unbound and unmapped rows already do.
+    /// </summary>
+    public static readonly TimeSpan RefusalAuditWindow = TimeSpan.FromDays(1);
+
+    /// <summary>
+    /// How long a hook remembers a signed body it accepted. Longer than GitHub keeps a delivery redeliverable, so a body
+    /// captured from a delivery log cannot simply wait it out; a captured body older than this is still valid for as long
+    /// as the secret is, which rotating the secret ends.
+    /// </summary>
+    public static readonly TimeSpan ReplayWindow = TimeSpan.FromDays(7);
+
+    /// <summary>One key per (hook, reason, day) — see <see cref="RefusalAuditWindow"/>. The rejected: keyspace's other forms carry a delivery id or an activation, so this one cannot collide with them.</summary>
+    internal static string BuildRefusalWindowKey(Guid webhookId, string reason, DateTimeOffset now) =>
+        $"refused:{webhookId:N}:{reason}:{now.UtcTicks / RefusalAuditWindow.Ticks}";
+
     private async Task EnsureActiveOrAuditAsync(bool active, IngestionSubject subject, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
     {
         if (active) return;
@@ -37,6 +56,7 @@ public sealed partial class WebhookIngestionService
             Detail = $"webhook {subject.WebhookId} is configured as inactive",
             SourceType = BuildSourceType(subject),
             ExternalEventId = null,    // pre-classification — we never read the body for an inactive webhook
+            DedupKey = BuildRefusalWindowKey(subject.WebhookId, WorkflowRunRequestRejectionReasons.WebhookInactive, DateTimeOffset.UtcNow),
             RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
         }, cancellationToken).ConfigureAwait(false);
 
@@ -67,6 +87,7 @@ public sealed partial class WebhookIngestionService
             Detail = $"webhook {subject.WebhookId} was retired ({status}) and no longer accepts deliveries",
             SourceType = BuildSourceType(subject),
             ExternalEventId = null,    // pre-classification — a retired hook's body is never read
+            DedupKey = BuildRefusalWindowKey(subject.WebhookId, WorkflowRunRequestRejectionReasons.WebhookRetired, DateTimeOffset.UtcNow),
             RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
         }, cancellationToken).ConfigureAwait(false);
 
@@ -92,6 +113,7 @@ public sealed partial class WebhookIngestionService
             Detail = $"webhook {subject.WebhookId} belongs to repository {repository.Id}, which was removed, and no longer accepts deliveries",
             SourceType = BuildSourceType(subject),
             ExternalEventId = null,    // pre-classification — a retired hook's body is never read
+            DedupKey = BuildRefusalWindowKey(subject.WebhookId, WorkflowRunRequestRejectionReasons.WebhookRetired, DateTimeOffset.UtcNow),
             RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
         }, cancellationToken).ConfigureAwait(false);
 
@@ -116,11 +138,60 @@ public sealed partial class WebhookIngestionService
             Detail = $"signature did not validate for webhook {subject.WebhookId}",
             SourceType = BuildSourceType(subject),
             ExternalEventId = null,    // body is untrusted — we don't extract delivery id pre-verification
+            DedupKey = BuildRefusalWindowKey(subject.WebhookId, WorkflowRunRequestRejectionReasons.SignatureInvalid, DateTimeOffset.UtcNow),
             RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
             VerificationResultJson = JsonSerializer.Serialize(new { validated = false, verifier_class = verifier.GetType().Name }),
         }, cancellationToken).ConfigureAwait(false);
 
         throw new UnauthorizedAccessException("Webhook signature verification failed");
+    }
+
+    /// <summary>
+    /// A provider that stamps every delivery with an id (<see cref="IWebhookDeliveryIdentity"/>) sent a correctly signed
+    /// one without it. A real provider never does; a tool replaying a captured body does, because without an id every
+    /// post of that body would read as a new delivery. Answered 400 and recorded once per hook per day.
+    /// </summary>
+    private async Task EnsureDeliveryIdentifiedOrAuditAsync(IngestionSubject subject, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
+    {
+        if (!_registry.TryGet<IWebhookDeliveryIdentity>(subject.Provider, out var identity) || identity == null) return;
+        if (Providers.WebhookHeaderLookup.TryFind(headers, identity.DeliveryIdHeader, out var deliveryId) && !string.IsNullOrWhiteSpace(deliveryId)) return;
+
+        _logger.LogWarning("Webhook {WebhookId} delivery was signed but carried no {Header}", subject.WebhookId, identity.DeliveryIdHeader);
+
+        await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
+        {
+            TeamId = subject.TeamId,
+            RepositoryId = subject.RepositoryId,
+            Reason = WorkflowRunRequestRejectionReasons.DeliveryIdMissing,
+            Detail = $"a signed delivery to webhook {subject.WebhookId} carried no {identity.DeliveryIdHeader}; {subject.Provider} sends one with every delivery",
+            SourceType = BuildSourceType(subject),
+            ExternalEventId = null,
+            DedupKey = BuildRefusalWindowKey(subject.WebhookId, WorkflowRunRequestRejectionReasons.DeliveryIdMissing, DateTimeOffset.UtcNow),
+            RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
+        }, cancellationToken).ConfigureAwait(false);
+
+        throw new Exceptions.WebhookDeliveryUnidentifiedException(subject.WebhookId, identity.DeliveryIdHeader);
+    }
+
+    /// <summary>
+    /// This hook already accepted the identical signed body under another delivery id. Answered 200 like any delivery
+    /// handled, and recorded once per replayed body however often it is posted — the claim key already names the body.
+    /// </summary>
+    private async Task AuditReplayedDeliveryAsync(IngestionSubject subject, string claimKey, string deliveryId, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
+    {
+        _logger.LogWarning("Webhook {WebhookId} delivery {DeliveryId} repeats a body this hook already accepted under another delivery id; not started again", subject.WebhookId, deliveryId);
+
+        await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
+        {
+            TeamId = subject.TeamId,
+            RepositoryId = subject.RepositoryId,
+            Reason = WorkflowRunRequestRejectionReasons.DeliveryReplayed,
+            Detail = $"delivery {deliveryId} to webhook {subject.WebhookId} carries a signed body this hook already accepted under another delivery id in the last {ReplayWindow.TotalDays:0} days; nothing was started",
+            SourceType = BuildSourceType(subject),
+            ExternalEventId = deliveryId,
+            DedupKey = $"replayed:{claimKey}",
+            RawHeadersRedactedJson = SerializeRedactedHeaders(headers),
+        }, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -294,19 +365,8 @@ public sealed partial class WebhookIngestionService
     private static string BuildSourceType(IngestionSubject subject) =>
         $"{WorkflowRunSourceTypes.ProviderPrefix}{subject.Provider.ToString().ToLowerInvariant()}";
 
-    /// <summary>
-    /// Serialise the request headers with secret/auth values stripped. The audit row stores
-    /// header NAMES (operators want to see "Authorization was present" without leaking the
-    /// token); add header values only for explicitly safe ones (Content-Type, User-Agent).
-    /// </summary>
-    private static string SerializeRedactedHeaders(IReadOnlyDictionary<string, string> headers)
-    {
-        var safeNames = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Content-Type", "User-Agent", "X-GitHub-Event", "X-GitHub-Delivery", "X-Gitlab-Event", "X-Gitlab-Event-UUID" };
-        var redacted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var (name, value) in headers)
-            redacted[name] = safeNames.Contains(name) ? value : "[REDACTED]";
-        return JsonSerializer.Serialize(redacted);
-    }
+    /// <summary>Header names, safe values, all bounded — see <see cref="RejectedDeliveryHeaders"/>.</summary>
+    private static string SerializeRedactedHeaders(IReadOnlyDictionary<string, string> headers) => RejectedDeliveryHeaders.Serialize(headers);
 
     /// <summary>
     /// Best-effort delivery id extraction from common provider headers. Returns null if no

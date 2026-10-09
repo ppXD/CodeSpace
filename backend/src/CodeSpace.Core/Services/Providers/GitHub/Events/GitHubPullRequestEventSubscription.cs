@@ -20,10 +20,10 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
 
         return action switch
         {
-            "opened" => BuildOpened(repositoryId, deliveryId, now, pr),
+            "opened" => BuildOpened(repositoryId, deliveryId, now, pr, root),
             // Reopening re-enters the "needs review / CI" state. GitHub Actions bundles `reopened`
             // into its default pull_request trigger set alongside `opened`, so we fire the same event.
-            "reopened" => BuildOpened(repositoryId, deliveryId, now, pr),
+            "reopened" => BuildOpened(repositoryId, deliveryId, now, pr, root),
             "synchronize" => BuildSynchronized(repositoryId, deliveryId, now, pr, root),
             "closed" => pr.GetProperty("merged").GetBoolean()
                 ? BuildMerged(repositoryId, deliveryId, now, pr, root)
@@ -32,7 +32,7 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
         };
     }
 
-    private static PullRequestOpenedEvent BuildOpened(Guid repositoryId, string deliveryId, DateTimeOffset now, JsonElement pr)
+    private static PullRequestOpenedEvent BuildOpened(Guid repositoryId, string deliveryId, DateTimeOffset now, JsonElement pr, JsonElement root)
     {
         var user = pr.GetProperty("user");
 
@@ -50,8 +50,10 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
             AuthorExternalId = user.GetProperty("id").GetRawText(),
             AuthorName = user.GetProperty("login").GetString()!,
             WebUrl = pr.GetProperty("html_url").GetString()!,
+            HeadSha = TryReadSide(pr, "head", out var head) ? ReadString(head, "sha") : null,
             Labels = ExtractLabels(pr),
-            IsDraft = ReadIsDraft(pr)
+            IsDraft = ReadIsDraft(pr),
+            Origin = ReadOrigin(pr, root)
         };
     }
 
@@ -65,8 +67,72 @@ public sealed class GitHubPullRequestEventSubscription : IProviderEventSubscript
         PreviousHeadSha = root.GetProperty("before").GetString()!,
         NewHeadSha = root.GetProperty("after").GetString()!,
         Labels = ExtractLabels(pr),
-        IsDraft = ReadIsDraft(pr)
+        IsDraft = ReadIsDraft(pr),
+        Origin = ReadOrigin(pr, root) with { PusherExternalId = ReadSenderId(root) }
     };
+
+    /// <summary>On a synchronize, <c>sender</c> is whoever pushed the commits — not necessarily the PR's author. Null when the payload omits it.</summary>
+    private static string? ReadSenderId(JsonElement root) =>
+        root.TryGetProperty("sender", out var sender) && sender.ValueKind == JsonValueKind.Object && sender.TryGetProperty("id", out var id) ? id.GetRawText() : null;
+
+    /// <summary>
+    /// Who wrote the PR and where its head lives. Every field is optional on the wire: a payload that omits one reads as
+    /// "not known", never as a member or a same-repository PR — except a head repository GitHub sends as <c>null</c>,
+    /// which it does only for a fork that was since deleted.
+    /// </summary>
+    private static PullRequestOrigin ReadOrigin(JsonElement pr, JsonElement root) => new()
+    {
+        AuthorExternalId = pr.TryGetProperty("user", out var user) && user.ValueKind == JsonValueKind.Object && user.TryGetProperty("id", out var id) ? id.GetRawText() : null,
+        AuthorAssociation = MapAuthorAssociation(ReadString(pr, "author_association")),
+        IsFork = ReadIsFork(pr),
+        HeadRepositoryFullName = TryReadSide(pr, "head", out var head) && head.TryGetProperty("repo", out var repo) && repo.ValueKind == JsonValueKind.Object ? ReadString(repo, "full_name") : null,
+        RepositoryVisibility = root.TryGetProperty("repository", out var repository) && repository.ValueKind == JsonValueKind.Object ? ReadVisibility(repository) : null
+    };
+
+    /// <summary>
+    /// GitHub's <c>author_association</c> onto the normalised standing. OWNER, MEMBER and COLLABORATOR hold a role on the
+    /// repository or its organization; the contributor values have had changes merged but hold none; anything else is
+    /// unknown rather than guessed.
+    /// </summary>
+    internal static PullRequestAuthorAssociation MapAuthorAssociation(string? raw) => raw switch
+    {
+        "OWNER" or "MEMBER" or "COLLABORATOR" => PullRequestAuthorAssociation.Member,
+        "CONTRIBUTOR" or "FIRST_TIME_CONTRIBUTOR" or "FIRST_TIMER" => PullRequestAuthorAssociation.Contributor,
+        "NONE" or "MANNEQUIN" => PullRequestAuthorAssociation.None,
+        _ => PullRequestAuthorAssociation.Unknown
+    };
+
+    /// <summary>
+    /// Whether the head lives in another repository than the base. Not <c>head.repo.fork</c>: that says the head
+    /// REPOSITORY is a fork of something, which is true of every branch in an organization's own fork of upstream.
+    /// </summary>
+    private static bool ReadIsFork(JsonElement pr)
+    {
+        if (!TryReadSide(pr, "head", out var head) || !head.TryGetProperty("repo", out var headRepo)) return false;
+        if (headRepo.ValueKind == JsonValueKind.Null) return true;
+        if (!TryReadSide(pr, "base", out var @base) || !@base.TryGetProperty("repo", out var baseRepo)) return false;
+        if (headRepo.ValueKind != JsonValueKind.Object || baseRepo.ValueKind != JsonValueKind.Object) return false;
+        if (!headRepo.TryGetProperty("id", out var headId) || !baseRepo.TryGetProperty("id", out var baseId)) return false;
+
+        return headId.GetRawText() != baseId.GetRawText();
+    }
+
+    /// <summary><c>repository.visibility</c> when GitHub sends it (it distinguishes internal), else the older <c>repository.private</c> flag.</summary>
+    private static RepositoryVisibility? ReadVisibility(JsonElement repository) => ReadString(repository, "visibility") switch
+    {
+        "public" => RepositoryVisibility.Public,
+        "internal" => RepositoryVisibility.Internal,
+        "private" => RepositoryVisibility.Private,
+        _ => repository.TryGetProperty("private", out var isPrivate) && isPrivate.ValueKind is JsonValueKind.True or JsonValueKind.False
+            ? (isPrivate.GetBoolean() ? RepositoryVisibility.Private : RepositoryVisibility.Public)
+            : null
+    };
+
+    private static bool TryReadSide(JsonElement pr, string side, out JsonElement value) =>
+        pr.TryGetProperty(side, out value) && value.ValueKind == JsonValueKind.Object;
+
+    private static string? ReadString(JsonElement element, string name) =>
+        element.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString() : null;
 
     /// <summary>
     /// GitHub sets <c>pull_request.draft = true</c> while a PR is a draft. Absent / non-boolean →

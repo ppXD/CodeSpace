@@ -205,8 +205,8 @@ public sealed class WebhookTenancyE2ETests : IClassFixture<WebhookApiFactory>
         var newHook = await LoadConnectionHookAsync(seed.InstanceId, renamed);
         newHook.ShouldNotBeNull(customMessage: "the refresh moved the repository out from under every hook and staged none. Check RepositoryService.RefreshMetadataBestEffortAsync stages coverage through IConnectionWebhookCoverageService.");
 
-        // From here the provider sends each event on both of the renamed group's hooks.
-        var afterRename = GitLabOpenedBody(projectId, $"{renamed}/web");
+        // From here the provider sends each event on both of the renamed group's hooks — here a new MR opened after the rename.
+        var afterRename = GitLabOpenedBody(projectId, $"{renamed}/web", iid: 4);
         (await PostGitLabAsync(oldHook.Url, afterRename, oldHook.Token)).ShouldBe(HttpStatusCode.OK);
         (await PostGitLabAsync(newHook!.Url, afterRename, newHook.Token)).ShouldBe(HttpStatusCode.OK);
 
@@ -325,8 +325,9 @@ public sealed class WebhookTenancyE2ETests : IClassFixture<WebhookApiFactory>
     private static string GitLabMergeRequestBody() =>
         "{\"object_kind\":\"merge_request\",\"user\":{\"id\":1,\"username\":\"u\"},\"project\":{\"id\":1},\"object_attributes\":{\"id\":1,\"iid\":3,\"action\":\"open\",\"title\":\"victim\",\"description\":\"d\",\"source_branch\":\"f\",\"target_branch\":\"main\",\"url\":\"https://x\"},\"labels\":[]}";
 
-    private static string GitLabOpenedBody(string projectId, string path) =>
-        "{\"object_kind\":\"merge_request\",\"user\":{\"id\":1,\"username\":\"u\"},\"project\":{\"id\":" + projectId + ",\"path_with_namespace\":\"" + path + "\"},\"object_attributes\":{\"id\":1,\"iid\":3,\"action\":\"open\",\"title\":\"t\",\"description\":\"d\",\"source_branch\":\"f\",\"target_branch\":\"main\",\"url\":\"https://x\"},\"labels\":[]}";
+    /// <summary>A merge request opened on the project. Each MR its own <paramref name="iid"/>: the same MR opened twice inside the debounce window is one run.</summary>
+    private static string GitLabOpenedBody(string projectId, string path, int iid = 3) =>
+        "{\"object_kind\":\"merge_request\",\"user\":{\"id\":1,\"username\":\"u\"},\"project\":{\"id\":" + projectId + ",\"path_with_namespace\":\"" + path + "\"},\"object_attributes\":{\"id\":" + iid + ",\"iid\":" + iid + ",\"action\":\"open\",\"title\":\"t\",\"description\":\"d\",\"source_branch\":\"f\",\"target_branch\":\"main\",\"url\":\"https://x\"},\"labels\":[]}";
 
     /// <summary>What GitLab answers for <c>GET /api/v4/projects/:id</c> — trimmed to the fields the provider class maps.</summary>
     private static string GitLabProjectJson(string projectId, string owner) =>

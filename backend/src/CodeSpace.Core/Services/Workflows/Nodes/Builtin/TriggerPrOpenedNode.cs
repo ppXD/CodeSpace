@@ -25,7 +25,7 @@ public sealed class TriggerPrOpenedNode : INodeRuntime
         Kind = NodeKind.Trigger,
         IconKey = "git-pull-request",
         Description = "Starts the workflow when a pull/merge request is opened.",
-        ConfigSchema = SchemaBuilder.Parse(PrTriggerSchemas.RepositoriesConfigSchemaJson),
+        ConfigSchema = SchemaBuilder.Parse(PrTriggerSchemas.OutsiderReachableConfigSchemaJson),
         InputSchema = SchemaBuilder.EmptyObject(),
         OutputSchema = SchemaBuilder.Parse("""
             {
@@ -40,7 +40,10 @@ public sealed class TriggerPrOpenedNode : INodeRuntime
                 "authorName": { "type": "string" },
                 "webUrl": { "type": "string" },
                 "labels": { "type": "array", "items": { "type": "string" } },
-                "isDraft": { "type": "boolean" }
+                "isDraft": { "type": "boolean" },
+                "authorAssociation": { "type": "string", "enum": ["member", "contributor", "none", "unknown"] },
+                "isFork": { "type": "boolean" },
+                "headRepositoryFullName": { "type": ["string","null"] }
               }
             }
             """)
