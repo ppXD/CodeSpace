@@ -681,6 +681,44 @@ public class TriggerMatcherTests
                 "See PrOpened_OutputSchema_lists_exactly_the_keys_BuildPayload_emits for the failure mode and fix recipe.");
     }
 
+    [Fact]
+    public void PrOpened_payload_says_who_wrote_the_pr_and_where_its_head_lives()
+    {
+        // A fork's head branch can be named "main" too: without these three a workflow cannot tell an outsider's PR
+        // from a member's, nor gate on it.
+        var ev = OpenedEvent(RepoA);
+        ev.Origin = new PullRequestOrigin { AuthorAssociation = CodeSpace.Messages.Enums.PullRequestAuthorAssociation.None, IsFork = true, HeadRepositoryFullName = "evil/repo" };
+
+        var payload = new PrOpenedMatcher().BuildPayload(ev);
+
+        payload.GetProperty("authorAssociation").GetString().ShouldBe("none");
+        payload.GetProperty("isFork").GetBoolean().ShouldBeTrue();
+        payload.GetProperty("headRepositoryFullName").GetString().ShouldBe("evil/repo");
+    }
+
+    [Fact]
+    public void PrUpdated_payload_says_who_wrote_the_pr_and_where_its_head_lives()
+    {
+        var ev = new PullRequestSynchronizedEvent { RepositoryId = RepoA, ProviderEventId = "1", OccurredAt = DateTimeOffset.UtcNow, ExternalPullRequestId = "1", Number = 42, PreviousHeadSha = "a", NewHeadSha = "b" };
+        ev.Origin = new PullRequestOrigin { AuthorAssociation = CodeSpace.Messages.Enums.PullRequestAuthorAssociation.Member, IsFork = false, HeadRepositoryFullName = "acme/api" };
+
+        var payload = new PrUpdatedMatcher().BuildPayload(ev);
+
+        payload.GetProperty("authorAssociation").GetString().ShouldBe("member");
+        payload.GetProperty("isFork").GetBoolean().ShouldBeFalse();
+        payload.GetProperty("headRepositoryFullName").GetString().ShouldBe("acme/api");
+    }
+
+    [Fact]
+    public void An_unknown_origin_reads_unknown_and_not_a_fork()
+    {
+        var payload = new PrOpenedMatcher().BuildPayload(OpenedEvent(RepoA));
+
+        payload.GetProperty("authorAssociation").GetString().ShouldBe("unknown");
+        payload.GetProperty("isFork").GetBoolean().ShouldBeFalse();
+        payload.GetProperty("headRepositoryFullName").ValueKind.ShouldBe(JsonValueKind.Null);
+    }
+
     /// <summary>
     /// Pulls the top-level <c>properties</c> object's keys from a JSON Schema, the
     /// same surface SchemaForm walks to render fields. Tolerates missing /

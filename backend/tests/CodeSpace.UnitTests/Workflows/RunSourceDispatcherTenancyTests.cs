@@ -5,10 +5,13 @@ using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using CodeSpace.Core.Services.Completion.Exceptions;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.RunSources;
+using CodeSpace.Core.Services.Workflows.RunSources.Admission;
+using CodeSpace.Core.Services.Workflows.RunSources.Admission.Exceptions;
 using CodeSpace.Core.Services.Workflows.RunSources.Matchers;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Events.PullRequest;
+using System.Text.Json;
 using CodeSpace.UnitTests.Infrastructure;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -91,6 +94,55 @@ public class RunSourceDispatcherTenancyTests
         world.Auditor.NoMatches.ShouldBeEmpty(customMessage: "a refusal is its own reason — it must not also read as 'nothing was listening'");
     }
 
+    [Theory]
+    [InlineData(PullRequestRefusal.AuthorNotMember, WorkflowRunRequestRejectionReasons.AuthorNotMember)]
+    [InlineData(PullRequestRefusal.Debounced, WorkflowRunRequestRejectionReasons.PullRequestDebounced)]
+    public async Task A_pull_request_admission_refusal_costs_its_own_run_and_collapses_on_the_refusals_own_key(PullRequestRefusal refusal, string expectedReason)
+    {
+        using var world = new World();
+        var refusing = world.Workflow(world.EventTeamId, PrOpened, "{}");
+        var sibling = world.Workflow(world.EventTeamId, PrOpened, """{"authors":"any"}""");
+        await world.SaveAsync();
+        world.Admission.Refuse(refusing, refusal);
+
+        await world.DispatchAsync(world.OpenedEvent());
+
+        world.Starter.Started.Select(e => e.WorkflowId).ShouldBe(new[] { sibling }, customMessage: "an author or debounce refusal belongs to one activation");
+        var audit = world.Auditor.Rejections.ShouldHaveSingleItem();
+        audit.Reason.ShouldBe(expectedReason);
+        audit.DedupKey.ShouldBe(RecordingAdmission.AuditKey, customMessage: "a reopen loop is a stream of genuinely signed deliveries — the row collapses per PR, not per delivery");
+        world.Auditor.NoMatches.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Admission_is_asked_only_after_the_matcher_said_yes_and_sees_the_activations_own_config()
+    {
+        using var world = new World();
+        world.Workflow(world.EventTeamId, PrOpened, $$"""{"repositories":[{"repositoryId":"{{Guid.NewGuid()}}"}]}""");
+        var matching = world.Workflow(world.EventTeamId, PrOpened, """{"authors":"members"}""");
+        await world.SaveAsync();
+
+        await world.DispatchAsync(world.OpenedEvent());
+
+        world.Admission.Asked.ShouldBe(new (Guid, string?)[] { (matching, "members") });
+    }
+
+    [Fact]
+    public async Task Activations_are_visited_in_one_order_whatever_order_they_were_stored_in()
+    {
+        // Each visit can take a row lock — the PR debounce claim — held until the delivery commits. Two concurrent
+        // deliveries for one PR that visited the same activations in different orders could each hold the lock the
+        // other waits on. Visiting by id gives every delivery the same order.
+        using var world = new World();
+        var ids = new[] { 3, 1, 2 }.Select(n => new Guid($"00000000-0000-0000-0000-00000000000{n}")).ToList();
+        foreach (var id in ids) world.Workflow(world.EventTeamId, PrOpened, "{}", activationId: id);
+        await world.SaveAsync();
+
+        await world.DispatchAsync(world.OpenedEvent());
+
+        world.Admission.ActivationIds.ShouldBe(ids.OrderBy(id => id).ToList(), customMessage: "check the ORDER BY in RunSourceDispatcher.LoadActiveActivationsAsync");
+    }
+
     [Fact]
     public async Task An_infrastructure_failure_is_not_a_refusal_and_propagates()
     {
@@ -107,6 +159,8 @@ public class RunSourceDispatcherTenancyTests
 
     public enum Refusal { CompletionAdmission, Authority }
 
+    public enum PullRequestRefusal { AuthorNotMember, Debounced }
+
     /// <summary>One in-memory database holding the event's repository in its team, plus the fakes the dispatcher talks to.</summary>
     private sealed class World : IDisposable
     {
@@ -116,19 +170,20 @@ public class RunSourceDispatcherTenancyTests
         public Guid RepositoryId { get; } = Guid.NewGuid();
         public RecordingStarter Starter { get; } = new();
         public RecordingAuditor Auditor { get; } = new();
+        public RecordingAdmission Admission { get; } = new();
 
         public World(bool repositoryDeleted = false)
         {
             _db.Repository.Add(new Repository { Id = RepositoryId, TeamId = EventTeamId, ProviderInstanceId = Guid.NewGuid(), ExternalId = "1", NamespacePath = "acme", Name = "api", FullPath = "acme/api", WebUrl = "https://x", DeletedDate = repositoryDeleted ? DateTimeOffset.UtcNow : null });
         }
 
-        public Guid Workflow(Guid teamId, string typeKey, string configJson)
+        public Guid Workflow(Guid teamId, string typeKey, string configJson, Guid? activationId = null)
         {
             var workflowId = Guid.NewGuid();
             var publisher = Guid.NewGuid();
 
             _db.Workflow.Add(new Workflow { Id = workflowId, TeamId = teamId, Slug = $"wf-{workflowId:N}", Name = "wf", DefinitionJson = "{}", LatestVersion = 1, Enabled = true, CreatedBy = publisher, LastModifiedBy = publisher });
-            _db.WorkflowActivation.Add(new WorkflowActivation { Id = Guid.NewGuid(), WorkflowId = workflowId, TypeKey = typeKey, ConfigJson = configJson, Enabled = true, CreatedBy = publisher, LastModifiedBy = publisher });
+            _db.WorkflowActivation.Add(new WorkflowActivation { Id = activationId ?? Guid.NewGuid(), WorkflowId = workflowId, TypeKey = typeKey, ConfigJson = configJson, Enabled = true, CreatedBy = publisher, LastModifiedBy = publisher });
 
             return workflowId;
         }
@@ -155,7 +210,7 @@ public class RunSourceDispatcherTenancyTests
         public Task DispatchAsync(PullRequestOpenedEvent normalizedEvent)
         {
             var registry = new RunSourceMatcherRegistry(new IRunSourceMatcher[] { new PrOpenedMatcher(), new PrUpdatedMatcher(), new PrMergedMatcher(), new PushMatcher() });
-            var dispatcher = new RunSourceDispatcher(_db, registry, Starter, new NoopRunDispatcher(), Auditor, new InlinePostCommitActions(), NullLogger<RunSourceDispatcher>.Instance);
+            var dispatcher = new RunSourceDispatcher(_db, registry, Starter, new NoopRunDispatcher(), Auditor, new InlinePostCommitActions(), Admission, NullLogger<RunSourceDispatcher>.Instance);
 
             return dispatcher.Handle(normalizedEvent, CancellationToken.None);
         }
@@ -183,6 +238,35 @@ public class RunSourceDispatcherTenancyTests
 
             Started.Add(envelope);
             return Task.FromResult(Guid.NewGuid());
+        }
+    }
+
+    /// <summary>Admits everything unless told to refuse one workflow; records what it was asked, so a test can see the dispatcher asks AFTER matching.</summary>
+    private sealed class RecordingAdmission : IPullRequestTriggerAdmission
+    {
+        public const string AuditKey = "rejected:test:per-pr";
+
+        private readonly Dictionary<Guid, PullRequestRefusal> _refusals = new();
+
+        public List<(Guid WorkflowId, string? Authors)> Asked { get; } = new();
+
+        /// <summary>The activations asked about, in the order the dispatcher visited them.</summary>
+        public List<Guid> ActivationIds { get; } = new();
+
+        public void Refuse(Guid workflowId, PullRequestRefusal refusal) => _refusals[workflowId] = refusal;
+
+        public Task EnsureAdmittedAsync(WorkflowActivation activation, NormalizedEvent normalizedEvent, JsonElement activationConfig, CancellationToken cancellationToken)
+        {
+            Asked.Add((activation.WorkflowId, activationConfig.TryGetProperty("authors", out var authors) ? authors.GetString() : null));
+            ActivationIds.Add(activation.Id);
+
+            if (!_refusals.TryGetValue(activation.WorkflowId, out var refusal)) return Task.CompletedTask;
+
+            Exception error = refusal == PullRequestRefusal.Debounced
+                ? new PullRequestTriggerDebouncedException(42, "head-1", TimeSpan.FromSeconds(60), AuditKey)
+                : new PullRequestAuthorRefusedException("pull request #42 was written by an author whose standing is 'none'", AuditKey);
+
+            return Task.FromException(error);
         }
     }
 

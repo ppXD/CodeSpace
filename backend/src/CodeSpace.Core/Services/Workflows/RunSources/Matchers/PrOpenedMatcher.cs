@@ -42,7 +42,10 @@ public sealed class PrOpenedMatcher : IRunSourceMatcher
             authorName = opened.AuthorName,
             webUrl = opened.WebUrl,
             labels = opened.Labels,
-            isDraft = opened.IsDraft
+            isDraft = opened.IsDraft,
+            authorAssociation = PullRequestOriginPayload.Association(opened.Origin),
+            isFork = opened.Origin.IsFork,
+            headRepositoryFullName = opened.Origin.HeadRepositoryFullName
         };
 
         return JsonSerializer.SerializeToElement(payload);

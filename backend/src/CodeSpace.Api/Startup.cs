@@ -95,6 +95,7 @@ public class Startup
         services.Configure<HostOptions>(o => o.ShutdownTimeout = ShutdownSettings.ResolveDrainTimeout());
 
         services.AddAnonymousRateLimit();
+        services.AddWebhookIngressRateLimit();
 
         services.AddCustomAuthentication(Configuration, Environment);
     }

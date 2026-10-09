@@ -33,15 +33,17 @@ public sealed partial class WebhookIngestionService : IWebhookIngestionService, 
     private readonly IPayloadEncryptor _encryptor;
     private readonly IMediator _mediator;
     private readonly IIngestionAuditor _auditor;
+    private readonly IWebhookClaimStore _claims;
     private readonly ILogger<WebhookIngestionService> _logger;
 
-    public WebhookIngestionService(CodeSpaceDbContext db, IProviderRegistry registry, IPayloadEncryptor encryptor, IMediator mediator, IIngestionAuditor auditor, ILogger<WebhookIngestionService> logger)
+    public WebhookIngestionService(CodeSpaceDbContext db, IProviderRegistry registry, IPayloadEncryptor encryptor, IMediator mediator, IIngestionAuditor auditor, IWebhookClaimStore claims, ILogger<WebhookIngestionService> logger)
     {
         _db = db;
         _registry = registry;
         _encryptor = encryptor;
         _mediator = mediator;
         _auditor = auditor;
+        _claims = claims;
         _logger = logger;
     }
 
@@ -59,6 +61,7 @@ public sealed partial class WebhookIngestionService : IWebhookIngestionService, 
         var secret = _encryptor.Decrypt(webhook.SecretEnc);
 
         await VerifySignatureOrAuditAsync(verifier, body, headers, secret, subject, cancellationToken).ConfigureAwait(false);
+        await EnsureDeliveryIdentifiedOrAuditAsync(subject, headers, cancellationToken).ConfigureAwait(false);
 
         webhook.LastReceivedDate = DateTimeOffset.UtcNow;
 
@@ -84,6 +87,7 @@ public sealed partial class WebhookIngestionService : IWebhookIngestionService, 
         var secret = _encryptor.Decrypt(webhook.SecretEnc);
 
         await VerifySignatureOrAuditAsync(verifier, body, headers, secret, subject, cancellationToken).ConfigureAwait(false);
+        await EnsureDeliveryIdentifiedOrAuditAsync(subject, headers, cancellationToken).ConfigureAwait(false);
 
         webhook.LastReceivedDate = DateTimeOffset.UtcNow;
 
@@ -242,8 +246,34 @@ public sealed partial class WebhookIngestionService : IWebhookIngestionService, 
             return;
         }
 
+        if (!await ClaimBodyOrAuditReplayAsync(subject, body, normalizedEvent.ProviderEventId, headers, cancellationToken).ConfigureAwait(false)) return;
+
         await _mediator.Publish(normalizedEvent, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// A body signed by a provider whose signature covers the body only (<see cref="IWebhookDeliveryIdentity"/>) stays valid
+    /// for as long as the secret does, so the hook claims it, held by its delivery id, for <see cref="ReplayWindow"/>. The
+    /// same body under ANOTHER id is a replay of a captured delivery and starts nothing; under the SAME id it is the
+    /// provider redelivering, which goes on to the per-activation idempotency key exactly as before — so an operator who
+    /// fixes a trigger and presses Redeliver still gets their run. Claimed only for a body that normalised into an event:
+    /// nothing else can start a run, and most deliveries are events nothing acts on.
+    /// </summary>
+    private async Task<bool> ClaimBodyOrAuditReplayAsync(IngestionSubject subject, string body, string deliveryId, IReadOnlyDictionary<string, string> headers, CancellationToken cancellationToken)
+    {
+        if (!_registry.TryGet<IWebhookDeliveryIdentity>(subject.Provider, out _)) return true;
+
+        var claimKey = BuildBodyClaimKey(subject.WebhookId, body);
+
+        if (await _claims.TryClaimAsync(claimKey, deliveryId, ReplayWindow, cancellationToken).ConfigureAwait(false)) return true;
+
+        await AuditReplayedDeliveryAsync(subject, claimKey, deliveryId, headers, cancellationToken).ConfigureAwait(false);
+        return false;
+    }
+
+    /// <summary>One claim per (hook, body): the SHA-256 of the exact bytes the signature covered, never the body itself.</summary>
+    internal static string BuildBodyClaimKey(Guid webhookId, string body) =>
+        $"body:{webhookId:N}:{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(body))).ToLowerInvariant()}";
 
     /// <summary>
     /// Every way a reader can fail on an untrusted body: JsonException (not JSON),

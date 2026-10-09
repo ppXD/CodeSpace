@@ -21,6 +21,10 @@ public class WorkflowRunRequestRejectionReasonsTests
     [InlineData("webhook_retired",        nameof(WorkflowRunRequestRejectionReasons.WebhookRetired))]
     [InlineData("completion_admission_refused", nameof(WorkflowRunRequestRejectionReasons.CompletionAdmissionRefused))]
     [InlineData("repository_outside_hook_owner", nameof(WorkflowRunRequestRejectionReasons.RepositoryOutsideHookOwner))]
+    [InlineData("delivery_id_missing", nameof(WorkflowRunRequestRejectionReasons.DeliveryIdMissing))]
+    [InlineData("delivery_replayed", nameof(WorkflowRunRequestRejectionReasons.DeliveryReplayed))]
+    [InlineData("author_not_member", nameof(WorkflowRunRequestRejectionReasons.AuthorNotMember))]
+    [InlineData("pull_request_debounced", nameof(WorkflowRunRequestRejectionReasons.PullRequestDebounced))]
     public void Rejection_reason_string_form_is_pinned(string expected, string constantName)
     {
         var actual = typeof(WorkflowRunRequestRejectionReasons).GetField(constantName)!.GetValue(null) as string;

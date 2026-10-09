@@ -381,6 +381,7 @@ public class ReceiveWebhookFlowTests
         var headers = new Dictionary<string, string>
         {
             ["X-GitHub-Event"] = "ping",
+            ["X-GitHub-Delivery"] = $"gh-ping-{Guid.NewGuid():N}",
             ["X-Hub-Signature-256"] = ComputeGitHubSignature(body, secret)
         };
 
@@ -401,6 +402,7 @@ public class ReceiveWebhookFlowTests
         var headers = new Dictionary<string, string>
         {
             ["X-GitHub-Event"] = "push",
+            ["X-GitHub-Delivery"] = $"gh-push-{Guid.NewGuid():N}",
             ["X-Hub-Signature-256"] = ComputeGitHubSignature(body, secret)
         };
 

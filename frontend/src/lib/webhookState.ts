@@ -239,6 +239,34 @@ const REJECTION_COPY: Record<string, (who: string) => RejectionCopy> = {
     headline: "The hook was retired and is still sending",
     remedy: `CodeSpace asked ${who} to delete this hook when the connection changed webhook scope, and could not. ${who} is still delivering to it and every delivery is discarded. Remove the hook by hand at ${who} — nothing here will run off it again.`,
   }),
+  // A signed delivery the provider would never send: the id it stamps on every delivery is missing.
+  // Either something in front of us strips headers or the request did not come from the provider.
+  delivery_id_missing: (who) => ({
+    tone: "bad",
+    headline: "A signed delivery that carried no delivery id",
+    remedy: `${who} sends an id with every delivery and this one had none, so nothing it carried was acted on. Either something between ${who} and here strips request headers, or the delivery did not come from ${who} — if nothing in front of CodeSpace rewrites headers, rotate the hook's secret.`,
+  }),
+  // The provider's signature covers the body only, so a captured body stays valid. A redelivery keeps
+  // its id; the same body under a new one is somebody posting a captured delivery again.
+  delivery_replayed: (who) => ({
+    tone: "bad",
+    headline: "A delivery that repeated one already accepted",
+    remedy: `Signed correctly, but its body is the same as a delivery ${who} already sent here under another delivery id, so it started nothing. ${who} keeps a delivery's id when it redelivers, so this was not a redelivery: something posted a captured delivery again. If that was not you, rotate the hook's secret.`,
+  }),
+  // The trigger's own filter at work — on a public or internal repository, by default. Not a fault, but
+  // the one setting that changes it is named, or an operator expecting a run has nowhere to go.
+  author_not_member: (who) => ({
+    tone: "idle",
+    headline: "A pull request from someone without a role on the repository",
+    remedy: `Not a fault. This trigger starts runs only for pull requests written by someone with a role on the repository at ${who} — and, for new commits, pushed by the author or by someone with a role — which is what a trigger does on a public or internal repository unless told otherwise. To let anyone's pull request start it, set “Pull requests from” to Anyone on the trigger. At most one of these is recorded per pull request per day, however many arrive.`,
+  }),
+  // A head commit that already ran arriving again — a close/reopen loop. Never newer code: a push moves
+  // the head, and a new head always runs.
+  pull_request_debounced: () => ({
+    tone: "idle",
+    headline: "A pull request that had just run at the same commit",
+    remedy: "Not a fault. The same trigger started a run for this pull request at the same head commit less than a minute earlier, so this event — a reopen, or the same commits arriving again — started nothing. New commits always start their own run. At most one of these is recorded per pull request and commit per day.",
+  }),
   // Deliberately the friendliest of the five. This is not a failure — it is the delivery arriving,
   // being verified, being understood, and finding that nothing asked for it.
   no_matching_activation: () => ({
