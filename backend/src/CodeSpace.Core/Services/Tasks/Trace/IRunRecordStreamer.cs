@@ -8,7 +8,8 @@ namespace CodeSpace.Core.Services.Tasks.Trace;
 /// returns a one-shot snapshot). Yields every <see cref="RunRecordView"/> whose Sequence is beyond the caller's cursor
 /// AS it lands, so a consumer (the Room's SSE relay) sees interaction.delta / lifecycle rows live instead of re-polling
 /// the whole ledger. Team-scoped (fail-closed on a foreign / absent run → yields nothing). Ends when the run reaches a
-/// terminal <c>run.*</c> record, or the caller disconnects (cancellation). Additive + read-only — no schema, no mutation.
+/// terminal <c>run.*</c> record, the caller disconnects (cancellation), the caller's standing on the team lapses, or their
+/// token stops being accepted. Additive + read-only — no schema, no mutation.
 /// </summary>
 public interface IRunRecordStreamer : IScopedDependency
 {

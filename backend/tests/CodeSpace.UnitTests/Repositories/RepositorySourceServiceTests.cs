@@ -12,7 +12,7 @@ namespace CodeSpace.UnitTests.Repositories;
 [Trait("Category", "Unit")]
 public class RepositorySourceServiceTests
 {
-    private static readonly RepositorySourceService Service = new(null!, null!, null!);
+    private static readonly RepositorySourceService Service = new(null!, null!, null!, null!);
 
     [Theory]
     [InlineData(null)]

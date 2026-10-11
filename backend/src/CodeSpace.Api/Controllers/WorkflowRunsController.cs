@@ -1,7 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Api.Http;
 using CodeSpace.Messages.Agents;
-using CodeSpace.Core.Services.Tasks.Trace;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Dtos.Workflows;
@@ -32,13 +31,8 @@ public class WorkflowRunsController : ControllerBase
     private static readonly JsonSerializerOptions SseJson = new(JsonSerializerDefaults.Web);
 
     private readonly IMediator _mediator;
-    private readonly IRunRecordStreamer _recordStreamer;
 
-    public WorkflowRunsController(IMediator mediator, IRunRecordStreamer recordStreamer)
-    {
-        _mediator = mediator;
-        _recordStreamer = recordStreamer;
-    }
+    public WorkflowRunsController(IMediator mediator) { _mediator = mediator; }
 
     /// <summary>The team's runs index — every top-level run the team owns (any source), newest first. Team-scoped.</summary>
     [HttpGet]
@@ -351,15 +345,17 @@ public class WorkflowRunsController : ControllerBase
         return File(result.Content, "application/octet-stream");
     }
 
-    /// <summary>Live SSE tail of the run's ledger — every workflow_run_record row beyond <c>?after={sequence}</c> as it lands (interaction.delta + lifecycle), so the Room streams live instead of re-polling. <c>id:</c> = Sequence (for Last-Event-ID / <c>?after=</c> gapless resume), <c>event:</c> = the record type. Ends at a terminal run record or on client disconnect. Team-scoped; a foreign run streams nothing. The 2s poll (GET /records) stays the fallback.</summary>
+    /// <summary>Live SSE tail of the run's ledger — every workflow_run_record row beyond <c>?after={sequence}</c> as it lands (interaction.delta + lifecycle), so the Room streams live instead of re-polling. <c>id:</c> = Sequence (for Last-Event-ID / <c>?after=</c> gapless resume), <c>event:</c> = the record type. Ends at a terminal run record, on client disconnect, or once the caller loses standing. Team-scoped: the tail is requested through the mediator BEFORE any header is written, so a caller without standing on <c>X-Team-Id</c> gets a real 403, never an opened stream; an open stream re-checks standing before each batch and closes cleanly, without that batch, once the caller is removed, the team deleted or the session ended, and closes even while idle once the bearer handler would no longer accept the token; a foreign run under the caller's own team streams nothing. The 2s poll (GET /records) stays the fallback.</summary>
     [HttpGet("{runId:guid}/records/stream")]
     public async Task StreamRecords([FromRoute] Guid runId, [FromQuery] long after, CancellationToken cancellationToken)
     {
+        var tail = await _mediator.Send(new StreamRunRecordsQuery { RunId = runId, AfterSequence = after }, cancellationToken).ConfigureAwait(false);
+
         Response.Headers.ContentType = "text/event-stream";
         Response.Headers.CacheControl = "no-cache";
         Response.Headers["X-Accel-Buffering"] = "no";   // ask an nginx-style proxy not to buffer the stream
 
-        await foreach (var record in _recordStreamer.TailAsync(runId, after, cancellationToken).ConfigureAwait(false))
+        await foreach (var record in tail.WithCancellation(cancellationToken).ConfigureAwait(false))
         {
             var data = JsonSerializer.Serialize(record, SseJson);
             await Response.WriteAsync($"id: {record.Sequence}\nevent: {record.RecordType}\ndata: {data}\n\n", cancellationToken).ConfigureAwait(false);

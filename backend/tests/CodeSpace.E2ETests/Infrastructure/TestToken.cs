@@ -35,7 +35,10 @@ public static class TestToken
         return Mint(userId, stamp);
     }
 
-    public static string Mint(Guid userId, Guid stamp)
+    public static string Mint(Guid userId, Guid stamp) => Mint(userId, stamp, DateTime.UtcNow.AddHours(1));
+
+    /// <summary>A token with a chosen <c>exp</c>, valid from an hour before it, so a test can mint one already inside the handler's clock skew.</summary>
+    public static string Mint(Guid userId, Guid stamp, DateTime expiresUtc)
     {
         var claims = new[]
         {
@@ -44,7 +47,7 @@ public static class TestToken
         };
 
         var key = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(TaskLaunchApiFactory.JwtKey));
-        var jwt = new JwtSecurityToken(claims: claims, notBefore: DateTime.UtcNow, expires: DateTime.UtcNow.AddHours(1), signingCredentials: new SigningCredentials(key, SecurityAlgorithms.HmacSha256));
+        var jwt = new JwtSecurityToken(claims: claims, notBefore: expiresUtc.AddHours(-1), expires: expiresUtc, signingCredentials: new SigningCredentials(key, SecurityAlgorithms.HmacSha256));
 
         return new JwtSecurityTokenHandler().WriteToken(jwt);
     }

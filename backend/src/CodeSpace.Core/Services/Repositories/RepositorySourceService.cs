@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Scopes;
@@ -12,12 +13,14 @@ namespace CodeSpace.Core.Services.Repositories;
 public sealed class RepositorySourceService : IRepositorySourceService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
+    private readonly ICurrentTeam _currentTeam;
     private readonly IProviderRegistry _registry;
     private readonly IScopeChecker _scopeChecker;
 
-    public RepositorySourceService(CodeSpaceDbContext db, IProviderRegistry registry, IScopeChecker scopeChecker)
+    public RepositorySourceService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IProviderRegistry registry, IScopeChecker scopeChecker)
     {
         _db = db;
+        _currentTeam = currentTeam;
         _registry = registry;
         _scopeChecker = scopeChecker;
     }
@@ -59,11 +62,16 @@ public sealed class RepositorySourceService : IRepositorySourceService, IScopedD
         return (source, context, remote);
     }
 
+    /// <summary>
+    /// Team-scoped as well as id-scoped: the repository's OWN credential is what gets spent, so a repository outside the
+    /// caller's team must read as absent even when a request reaches here without <c>IRequireRepositoryAccess</c> — that
+    /// gap is how agent-pack preview read another team's private files. No team selected matches nothing.
+    /// </summary>
     private async Task<Repository> LoadRepositoryAsync(Guid repositoryId, CancellationToken cancellationToken) =>
         await _db.Repository
             .Include(r => r.ProviderInstance)
             .Include(r => r.Credential)
-            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            .SingleOrDefaultAsync(r => r.Id == repositoryId && r.TeamId == _currentTeam.Id && r.DeletedDate == null, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Repository {repositoryId} not found");
 
     private static void EnsureCredentialBound(Repository repo)

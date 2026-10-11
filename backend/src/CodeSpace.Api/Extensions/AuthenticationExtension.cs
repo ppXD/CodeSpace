@@ -29,7 +29,7 @@ public static class AuthenticationExtension
                     ValidateAudience = false,
                     ValidateIssuer = false,
                     ValidateIssuerSigningKey = true,
-                    ClockSkew = TimeSpan.FromMinutes(5),
+                    ClockSkew = BearerTokenLifetime.ClockSkew,
                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
                 };
 

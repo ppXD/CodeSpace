@@ -1,7 +1,10 @@
 using CodeSpace.Api.Extensions;
+using CodeSpace.Core.Services.Auth;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Options;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Authorization;
@@ -64,6 +67,23 @@ public class AuthenticationExtensionTests
 
         Action act = () => services.AddCustomAuthentication(configuration, environment);
         act.ShouldNotThrow();
+    }
+
+    /// <summary>
+    /// An open run-ledger tail stops serving a token at the moment this handler stops accepting it, and both read the
+    /// skew from <see cref="BearerTokenLifetime"/>. A literal here again would let the two drift apart unnoticed.
+    /// </summary>
+    [Fact]
+    public void Bearer_handler_tolerates_exactly_the_shared_clock_skew()
+    {
+        var services = new ServiceCollection();
+        services.AddCustomAuthentication(BuildConfiguration(jwtKey: new string('k', AuthenticationExtension.MinKeyByteLength)), BuildEnvironment(Environments.Production));
+
+        using var provider = services.BuildServiceProvider();
+        var options = provider.GetRequiredService<IOptionsMonitor<JwtBearerOptions>>().Get(JwtBearerDefaults.AuthenticationScheme);
+
+        options.TokenValidationParameters.ValidateLifetime.ShouldBeTrue();
+        options.TokenValidationParameters.ClockSkew.ShouldBe(BearerTokenLifetime.ClockSkew);
     }
 
     private static IConfiguration BuildConfiguration(string? jwtKey)

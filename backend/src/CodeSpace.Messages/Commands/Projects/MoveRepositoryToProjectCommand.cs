@@ -11,7 +11,7 @@ namespace CodeSpace.Messages.Commands.Projects;
 /// can re-organise their repos without unbinding + rebinding through the OAuth
 /// dance. Idempotent — no-op when the repo is already in the target project.
 /// </summary>
-public sealed record MoveRepositoryToProjectCommand : ICommand<MediatR.Unit>, IRequireTeamPermission
+public sealed record MoveRepositoryToProjectCommand : ICommand<MediatR.Unit>, IRequireTeamPermission, IRequireRepositoryAccess
 {
     public string RequiredPermission => TeamPermissions.ReposManage;
 

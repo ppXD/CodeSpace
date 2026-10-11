@@ -1,4 +1,5 @@
 using System.Runtime.CompilerServices;
+using CodeSpace.Core.Authorization;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Identity;
@@ -19,6 +20,12 @@ namespace CodeSpace.Core.Services.Tasks.Trace;
 /// caught up. Ends at a terminal <c>run.*</c> record or on cancellation. The 2s Room poll stays the fallback, so nothing
 /// breaks when this stream is unavailable. Since migration 0154, sequence is assigned behind a transaction-scoped
 /// run gate, so advancing this run-local cursor cannot skip a lower value that becomes visible later.
+/// <para>The run precheck trusts <c>X-Team-Id</c> as sent, so this is reached only through <c>StreamRunRecordsQuery</c>,
+/// whose membership marker vets the caller's standing on that team before the tail is requested.</para>
+/// <para>That vetting runs once, and a run waiting on a decision stays non-terminal for days. So every poll that found
+/// rows re-asks <see cref="ITeamStandingCheck"/> before handing them out, and the tail ends without them once the caller
+/// was removed, the team deleted, the session ended, or the token aged out. An empty poll asks only whether the token is
+/// still accepted, which reads no database, so an idle tail also ends when the token does.</para>
 /// </summary>
 public sealed class RunRecordStreamer : IRunRecordStreamer, IScopedDependency
 {
@@ -48,7 +55,9 @@ public sealed class RunRecordStreamer : IRunRecordStreamer, IScopedDependency
 
         while (!terminal && !cancellationToken.IsCancellationRequested)
         {
-            var batch = await LoadAfterAsync(runId, cursor, cancellationToken).ConfigureAwait(false);
+            var batch = await LoadAfterAsync(teamId, runId, cursor, cancellationToken).ConfigureAwait(false);
+
+            if (batch == null) yield break;   // the caller lost standing since connect ⇒ end WITHOUT the rows just read
 
             foreach (var record in batch)
             {
@@ -62,12 +71,30 @@ public sealed class RunRecordStreamer : IRunRecordStreamer, IScopedDependency
         }
     }
 
-    /// <summary>One poll — a FRESH scope + DbContext so the tail never pins the request context for its whole lifetime.</summary>
-    private async Task<IReadOnlyList<RunRecordView>> LoadAfterAsync(Guid runId, long cursor, CancellationToken cancellationToken)
+    /// <summary>
+    /// One poll — a FRESH scope + DbContext so the tail never pins the request context for its whole lifetime. Rows are
+    /// handed out only once the caller's standing has been re-asked in that same fresh scope, where nothing memoized at
+    /// connect survives. The ask comes after the read, so every row handed out was committed before a moment the caller
+    /// still held standing. An empty poll has nothing to hand out, so it asks only the database-free half — is the token
+    /// still accepted — and an idle tail costs one read as before yet still ends at expiry. Returns null when standing
+    /// has lapsed.
+    /// </summary>
+    private async Task<IReadOnlyList<RunRecordView>?> LoadAfterAsync(Guid teamId, Guid runId, long cursor, CancellationToken cancellationToken)
     {
         using var scope = _scopeFactory.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+        var standing = scope.ServiceProvider.GetRequiredService<ITeamStandingCheck>();
 
+        var batch = await ReadBatchAsync(scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>(), runId, cursor, cancellationToken).ConfigureAwait(false);
+
+        if (batch.Count == 0) return standing.WithinTokenLifetime() ? batch : null;
+
+        var holds = await standing.HoldsAsync(teamId, cancellationToken).ConfigureAwait(false);
+
+        return holds ? batch : null;
+    }
+
+    private static async Task<IReadOnlyList<RunRecordView>> ReadBatchAsync(CodeSpaceDbContext db, Guid runId, long cursor, CancellationToken cancellationToken)
+    {
         return await db.WorkflowRunRecord.AsNoTracking()
             .Where(r => r.RunId == runId && r.Sequence > cursor)
             .OrderBy(r => r.Sequence)
