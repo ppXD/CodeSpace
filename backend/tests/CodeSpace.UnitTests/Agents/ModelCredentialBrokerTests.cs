@@ -611,6 +611,19 @@ public class ModelCredentialBrokerTests
         throw new Xunit.Sdk.XunitException($"{failure} (waited {budget.TotalSeconds}s)");
     }
 
+    /// <summary>
+    /// Wait until the OS lets another socket take <paramref name="port"/> — the signal that a listener which closed has
+    /// really given its port back, and the one a re-bind standing in for "the worker that held it is gone" has to see
+    /// before it binds. <c>HttpListener.Close()</c> returns once its socket has been closed, but on macOS the port can
+    /// stay refused for a few milliseconds after that (<c>Address already in use</c>) — only while the rest of the
+    /// suite is running, for a few closes per thousand, and gone again within a fraction of a second every time it was
+    /// measured. A re-bind that follows the close at once, or a check that the port is already free, reads that
+    /// instant as a verdict on the broker. Production never meets it: a re-bind there is a NEW worker process, started
+    /// long after the old one's port went back. What this waits for is the release a same-process test is standing in
+    /// for; a listener that is never closed still fails, at the budget, naming the port.
+    /// </summary>
+    private static Task AwaitPortReleasedAsync(int port, string failure) => WaitUntilAsync(() => !PortIsBound(port), TimeSpan.FromSeconds(10), $"port {port} {failure}");
+
     // ── The per-run socket: the same lease, reached through a Unix socket a sandbox can have bound in ─────────────
 
     [Fact]
@@ -726,9 +739,12 @@ public class ModelCredentialBrokerTests
 
             brokered = opened;
             (await CallOverSocketAsync(path, brokered, brokered.RunToken)).ShouldBe(HttpStatusCode.OK, "precondition: the socket answers while the worker that minted it holds it");
+            PortIsBound(brokered.RebindPort!.Value).ShouldBeTrue("precondition: worker A holds the run's port for as long as it serves the lease, so the port coming back is an event to wait for, not a state the wait would start in");
         }
 
         if (staleFileLeftBehind) StaleUnixSocket.LeaveAt(path);
+
+        await AwaitPortReleasedAsync(brokered.RebindPort!.Value, "was still refused after the worker that minted it went away — a closed lease gives its port back, so a port that stays taken means its listener was never closed");
 
         var upstream = new StubUpstream();
         using var workerB = LoopbackModelCredentialBroker.ForTest(upstream);
@@ -833,7 +849,7 @@ public class ModelCredentialBrokerTests
             "a re-bind that restored the port but not the socket has not restored the address a sandboxed child calls — answering true would clear the posture of a run that cannot talk");
 
         broker.HasLease(request.RunId).ShouldBeFalse("and it installs nothing");
-        PortIsBound(port).ShouldBeFalse("the port it bound on the way must be released again, or the refused re-bind leaks a listener for the life of the worker");
+        await AwaitPortReleasedAsync(port, "was bound by the refused re-bind on the way and never released again — it must close that listener, or the refusal leaks one for the life of the worker");
         logger.Warnings.ShouldContain(line => line.Contains(request.RunId.ToString(), StringComparison.Ordinal) && line.Contains(port.ToString(), StringComparison.Ordinal),
             "the refusal names the run and the port, as every other re-bind refusal does");
     }
@@ -881,7 +897,7 @@ public class ModelCredentialBrokerTests
         (await broker.RebindAsync(request, CancellationToken.None)).ShouldBeFalse(
             "another lease on this worker already serves that socket: re-binding it would delete that lease's live socket file and hand its sandboxed child to a lease whose bearer it does not hold");
         broker.HasLease(request.RunId).ShouldBeFalse("a refused re-bind installs nothing");
-        PortIsBound(port).ShouldBeFalse("and holds no port");
+        await AwaitPortReleasedAsync(port, "was bound by the refused re-bind on the way and never released — a refusal must hold no port");
         (await CallOverSocketAsync(path, serving, serving.RunToken)).ShouldBe(HttpStatusCode.OK, "the serving lease's socket still answers its own run");
         upstream.Calls.ShouldBe(1, "through the lease that serves it");
     }
@@ -905,12 +921,16 @@ public class ModelCredentialBrokerTests
 
         if (await workerA.OpenAsync(LeaseFor(runId, epoch: 7) with { SocketPath = path }, CancellationToken.None) is not { } brokered) return;
 
+        PortIsBound(brokered.RebindPort!.Value).ShouldBeTrue("precondition: worker A holds the run's port until its close releases it, so the port coming back is an event to wait for, not a state the wait would start in");
+
         rebind = RebindOf(brokered, runId, epoch: 8) with { SocketPath = path };
 
         await workerA.RevokeAsync(runId, "test-revoke", fencedToEpoch: null, CancellationToken.None);
 
         rebindMidClose.ShouldBe(false,
             "mid-close, worker A must still hold the port. Released first, worker B takes the port, clears the path and binds its own socket — and A's socket delete, still to come, then takes B's socket file away while B's re-bind has already answered true");
+
+        await AwaitPortReleasedAsync(brokered.RebindPort!.Value, "was still refused after worker A finished closing — a closed lease gives its port back, so a port that stays taken means its listener was never closed");
         (await workerB.RebindAsync(rebind, CancellationToken.None)).ShouldBeTrue("once A has finished closing, B takes the port and then the socket");
         File.Exists(path).ShouldBeTrue("and nothing of A's close is left to delete B's socket");
         (await CallOverSocketAsync(path, brokered, brokered.RunToken)).ShouldBe(HttpStatusCode.OK, "B serves the run through it");
