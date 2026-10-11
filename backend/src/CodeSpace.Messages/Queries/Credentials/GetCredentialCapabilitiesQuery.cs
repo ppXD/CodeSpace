@@ -4,7 +4,7 @@ using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Queries.Credentials;
 
-public sealed record GetCredentialCapabilitiesQuery : IQuery<CredentialCapabilitiesResponse>, IRequireTeamMembership
+public sealed record GetCredentialCapabilitiesQuery : IQuery<CredentialCapabilitiesResponse>, IRequireTeamMembership, IRequireCredentialAccess
 {
     public required Guid CredentialId { get; init; }
 }
