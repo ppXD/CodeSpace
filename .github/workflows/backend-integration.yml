@@ -38,7 +38,10 @@ jobs:
   integration:
     name: dotnet test (IntegrationTests · Postgres)
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The suite itself takes ~25 min on a hosted runner, so 30 left no headroom: a slow runner was
+    # cancelled mid-run and reported as a cancellation, not a failure. 45 keeps a real hang bounded
+    # (--blame-hang-timeout below still dumps and aborts a single stuck test after 5 min).
+    timeout-minutes: 45
 
     services:
       postgres:
