@@ -47,6 +47,29 @@ public sealed class TypedModelSchemaBranchTests
         JsonNode.DeepEquals(JsonNode.Parse(PlannerSchema.WireSchema.GetRawText()), expected).ShouldBeTrue();
     }
 
+    /// <summary>
+    /// A grammar-constrained decoder writes an object's properties in the order the schema declares them, so it must
+    /// decide on <c>argv</c> / <c>artifactPaths</c> before it has written the <c>kind</c> that says which one is owed,
+    /// skips both as optional, then writes <c>kind</c> and can never go back — the payload every planner-authored oracle
+    /// needs is gone and the subtask runs ungraded. <c>kind</c> therefore has to be declared first. Run against the
+    /// validation schema AND the wire schema the provider is actually handed (which is derived from it).
+    /// </summary>
+    [Theory]
+    [InlineData("validation")]
+    [InlineData("wire")]
+    public void On_the_wire_acceptance_kind_precedes_every_kind_dependent_property(string schema)
+    {
+        var acceptance = schema == "wire" ? WireAcceptanceSchema() : AcceptanceSchema();
+        var declared = acceptance.GetProperty("properties").EnumerateObject().Select(property => property.Name).ToArray();
+
+        declared.ShouldBe(new[] { "formatVersion", "kind", "argv", "artifactPaths", "rubric", "schema", "oraclePaths", "description" }, ignoreOrder: true, "fixture check: all eight acceptance properties are declared, so the order assertions below cannot pass on an empty object");
+
+        var kindAt = Array.IndexOf(declared, "kind");
+
+        foreach (var dependent in new[] { "argv", "artifactPaths", "rubric", "schema", "oraclePaths" })
+            Array.IndexOf(declared, dependent).ShouldBeGreaterThan(kindAt, $"'{dependent}' is declared before 'kind' on the {schema} acceptance, so a decoder that writes properties in declared order commits to it before it knows which oracle it is writing");
+    }
+
     [Theory]
     [MemberData(nameof(ValidOracles))]
     public void Every_valid_oracle_reply_is_also_valid_on_the_wire(string acceptance)
