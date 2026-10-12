@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Providers.Diagnostics;
 using CodeSpace.Core.Services.Providers.Markdown;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Core.Services.Providers.Source;
+using CodeSpace.Core.Services.Redaction;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Exceptions;
@@ -848,7 +849,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
             // Failing to LIST hooks fails the registration exactly as surely as failing to create
             // one, and for the same reasons (revoked token, no permission, instance down) — so the
             // operator gets the same evidence from either step.
-            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("GET", baseAddress, repositoryId, token, null)), ex);
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("GET", baseAddress, repositoryId, token, null), token), ex);
         }
     }
 
@@ -892,7 +893,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         catch (Exception ex)
         {
             var body = JsonSerializer.Serialize(new { name = "web", config, events = GitHubHookEvents.All, active = true });
-            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("POST", baseAddress, repositoryId, token, body)), ex);
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("POST", baseAddress, repositoryId, token, body), token), ex);
         }
     }
 
@@ -959,15 +960,19 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
     /// is rarely the one we caught — the resilience layer translates it and the scope mapper replaces
     /// it — so we look down the chain for the shape that still knows what GitHub said. Finding
     /// nothing is itself informative: no status means the call never got an answer.
+    ///
+    /// <para>The body is Octokit's raw copy of GitHub's answer — the resilience translation strikes only the message —
+    /// so the <paramref name="token"/> the request presented is struck from it here: the attempt row is readable by any
+    /// member of the team, and a GitHub (or a proxy) that quotes the credential it rejected would hand it to all of them.</para>
     /// </summary>
-    private static ProviderCallDiagnostic DescribeHookFailure(Exception exception, CapturedProviderRequest request)
+    private static ProviderCallDiagnostic DescribeHookFailure(Exception exception, CapturedProviderRequest request, string token)
     {
         var api = ProviderCallCapture.FindInChain<ApiException>(exception);
 
         return new ProviderCallDiagnostic
         {
             StatusCode = api == null ? null : (int)api.StatusCode,
-            ResponseBody = ProviderCallCapture.Clamp(api?.HttpResponse?.Body as string),
+            ResponseBody = ProviderCallCapture.Clamp(CredentialNeedles.Strike(api?.HttpResponse?.Body as string, [token])),
             Request = request
         };
     }

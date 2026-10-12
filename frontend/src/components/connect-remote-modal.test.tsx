@@ -110,3 +110,99 @@ describe("connect remote modal credential controls", () => {
     await waitFor(() => expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy());
   });
 });
+
+/**
+ * Editing a provider's base URL. The list shows the URL with any embedded credentials masked, so the form must not send
+ * the masked value back as an edit; and a token or OAuth secret is only ever sent to the host it was entered for, so
+ * moving the host asks for the new host's OAuth app and says why the server refuses the move while tokens are connected.
+ */
+describe("edit provider base URL", () => {
+  const admin: MeTeam = {
+    id: "t1", slug: "acme", name: "Acme", kind: "Workspace", role: "Admin", permissions: ["repos.manage", "credentials.manage", "members.manage"],
+    memberCount: 3, repositoryCount: 0, projectCount: 1, workflowCount: 0,
+  };
+
+  function renderEditing(instance: ProviderInstanceSummary) {
+    localStorage.setItem("codespace.jwt", "test-jwt");
+    localStorage.setItem("codespace.activeTeamId", admin.id);
+
+    const patches: unknown[] = [];
+    const routes: Record<string, unknown> = {
+      "/api/users/me": { id: "u1", email: "u@test.local", name: "Maya", teams: [admin], permissions: [], passwordMustChange: false },
+      "/capabilities": { warnings: [] },
+      "/api/provider-instances/defaults": { provider: instance.provider, defaultBaseUrl: "https://gitlab.com", defaultDisplayName: "GitLab", defaultOAuthScopes: ["api"], oAuthCallbackUrl: "https://codespace.test/cb" },
+      "/api/provider-instances": [instance],
+      "/api/credentials": [],
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+
+      if (init?.method === "PATCH") {
+        patches.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 204 });
+      }
+
+      const key = Object.keys(routes).find((k) => url.includes(k));
+      const body = key === undefined ? undefined : routes[key];
+      return new Response(body === undefined ? "" : JSON.stringify(body), { status: body === undefined ? 404 : 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+
+    render(
+      <QueryClientProvider client={client}>
+        <DialogProvider><ConnectRemoteModal onClose={() => {}} /></DialogProvider>
+      </QueryClientProvider>,
+    );
+
+    return patches;
+  }
+
+  async function openEditSettings() {
+    await waitFor(() => expect(screen.getByTitle("More actions")).toBeTruthy());
+    fireEvent.click(screen.getByTitle("More actions"));
+    fireEvent.click(await screen.findByRole("button", { name: /Edit settings/ }));
+  }
+
+  afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); });
+
+  it("asks for the new host's OAuth app before a host move can be saved, and says connected tokens block it", async () => {
+    renderEditing({ id: "pi1", teamId: "t1", provider: "GitLab", displayName: "Acme GitLab", baseUrl: "https://gitlab.acme.test", createdDate: "2026-01-01T00:00:00Z", oauthEnabled: true });
+    await openEditSettings();
+
+    fireEvent.change(screen.getByDisplayValue("https://gitlab.acme.test"), { target: { value: "https://attacker.test" } });
+
+    expect(screen.getByText(/save is refused while any are connected/)).toBeTruthy();
+    const save = screen.getByRole("button", { name: /Save/ }) as HTMLButtonElement;
+    expect(save.disabled).toBe(true);
+
+    fireEvent.change(screen.getAllByPlaceholderText("leave blank to keep the existing value")[0], { target: { value: "new-host-app" } });
+    fireEvent.change(screen.getByPlaceholderText("required for the new host"), { target: { value: "new-host-secret" } });
+
+    expect(save.disabled).toBe(false);
+  });
+
+  it("keeps a path change on the same host saveable without the secret", async () => {
+    renderEditing({ id: "pi1", teamId: "t1", provider: "GitLab", displayName: "Acme GitLab", baseUrl: "https://gitlab.acme.test", createdDate: "2026-01-01T00:00:00Z", oauthEnabled: true });
+    await openEditSettings();
+
+    fireEvent.change(screen.getByDisplayValue("https://gitlab.acme.test"), { target: { value: "https://gitlab.acme.test/gitlab" } });
+
+    expect(screen.queryByText(/save is refused while any are connected/)).toBeNull();
+    expect((screen.getByRole("button", { name: /Save/ }) as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("never sends the masked base URL back when only the name changes", async () => {
+    const patches = renderEditing({ id: "pi1", teamId: "t1", provider: "GitLab", displayName: "Acme GitLab", baseUrl: "https://***:***@gitlab.acme.test", createdDate: "2026-01-01T00:00:00Z", oauthEnabled: true });
+    await openEditSettings();
+
+    expect(screen.getByText(/Leave the URL as it is to keep them/)).toBeTruthy();
+
+    fireEvent.change(screen.getByDisplayValue("Acme GitLab"), { target: { value: "Acme GitLab (self-hosted)" } });
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+
+    await waitFor(() => expect(patches.length).toBe(1));
+    expect(patches[0]).toEqual({ displayName: "Acme GitLab (self-hosted)" });
+  });
+});

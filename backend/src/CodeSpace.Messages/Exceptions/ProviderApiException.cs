@@ -47,7 +47,7 @@ public sealed class ProviderApiException : Exception, IFailure, IUpstreamStatus
     /// <summary>The capability method that failed (e.g. "ListPullRequestsAsync"). Surfaced to the operator for context.</summary>
     public string OperationName { get; }
 
-    /// <summary>Raw provider error string (e.g. Octokit's "Not Found"). Stripped from logs / shown verbatim to operators.</summary>
+    /// <summary>The provider's error string (e.g. Octokit's "Not Found"), shown to the caller — with every token the instance presented struck and the SDK's trailing "Original call: &lt;url&gt;" dropped by the translation that raises this.</summary>
     public string ProviderMessage { get; }
 
     private static string BuildMessage(ProviderKind kind, int statusCode, string operation, string providerMessage)

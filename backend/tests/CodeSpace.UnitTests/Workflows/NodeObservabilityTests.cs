@@ -314,6 +314,53 @@ public class NodeObservabilityTests
         doc.GetProperty("content_type").GetString().ShouldBe("text/plain");
     }
 
+    /// <summary>
+    /// A git node's review call whose raw <c>/unapprove</c> GitLab refuses while quoting the token it was presented: the
+    /// <c>external_call.failed</c> row any member reads must not carry that token. The node's run-scope redactor knows only
+    /// the run's own secrets, never the connection's token, so it is the provider that has to strike it — driven here
+    /// through the real auth resolver, GitLab provider and resilience layer, against a loopback GitLab.
+    /// </summary>
+    [Fact]
+    public async Task TraceExternalCallAsync_records_a_git_refusal_without_the_token_the_provider_echoed()
+    {
+        const string token = "glpat-NODE-ECHO-CANARY-9f8e7d6c5b";
+        using var gitLab = new CodeSpace.IntegrationTests.Webhooks.StubProviderHost();
+        gitLab.Answer("POST", "/merge_requests/7/unapprove", request => new CodeSpace.IntegrationTests.Webhooks.StubProviderHost.StubReply(401, $"{{\"message\":\"401 Unauthorized (PRIVATE-TOKEN={request.PrivateTokenHeader})\"}}"));
+        var (provider, context) = GitLabOver(gitLab.BaseUrl, token);
+        var repository = new CodeSpace.Messages.Dtos.Providers.RemoteRepository { ExternalId = "4242", NamespacePath = "acme", Name = "api", FullPath = "acme/api", DefaultBranch = "main", Visibility = CodeSpace.Messages.Enums.RepositoryVisibility.Private, WebUrl = "https://gitlab.test/acme/api" };
+        var review = new CodeSpace.Messages.Dtos.Providers.SubmitPullRequestReviewInput { Verdict = CodeSpace.Messages.Enums.PullRequestReviewVerdict.RequestChanges, Body = "needs work" };
+        var logger = new RecordingLogger();
+        var observability = new NodeObservability(new NodeObservationBinding(logger, new RecordingArtifactStore(), RunId, NodeId, TeamId, ParentRecordId, new PersistenceSecretRedactor(["a-run-secret-not-the-token"])));
+
+        await Should.ThrowAsync<CodeSpace.Messages.Exceptions.ProviderApiException>(() => observability.TraceExternalCallAsync(target: "git.submit_review:acme/api:7", method: "submit_review", requestPayload: null, action: ct => provider.SubmitReviewAsync(context, repository, 7, review, ct), completionExtractor: _ => new ExternalCallCompletion(), cancellationToken: CancellationToken.None));
+
+        gitLab.Requests.ShouldContain(request => request.PrivateTokenHeader == token, "fixture check: GitLab was presented the token, so its 401 quoted it");
+        var failed = logger.FailedCalls.ShouldHaveSingleItem();
+        failed.Error.ShouldContain("401 Unauthorized", Case.Sensitive, "GitLab's own words still explain the failure");
+        failed.Error.ShouldNotContain(token, Case.Sensitive);
+    }
+
+    private static (CodeSpace.Core.Services.Providers.GitLab.GitLabRepositoryProvider Provider, CodeSpace.Core.Services.Providers.ProviderContext Context) GitLabOver(string baseUrl, string token)
+    {
+        var instance = new CodeSpace.Core.Persistence.Entities.ProviderInstance { Id = Guid.NewGuid(), TeamId = TeamId, Provider = CodeSpace.Messages.Enums.ProviderKind.GitLab, DisplayName = "loopback", BaseUrl = baseUrl };
+        var credential = new CodeSpace.Core.Persistence.Entities.Credential { Id = Guid.NewGuid(), TeamId = TeamId, ProviderInstanceId = instance.Id, AuthType = CodeSpace.Messages.Enums.AuthType.Pat, DisplayName = "pat", EncryptedPayload = "unused", Status = CodeSpace.Messages.Enums.CredentialStatus.Active };
+        var resolver = new CodeSpace.Core.Services.Providers.Auth.ProviderAuthResolver([new FixedGitLabToken(token)]);
+        var resilience = new CodeSpace.Core.Services.Providers.Resilience.ExternalCallResilience(new CodeSpace.Core.Services.Providers.Errors.ProviderErrorMapperRegistry([new CodeSpace.Core.Services.Providers.GitLab.GitLabErrorMapper()]), Microsoft.Extensions.Logging.Abstractions.NullLogger<CodeSpace.Core.Services.Providers.Resilience.ExternalCallResilience>.Instance);
+        var normalizer = new CodeSpace.Core.Services.Providers.GitLab.GitLabEventNormalizer(new CodeSpace.Core.Services.Providers.Events.ProviderEventSubscriptionRegistry([]));
+        var provider = new CodeSpace.Core.Services.Providers.GitLab.GitLabRepositoryProvider(resolver, resilience, new CodeSpace.Core.Services.Providers.GitLab.GitLabSignatureVerifier(), normalizer, new CodeSpace.Core.Services.Providers.GitLab.GitLabWebhookRepositoryIdentifier());
+
+        return (provider, new CodeSpace.Core.Services.Providers.ProviderContext(instance, credential));
+    }
+
+    private sealed class FixedGitLabToken(string token) : CodeSpace.Core.Services.Providers.Auth.IProviderAuthStrategy
+    {
+        public CodeSpace.Messages.Enums.ProviderKind Kind => CodeSpace.Messages.Enums.ProviderKind.GitLab;
+
+        public CodeSpace.Messages.Enums.AuthType AuthType => CodeSpace.Messages.Enums.AuthType.Pat;
+
+        public Task<CodeSpace.Core.Services.Providers.Auth.ResolvedAuth> ResolveAsync(CodeSpace.Core.Services.Providers.ProviderContext context, CancellationToken cancellationToken) => Task.FromResult(new CodeSpace.Core.Services.Providers.Auth.ResolvedAuth { Token = token });
+    }
+
     // ─── Hand-rolled recording doubles ──────────────────────────────────────────
 
     private sealed class RecordingLogger : IRunRecordLogger

@@ -9,6 +9,7 @@ import { useAddGroupAccessToken, useAddProviderInstance, useCredentialCapabiliti
 import { useMe } from "@/hooks/use-me";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { OAuthFlowError, useOAuthFlow } from "@/hooks/use-oauth-flow";
+import { endpointChanged, providerSecretMustBeReentered, showsMaskedCredentials } from "@/lib/credentialEndpoint";
 import { providerSupportsTeamServiceCredential } from "@/lib/teamCredentials";
 
 import { Ic } from "./icons";
@@ -968,6 +969,10 @@ interface EditProviderStepProps {
  *     ship the stored secret to the client. Leaving it blank preserves the existing value.
  *   • Used both for "fill in missing OAuth" on a non-OAuth-ready instance AND for rotating
  *     credentials or renaming a working one.
+ *   • The base URL arrives with any embedded credentials masked (`***`); left as shown it is not
+ *     sent, so the stored one is kept. Moving it to another host needs the OAuth client ID and
+ *     secret again (the new host's app), and the server refuses the move while tokens are still
+ *     connected through this provider — they are never sent to a host they weren't connected for.
  */
 function EditProviderStep({ instance, onBack, onClose, onSaved }: EditProviderStepProps) {
   const update = useUpdateProviderInstance();
@@ -995,7 +1000,12 @@ function EditProviderStep({ instance, onBack, onClose, onSaved }: EditProviderSt
   const configuringFresh = !instance.oauthEnabled;
   const missingRequiredForConfig = configuringFresh && (!clientIdFilled || !secretFilled);
   const blanksOnImmutable = !displayName.trim() || !baseUrl.trim();
-  const submitDisabled = update.isPending || blanksOnImmutable || oauthPairIncomplete || missingRequiredForConfig;
+  // A stored OAuth secret is only ever sent to the host it was entered for: moving the host needs it typed again.
+  const nextBaseUrl = baseUrl.trim().replace(/\/$/, "");
+  const hostMoves = endpointChanged(instance.baseUrl, nextBaseUrl);
+  const secretMustFollow = providerSecretMustBeReentered(instance, nextBaseUrl);
+  const missingSecretForMove = secretMustFollow && !secretFilled;
+  const submitDisabled = update.isPending || blanksOnImmutable || oauthPairIncomplete || missingRequiredForConfig || missingSecretForMove;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1005,7 +1015,7 @@ function EditProviderStep({ instance, onBack, onClose, onSaved }: EditProviderSt
     // OAuth secret stays out of the payload so the backend's "leave alone" path fires.
     const patch: UpdateProviderInstanceRequest = {};
     if (displayName.trim() !== instance.displayName) patch.displayName = displayName.trim();
-    if (baseUrl.trim().replace(/\/$/, "") !== instance.baseUrl) patch.baseUrl = baseUrl.trim().replace(/\/$/, "");
+    if (nextBaseUrl !== instance.baseUrl) patch.baseUrl = nextBaseUrl;
     if (clientIdFilled) patch.oauthClientId = clientId.trim();
     if (secretFilled) patch.oauthClientSecret = clientSecret;
     // If we're fixing a non-OAuth provider (no existing client_id), also send default scopes.
@@ -1059,6 +1069,8 @@ function EditProviderStep({ instance, onBack, onClose, onSaved }: EditProviderSt
             disabled={update.isPending}
           />
           <span className="cn-field-h">Use your install URL for self-hosted GitLab / GitHub Enterprise.</span>
+          {showsMaskedCredentials(instance.baseUrl) && <span className="cn-field-h">Credentials in the URL show as <code>***</code>. Leave the URL as it is to keep them, or enter the whole URL with its credentials.</span>}
+          {hostMoves && <span className="cn-field-h">Moving to another host: tokens connected through this provider are never sent to a new host, so the save is refused while any are connected — disconnect them first, or add the new host as its own provider.{instance.oauthEnabled && " Enter the OAuth client ID and secret of the new host's app below."}</span>}
         </label>
 
         <div className="cn-divider" />
@@ -1083,7 +1095,7 @@ function EditProviderStep({ instance, onBack, onClose, onSaved }: EditProviderSt
             className="cn-field-i"
             value={clientSecret}
             onChange={e => setClientSecret(e.target.value)}
-            placeholder={instance.oauthEnabled ? "leave blank to keep the existing value" : "paste from your OAuth app"}
+            placeholder={secretMustFollow ? "required for the new host" : instance.oauthEnabled ? "leave blank to keep the existing value" : "paste from your OAuth app"}
             spellCheck={false}
             autoComplete="new-password"
             disabled={update.isPending}

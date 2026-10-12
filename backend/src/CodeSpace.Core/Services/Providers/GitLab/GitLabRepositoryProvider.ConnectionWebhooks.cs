@@ -4,6 +4,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Diagnostics;
 using CodeSpace.Core.Services.Providers.Resilience;
+using CodeSpace.Core.Services.Redaction;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -132,6 +133,11 @@ public sealed partial class GitLabRepositoryProvider : IConnectionWebhookRegistr
     private static int? NextPageAfter(int current, string? nextPage) =>
         int.TryParse(nextPage, out var next) && next > current ? next : null;
 
+    /// <summary>
+    /// One raw call to the group-hook endpoint. A refusal's body is the evidence <see cref="DescribeGroupHookRefusal"/>
+    /// persists to the attempt row any member can read, so the <paramref name="token"/> this request presented is struck
+    /// from it before anything reads it; an accepted answer is read as sent.
+    /// </summary>
     private static async Task<GroupHookAnswer> SendGroupHookRequestAsync(HttpMethod method, string url, string token, string? payload, CancellationToken cancellationToken)
     {
         using var request = new HttpRequestMessage(method, url);
@@ -144,7 +150,7 @@ public sealed partial class GitLabRepositoryProvider : IConnectionWebhookRegistr
         using var response = await _countsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
         var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-        return new GroupHookAnswer(response.StatusCode, body, ReadNextPage(response));
+        return new GroupHookAnswer(response.StatusCode, response.IsSuccessStatusCode ? body : CredentialNeedles.Strike(body, [token]), ReadNextPage(response));
     }
 
     /// <summary>GitLab's <c>X-Next-Page</c>: the next page's number on a list, empty on its last page, absent on anything else.</summary>

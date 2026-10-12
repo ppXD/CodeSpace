@@ -6,7 +6,8 @@ import type { CredentialStatus } from "./types";
 /**
  * Mirrors backend `ModelCredentialSummary` — a team's model credential as shown in settings. NEVER carries
  * the secret: `keyHint` is the masked tail (e.g. `····a1b2`), null for a keyless provider OR a dead key.
- * `keyUnreadable` disambiguates the two. `baseUrl` is non-secret config and is shown verbatim.
+ * `keyUnreadable` disambiguates the two. `baseUrl` arrives with any credentials it embeds masked (`https://***:***@gw/v1?api-key=***`);
+ * sending that exact value back on update keeps the stored URL.
  */
 export interface ModelCredentialSummary {
   id: string;
@@ -29,7 +30,7 @@ export interface AddModelCredentialInput {
   baseUrl?: string | null;
 }
 
-/** Write-only secret: omit/blank `apiKey` to keep the existing key, a value rotates it. */
+/** Write-only secret: omit/blank `apiKey` to keep the existing key, a value rotates it. Moving `baseUrl` to another scheme/host/port needs `apiKey` in the same update. */
 export interface UpdateModelCredentialInput {
   displayName: string;
   apiKey?: string | null;

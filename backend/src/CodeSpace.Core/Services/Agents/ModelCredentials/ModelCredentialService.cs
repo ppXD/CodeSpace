@@ -4,10 +4,13 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.Redaction;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.ModelCredentials;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.ModelCredentials;
 
@@ -15,15 +18,19 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
 {
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
     private readonly IPayloadEncryptor _encryptor;
     private readonly IModelReflector _reflector;
+    private readonly ILogger<ModelCredentialService> _logger;
 
-    public ModelCredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, IModelReflector reflector)
+    public ModelCredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, IModelReflector reflector, ILogger<ModelCredentialService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
+        _currentUser = currentUser;
         _encryptor = encryptor;
         _reflector = reflector;
+        _logger = logger;
     }
 
     public async Task<IReadOnlyList<ModelCredentialSummary>> ListAsync(string? provider, CancellationToken cancellationToken)
@@ -64,9 +71,13 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
     public async Task<Guid> UpdateAsync(Guid id, string displayName, string? apiKey, string? baseUrl, CancellationToken cancellationToken)
     {
         var credential = await LoadActiveAsync(id, cancellationToken).ConfigureAwait(false);
+        var nextBaseUrl = SubmittedBaseUrl(credential.BaseUrl, baseUrl);
+
+        EnsureKeyFollowsEndpoint(credential, nextBaseUrl, apiKey);
+        LogEndpointMove(credential, nextBaseUrl);
 
         credential.DisplayName = displayName;
-        credential.BaseUrl = NullIfBlank(baseUrl);
+        credential.BaseUrl = nextBaseUrl;
 
         // Write-only secret: a blank key keeps the existing one; a value rotates it.
         if (!string.IsNullOrWhiteSpace(apiKey)) credential.EncryptedApiKey = _encryptor.Encrypt(apiKey);
@@ -74,6 +85,36 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         return credential.Id;
+    }
+
+    /// <summary>
+    /// The base URL an update stores. The list shows it MASKED (<see cref="CredentialUrl.Masked"/>), so an edit form
+    /// that sends back exactly what it was shown means "unchanged" — the stored URL, with its real embedded credentials,
+    /// is kept; a masked placeholder left in any other submitted URL is refused (<see cref="CredentialUrl.KeepStoredIfMasked"/>).
+    /// </summary>
+    internal static string? SubmittedBaseUrl(string? stored, string? submitted) => CredentialUrl.KeepStoredIfMasked(stored, NullIfBlank(submitted));
+
+    /// <summary>
+    /// Whether an update must carry the key again: it moves the endpoint (scheme, host or port — where a key is sent),
+    /// a key is stored, and none is supplied. Without this, anyone allowed to edit the credential could repoint it at a
+    /// host they control and have the next reflection, probe or run present the write-only key there. A path-only change,
+    /// a keyless credential, or an update that supplies the key moves nothing it shouldn't.
+    /// </summary>
+    internal static bool KeyMustBeReentered(bool hasStoredKey, string? storedBaseUrl, string? nextBaseUrl, string? apiKey) =>
+        hasStoredKey && string.IsNullOrWhiteSpace(apiKey) && !CredentialUrl.SameEndpoint(storedBaseUrl, nextBaseUrl);
+
+    private static void EnsureKeyFollowsEndpoint(ModelCredential credential, string? nextBaseUrl, string? apiKey)
+    {
+        if (KeyMustBeReentered(!string.IsNullOrEmpty(credential.EncryptedApiKey), credential.BaseUrl, nextBaseUrl, apiKey))
+            throw new ModelEndpointKeyRequiredException(credential.Id);
+    }
+
+    /// <summary>One audit line per endpoint move, naming only scheme://host:port on each side (<see cref="CredentialUrl.Endpoint"/>) — never the embedded credentials, path or query.</summary>
+    private void LogEndpointMove(ModelCredential credential, string? nextBaseUrl)
+    {
+        if (CredentialUrl.SameEndpoint(credential.BaseUrl, nextBaseUrl)) return;
+
+        _logger.LogInformation("Model credential {CredentialId} of team {TeamId} moved its endpoint from {PreviousEndpoint} to {Endpoint}, by user {UserId}", credential.Id, credential.TeamId, CredentialUrl.Endpoint(credential.BaseUrl), CredentialUrl.Endpoint(nextBaseUrl), _currentUser.Id);
     }
 
     public async Task<Guid> RevokeAsync(Guid id, CancellationToken cancellationToken)
@@ -324,7 +365,9 @@ public sealed class ModelCredentialService : IModelCredentialService, IScopedDep
             // null (a non-blank secret is never stored). Surface it so the UI prompts re-entry instead of showing a
             // dead key as the benign "no key".
             KeyUnreadable = !string.IsNullOrEmpty(c.EncryptedApiKey) && keyHint is null,
-            BaseUrl = c.BaseUrl,
+            // Masked: userinfo and secret-named query values are credentials, and the list reaches every member.
+            // Update reads this exact string sent back as "keep the stored URL".
+            BaseUrl = CredentialUrl.Masked(c.BaseUrl),
             Status = c.Status,
             CreatedDate = c.CreatedDate,
         };
