@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Providers.Diagnostics;
 using CodeSpace.Core.Services.Providers.Markdown;
 using CodeSpace.Core.Services.Providers.Resilience;
 using CodeSpace.Core.Services.Providers.Source;
+using CodeSpace.Core.Services.Redaction;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events;
@@ -1048,7 +1049,10 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
         var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-        var failure = ClassifyUnapproveResponse((int)response.StatusCode, responseBody);
+        // The body becomes the failure's detail and scope hint, which reach external_call.failed and the node's error —
+        // this raw call never passes the resilience translation that strikes an echo, so the token it presented is
+        // struck here, before classification (which reads only the status and the scope tag).
+        var failure = ClassifyUnapproveResponse((int)response.StatusCode, CredentialNeedles.Strike(responseBody, [token]));
         if (failure != null) throw failure;
     }
 
@@ -1348,7 +1352,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             // Failing to LIST hooks fails the registration exactly as surely as failing to create
             // one, and for the same reasons (revoked token, no permission, instance down) — so the
             // operator gets the same evidence from either step.
-            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("GET", host, projectId, token, null)), ex);
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("GET", host, projectId, token, null), token), ex);
         }
     }
 
@@ -1400,9 +1404,14 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
                 var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
+                {
+                    // The refusal's body becomes last_error and the attempt's error, which any member can read: strike the token it may echo.
+                    var refusal = CredentialNeedles.Strike(body, [token]);
+
                     throw new ProviderWebhookRegistrationException(
-                        DescribeHookFailure(new HttpRequestException($"GitLab refused the hook with {(int)response.StatusCode}: {body}"), CaptureHookRequest("POST", host, projectId, token, payload)),
-                        new HttpRequestException($"{(int)response.StatusCode}: {body}"));
+                        DescribeHookFailure(new HttpRequestException($"GitLab refused the hook with {(int)response.StatusCode}: {refusal}"), CaptureHookRequest("POST", host, projectId, token, payload), token),
+                        new HttpRequestException($"{(int)response.StatusCode}: {refusal}"));
+                }
 
                 return new RemoteWebhook
                 {
@@ -1416,7 +1425,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         catch (Exception ex)
         {
             var sent = CaptureHookRequest("POST", host, projectId, token, payload);
-            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, sent), ex);
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, sent, token), ex);
         }
     }
 
@@ -1466,15 +1475,19 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// is rarely the one we caught — the resilience layer translates it and the scope mapper replaces
     /// it — so we look down the chain for the shape that still knows what GitLab said. Finding
     /// nothing is itself informative: no status means the call never got an answer.
+    ///
+    /// <para>The body is the SDK's raw copy of GitLab's answer — the resilience translation strikes only the message —
+    /// so the <paramref name="token"/> the request presented is struck from it here: the attempt row is readable by any
+    /// member of the team, and a GitLab (or a proxy) that quotes the credential it rejected would hand it to all of them.</para>
     /// </summary>
-    private static ProviderCallDiagnostic DescribeHookFailure(Exception exception, CapturedProviderRequest request)
+    private static ProviderCallDiagnostic DescribeHookFailure(Exception exception, CapturedProviderRequest request, string token)
     {
         var gitLab = ProviderCallCapture.FindInChain<GitLabException>(exception);
 
         return new ProviderCallDiagnostic
         {
             StatusCode = gitLab == null ? null : (int)gitLab.StatusCode,
-            ResponseBody = ProviderCallCapture.Clamp(ReadErrorBody(gitLab)),
+            ResponseBody = ProviderCallCapture.Clamp(CredentialNeedles.Strike(ReadErrorBody(gitLab), [token])),
             Request = request
         };
     }

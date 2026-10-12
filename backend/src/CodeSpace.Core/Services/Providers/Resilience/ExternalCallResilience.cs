@@ -3,6 +3,7 @@ using System.Net;
 using System.Threading.RateLimiting;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Core.Services.Providers.Errors;
 using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging;
@@ -114,8 +115,12 @@ public sealed class ExternalCallResilience : IExternalCallResilience, ISingleton
         if (typed == null) return;
 
         _logger.LogWarning(ex, "Provider {Provider} returned insufficient_scope for '{Operation}' on instance {InstanceId}; missing scopes: {MissingScopes}", instance.Provider, operationName, instance.Id, string.Join(", ", typed.MissingScopes));
-        throw typed;
+        throw WithClientSafeHint(instance, typed);
     }
+
+    /// <summary>The scope failure with its provider hint — returned to the caller in the failure details — made <see cref="ClientSafe">client-safe</see>. Classification already ran on the raw SDK failure, so the scopes it names are unchanged.</summary>
+    private static ProviderInsufficientScopeException WithClientSafeHint(ProviderInstance instance, ProviderInsufficientScopeException typed) =>
+        typed.ProviderHint is null ? typed : new ProviderInsufficientScopeException(typed.ProviderKind, typed.CapabilityName, typed.MissingScopes, typed.GrantedScopes, ClientSafe(instance, typed.ProviderHint), typed.InnerException);
 
     /// <summary>
     /// Re-throws any SDK exception with a known HTTP status code as a typed
@@ -132,9 +137,30 @@ public sealed class ExternalCallResilience : IExternalCallResilience, ISingleton
         var status = ExtractStatusCode(ex);
         if (status == null) return;
 
-        _logger.LogWarning(ex, "Provider {Provider} returned HTTP {StatusCode} for '{Operation}' on instance {InstanceId}: {Message}", instance.Provider, status, operationName, instance.Id, ex.Message);
-        throw new ProviderApiException(instance.Provider, status.Value, operationName, ex.Message, ex);
+        var providerMessage = ClientSafe(instance, ex.Message);
+
+        _logger.LogWarning(ex, "Provider {Provider} returned HTTP {StatusCode} for '{Operation}' on instance {InstanceId}: {Message}", instance.Provider, status, operationName, instance.Id, providerMessage);
+        throw new ProviderApiException(instance.Provider, status.Value, operationName, providerMessage, ex);
     }
+
+    /// <summary>
+    /// A provider's error text made safe to show the caller: every token the instance was handed to present is struck
+    /// (<see cref="PresentedProviderCredentials"/>) — a provider or proxy that echoes the request's <c>PRIVATE-TOKEN</c> /
+    /// <c>Authorization</c> would otherwise hand it to every Viewer of a repository page and every reader of a git node's
+    /// error — and the SDK's trailing <c>Original call: &lt;method&gt; &lt;url&gt;</c> is dropped: it names the internal
+    /// request, and a query-string token rides in it. The SDK exception itself stays the inner exception, for the log.
+    /// </summary>
+    private static string ClientSafe(ProviderInstance instance, string providerMessage) => PresentedProviderCredentials.RedactorFor(instance).Redact(WithoutOriginalCall(providerMessage));
+
+    private static string WithoutOriginalCall(string providerMessage)
+    {
+        var at = providerMessage.IndexOf(OriginalCallMarker, StringComparison.Ordinal);
+
+        return at < 0 ? providerMessage : providerMessage[..at].TrimEnd();
+    }
+
+    /// <summary>How NGitLab (and any SDK copying it) appends the request it made to an error message.</summary>
+    private const string OriginalCallMarker = "Original call:";
 
     /// <summary>
     /// Charge one attempt. A call's first attempt is charged to the calling agent run's share, then waits its turn for the

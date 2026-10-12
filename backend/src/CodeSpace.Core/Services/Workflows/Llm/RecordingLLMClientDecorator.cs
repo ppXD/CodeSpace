@@ -1,8 +1,10 @@
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Redaction;
 using CodeSpace.Core.Services.RunData;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Constants;
 using Serilog;
@@ -76,7 +78,7 @@ public class RecordingLLMClientDecorator : ILLMClient
         {
             // The caller token is commonly cancelled by the failure itself. Terminal capture gets one independent,
             // fail-open attempt so cancellation does not erase the interaction's final fact.
-            var failureRecorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), CancellationToken.None).ConfigureAwait(false);
+            var failureRecorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex, request.Credential)), CancellationToken.None).ConfigureAwait(false);
             if (failureRecorded && declared) await MarkCapturePresentAsync(scope).ConfigureAwait(false);
 
             throw;
@@ -212,7 +214,7 @@ public class RecordingLLMClientDecorator : ILLMClient
             output,
         });
 
-    protected static JsonElement FailedPayload(LlmCallScope scope, string provider, Exception ex)
+    protected static JsonElement FailedPayload(LlmCallScope scope, string provider, Exception ex, ResolvedModelCredential? credential)
     {
         var category = ex is LlmApiException llm ? llm.Category.ToString() : null;
         var failureKind = ex switch
@@ -222,9 +224,20 @@ public class RecordingLLMClientDecorator : ILLMClient
             _ => "exception",
         };
 
-        var error = scope.CaptureRedactor is null ? ex.Message : Observe(scope, scope.CaptureRedactor.Redact(ex.Message));
+        var withoutCredential = WithoutCallCredential(scope, credential, ex.Message);
+        var error = scope.CaptureRedactor is null ? withoutCredential : Observe(scope, scope.CaptureRedactor.Redact(withoutCredential));
         return JsonSerializer.SerializeToElement(new { kind = scope.Kind, accountingSource = scope.NativeModelCallId is not null ? Budget.BudgetLedger.PhysicalLlmSource : null, provider, error, category, failureKind });
     }
+
+    /// <summary>
+    /// The failure text with the call's OWN credential struck — its key and the credential parts of its base URL
+    /// (<see cref="CredentialNeedles.FromCredential"/>). The transport already strikes an upstream's echo before the
+    /// typed failure exists; this backstop covers a failure raised anywhere else that still quotes it, so the
+    /// write-only key never reaches the interaction tape a Viewer reads. Folded into the call's masking observation like
+    /// every other capture-side redaction.
+    /// </summary>
+    private static string? WithoutCallCredential(LlmCallScope scope, ResolvedModelCredential? credential, string? text) =>
+        CredentialNeedles.Usable(CredentialNeedles.FromCredential(credential)) is { Count: > 0 } needles ? Observe(scope, new PersistenceSecretRedactor(needles).Redact(text)) : text;
 
     /// <summary>Fold one redaction into THIS call's masking observation and hand its value back, so the flag the presence delta carries is a fact about the bytes that reached storage rather than about the configuration. A scope minted outside <see cref="LlmCallScope.ForOneCall"/> observes nothing and reads back verbatim, which is the conservative answer.</summary>
     protected static T Observe<T>(LlmCallScope scope, PersistenceRedaction<T> redaction) => scope.Masking is { } masking ? masking.Observe(redaction) : redaction.Value;

@@ -33,7 +33,7 @@ public sealed partial class GitHubRepositoryProvider : IConnectionWebhookRegistr
         {
             // Failing to LIST fails the registration exactly as surely as failing to create, and for
             // the same reasons — so the operator gets the same evidence from either step.
-            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureOrgHookRequest("GET", baseAddress, ownerPath, token, null)), ex);
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureOrgHookRequest("GET", baseAddress, ownerPath, token, null), token), ex);
         }
     }
 
@@ -59,7 +59,7 @@ public sealed partial class GitHubRepositoryProvider : IConnectionWebhookRegistr
         catch (Exception ex)
         {
             var body = JsonSerializer.Serialize(new { name = "web", config, events = GitHubHookEvents.All, active = true });
-            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureOrgHookRequest("POST", baseAddress, ownerPath, token, body)), ex);
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureOrgHookRequest("POST", baseAddress, ownerPath, token, body), token), ex);
         }
     }
 

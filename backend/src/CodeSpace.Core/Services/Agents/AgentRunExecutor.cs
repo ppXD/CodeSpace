@@ -11,6 +11,7 @@ using CodeSpace.Core.Services.Agents.Capture;
 using CodeSpace.Core.Services.Agents.Cost;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Publish;
+using CodeSpace.Core.Services.Redaction;
 using CodeSpace.Core.Services.Review;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Artifacts;
@@ -4229,13 +4230,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         public ResolvedModelCredential? Credential { get; init; }
     }
 
-    /// <summary>
-    /// The shortest value usable as a redaction needle. Below this a value is a fragment, not an identifier —
-    /// striking it would shred unrelated text (an injected <c>1</c> would hit every line carrying a digit), so it is
-    /// left readable. The SAME threshold the real-model artifact redactor applies (<c>MIN_NEEDLE_LENGTH</c> in
-    /// <c>.github/scripts/collect-real-model-verdicts.sh</c>); no real api key or access token is shorter.
-    /// </summary>
-    internal const int MinimumNeedleLength = 8;
+    /// <summary>The shortest value usable as a redaction needle — the shared <see cref="CredentialNeedles.MinimumLength"/>, so the run's redactor and every other echo scrub agree on what counts as a fragment.</summary>
+    internal const int MinimumNeedleLength = CredentialNeedles.MinimumLength;
 
     /// <summary>
     /// The most needles <see cref="BuildRunRedactor"/> will hand back. <see cref="AgentTask.Environment"/> is
@@ -4254,28 +4250,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     internal const int MaximumNeedles = 64;
 
-    /// <summary>
-    /// Name fragments that mark an injected value a SECRET — applied to an <see cref="AgentTask.Environment"/> entry's
-    /// variable name and to a base URL's query-parameter name alike. Both are opaque name/value string pairs with no
-    /// per-entry secret flag for the executor to read, so the name is the only signal available — and it is the signal
-    /// that separates the token from the values beside it that must stay READABLE: the gateway base URL, the model
-    /// tier pins, an <c>api-version</c> stamp. Those are what an operator reads the error FOR, and masking a low-entropy
-    /// one would shred every unrelated line that happens to carry it (an <c>api-version</c> date also matches every
-    /// timestamp of that day).
-    ///
-    /// <para>Substring matching over a deliberately WIDE list: a marker earns its place by naming a carrier that
-    /// authenticates something (<c>PASSPHRASE</c> on a signing key, <c>PWD</c> on <c>MYSQL_PWD</c>, <c>DSN</c> and
-    /// <c>CONNECTION_STRING</c> on a database URL with its password inline, <c>COOKIE</c> on a session, <c>WEBHOOK</c>
-    /// on a URL whose path IS the capability). The known cost is a false-positive class — <c>KEY_ID</c>,
-    /// <c>TOKEN_LIMIT</c>, an injected <c>PWD</c> — whose values are masked though they are not secret. That is the
-    /// side to err on: a masked path is a garbled line an operator can work around, an unmasked token is a leak that
-    /// the append-only log can never take back.</para>
-    /// </summary>
-    private static readonly string[] SecretNameMarkers =
-        ["KEY", "TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "PWD", "CREDENTIAL", "AUTH", "COOKIE", "DSN", "CONNECTION_STRING", "CONNSTR", "PRIVATE", "WEBHOOK"];
-
-    /// <summary>Whether a name — an env variable's or a URL query parameter's — marks its value a secret.</summary>
-    private static bool MarksASecret(string name) => SecretNameMarkers.Any(marker => name.Contains(marker, StringComparison.OrdinalIgnoreCase));
+    /// <summary>Whether a name — an env variable's or a URL query parameter's — marks its value a secret (<see cref="CredentialNeedles.MarksASecret"/>).</summary>
+    private static bool MarksASecret(string name) => CredentialNeedles.MarksASecret(name);
 
     /// <summary>
     /// The run's redactor, built from EVERY secret this launch injects into the child process — not the model key
@@ -4359,39 +4335,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     internal static SecretRedactor WithModelBrokerRunToken(SecretRedactor redactor, string? brokerRunToken) =>
         brokerRunToken is { Length: >= MinimumNeedleLength } token ? redactor.With([token]) : redactor;
 
-    /// <summary>
-    /// The credential parts embedded IN a base URL — every userinfo segment, and each query value whose parameter
-    /// name <see cref="MarksASecret">marks it a secret</see> — in both the raw and the percent-decoded spelling,
-    /// since a CLI may echo either. Userinfo is credential material by construction, so all of it is a needle; a
-    /// query string is not, so it is filtered by name. The URL itself is never a needle: its host is the fact that
-    /// says WHICH endpoint answered, which is the point of surfacing the error at all.
-    ///
-    /// <para>ACCEPTED RESIDUAL: a gateway that carries its key in the URL PATH (<c>https://gw.example/v1/&lt;key&gt;/chat</c>)
-    /// is not covered. A path segment has no name to read, so the only rules available are "mask every segment" —
-    /// which strikes the route an operator reads the error for, and every <c>/v1/</c> beside it — or a shape guess,
-    /// which is a fresh leak the moment a gateway picks a shape it doesn't match. Userinfo and a marked query
-    /// parameter are self-declaring; a path segment is not, so it stays out until a credential can say so itself.</para>
-    /// </summary>
-    private static IEnumerable<string> UrlEmbeddedSecrets(string? baseUrl)
-    {
-        if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var parsed)) yield break;
-
-        foreach (var part in parsed.UserInfo.Split(':', StringSplitOptions.RemoveEmptyEntries))
-        {
-            yield return part;
-            yield return Uri.UnescapeDataString(part);
-        }
-
-        foreach (var pair in parsed.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries))
-        {
-            var separator = pair.IndexOf('=');
-
-            if (separator < 0 || !MarksASecret(pair[..separator])) continue;
-
-            yield return pair[(separator + 1)..];
-            yield return Uri.UnescapeDataString(pair[(separator + 1)..]);
-        }
-    }
+    /// <summary>The credential parts embedded IN a base URL — userinfo and secret-named query values (<see cref="CredentialNeedles.FromUrl"/>).</summary>
+    private static IEnumerable<string> UrlEmbeddedSecrets(string? baseUrl) => CredentialNeedles.FromUrl(baseUrl);
 
     /// <summary>Re-persist the run's stored task with its RESOLVED model filled, so the live projection shows what an "auto" run actually dispatches from the moment it starts (mirrors the harness-reconciliation write). The task is the ORIGINAL (no injected secret env) with only <see cref="AgentTask.Model"/> set — but it is the OPENED task, so it is re-sealed exactly as the store first persisted it: written back raw, the workflow secrets it embeds would land in task_jsonb again.</summary>
     private Task PersistResolvedModelAsync(AgentRunOwnerToken owner, AgentTask taskWithModel, CancellationToken cancellationToken) => PersistRuntimeIdentityAsync(owner, null, AgentTaskSecrets.Seal(taskWithModel, _sealer), cancellationToken);

@@ -5,6 +5,7 @@ import { Ic } from "@/_imported/ai-code-space/icons";
 import type { ModelCredentialSummary } from "@/api/modelCredentials";
 import { ApiError } from "@/api/request";
 import { completePrice, contextWindowFieldIssue, parseContextWindow, useAddModelCredential, useUpdateModelCredential } from "@/hooks/use-model-credentials";
+import { keyMustBeReentered, showsMaskedCredentials } from "@/lib/credentialEndpoint";
 import { PROVIDER_FORMS, providerForm } from "@/lib/providerForms";
 
 import { ModelRowsEditor, type ModelRow } from "./ModelRowsEditor";
@@ -18,8 +19,9 @@ interface ModelCredentialModalProps {
 /**
  * Add / edit a model credential. Mirrors the warm-theme `.mdl` + `wf-form` shell (see IdentityLinkModal),
  * and renders its fields from the per-provider form variant (lib/providerForms): a masked secret (write-only
- * on edit — blank keeps the current key), a base URL (required for gateway/keyless providers, optional
- * otherwise), and a provider picker when adding.
+ * on edit — blank keeps the current key, unless the edit moves the endpoint, which needs the key again), a base
+ * URL (required for gateway/keyless providers, optional otherwise; shown with any embedded credentials masked as
+ * `***`, and sent back as shown to keep them), and a provider picker when adding.
  */
 export function ModelCredentialModal({ editing, onClose }: ModelCredentialModalProps) {
   const isEdit = editing != null;
@@ -46,8 +48,12 @@ export function ModelCredentialModal({ editing, onClose }: ModelCredentialModalP
   const keyField = form?.fields.find(f => f.key === "apiKey");
   const baseUrlField = form?.fields.find(f => f.key === "baseUrl");
   const baseUrlRequired = baseUrlField?.required ?? false;
-  // Key is mandatory only when ADDING a key-based provider; on edit a blank key keeps the existing one.
-  const keyRequired = !isEdit && !keyless && (keyField?.required ?? false);
+  // Key is mandatory when ADDING a key-based provider. On edit a blank key keeps the existing one — unless the edit
+  // moves the endpoint (scheme/host/port): a stored key is only ever sent where it was entered, so the move carries
+  // the key with it or the server refuses it (model_endpoint_key_required).
+  const keyMustFollow = isEdit && !keyless && keyMustBeReentered(editing, baseUrl);
+  const keyRequired = keyMustFollow || (!isEdit && !keyless && (keyField?.required ?? false));
+  const baseUrlShowsMasked = isEdit && showsMaskedCredentials(editing.baseUrl);
 
   const requiredOk =
     displayName.trim() !== "" &&
@@ -117,10 +123,10 @@ export function ModelCredentialModal({ editing, onClose }: ModelCredentialModalP
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}
                   onKeyDown={(e) => { if (e.key === "Enter") submit(); }}
-                  placeholder={isEdit ? `${editing.keyHint ?? "····"} — leave blank to keep` : keyField.placeholder}
+                  placeholder={keyMustFollow ? "Required for the new endpoint" : isEdit ? `${editing.keyHint ?? "····"} — leave blank to keep` : keyField.placeholder}
                   autoFocus={isEdit}
                 />
-                <span className="wf-form-help">{isEdit ? "Leave blank to keep the current key, or paste a new one to rotate." : "Stored encrypted; we never show it again."}</span>
+                <span className="wf-form-help">{keyMustFollow ? "The endpoint changed — enter the key for it. A stored key is only ever sent to the endpoint it was entered for." : isEdit ? "Leave blank to keep the current key, or paste a new one to rotate." : "Stored encrypted; we never show it again."}</span>
               </label>
             )}
 
@@ -128,6 +134,7 @@ export function ModelCredentialModal({ editing, onClose }: ModelCredentialModalP
               <label className="wf-form-row">
                 <span className="wf-form-label">{baseUrlField.label}{baseUrlRequired ? "" : " · optional"}</span>
                 <input className="wf-form-input" type="text" value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} placeholder={baseUrlField.placeholder} />
+                {baseUrlShowsMasked && <span className="wf-form-help">Credentials in the URL show as <code>***</code>. Leave the URL as it is to keep them, or enter the whole URL with its credentials.</span>}
                 {!baseUrlRequired && <span className="wf-form-help">Override the default endpoint — for a self-hosted or compatible gateway.</span>}
               </label>
             )}

@@ -55,6 +55,15 @@ public static class FailureCodes
     /// <summary>Something tried to authenticate through a credential that was disconnected — revoked, its token material destroyed. Remedy: reconnect the provider (bound repositories follow their owner's reconnect) or re-link to an active credential; a retry as-is reads the same dead row.</summary>
     public const string CredentialDisconnected = "credential_disconnected";
 
+    /// <summary>An update moved a model credential's endpoint (scheme, host or port) without entering its key again. Remedy: send the key with the new endpoint; a stored key never follows a repoint on its own.</summary>
+    public const string ModelEndpointKeyRequired = "model_endpoint_key_required";
+
+    /// <summary>An edit moved a git provider connection's endpoint (the scheme, host or port of its API or base URL) while credentials are still connected through it. Remedy: disconnect them first (members reconnect against the new host), or add the new host as its own provider; a connected token never follows a repoint.</summary>
+    public const string ProviderEndpointCredentialsBound = "provider_endpoint_credentials_bound";
+
+    /// <summary>An edit moved a git provider connection's endpoint without entering its stored OAuth client secret again. Remedy: send the secret (normally the new host's OAuth app's) with the new endpoint.</summary>
+    public const string ProviderEndpointSecretRequired = "provider_endpoint_secret_required";
+
     // ── Workflows and runs ─────────────────────────────────────────────────────────
     public const string WorkflowDefinitionInvalid = "workflow_definition_invalid";
     public const string TaskRouteConfirmationRequired = "task_route_confirmation_required";
