@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Dtos.Workflows;
@@ -136,9 +137,10 @@ public sealed class SupervisorDefinitionBuilder : IWorkflowDefinitionBuilder, IS
         // model targets them; NOT executed, distinct from the acceptanceChecks argv floor). Omitted when empty (byte-identical).
         AddIfPresent(config, "acceptanceCriteria", context.AcceptanceCriteria is { Count: > 0 } criteria ? criteria.ToList() : null);
         // The operator's EXECUTABLE acceptance floor (S4b) — an argv run against the reviewable head at the terminal
-        // stop; a non-zero exit fails the stop + withholds the branch. Blank entries dropped; omitted when empty
-        // (byte-identical). The free-text criteria above steer the model; this floor VERIFIES the result.
-        AddIfPresent(config, "acceptanceChecks", context.AcceptanceChecks is { Count: > 0 } checks && !string.IsNullOrWhiteSpace(checks[0]) && checks.All(c => c is not null && !c.Contains('\0')) ? checks.ToArray() : null);
+        // stop; a non-zero exit fails the stop + withholds the branch. Baked verbatim, blank arguments after the program
+        // included; omitted when empty or when it has no program / carries a NUL (byte-identical). The free-text criteria
+        // above steer the model; this floor VERIFIES the result.
+        AddIfPresent(config, "acceptanceChecks", AcceptanceArgv.NormalizeOrNull(context.AcceptanceChecks));
         // The S3 plan-confirmation gate — every authored plan version parks for the operator's confirmation before any
         // agent is created. Omitted when off (byte-identical).
         AddIfPresent(config, "requirePlanConfirmation", context.RequirePlanConfirmation ? (object)true : null);

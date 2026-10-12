@@ -143,7 +143,7 @@ public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuth
         return null;
     }
 
-    private static bool ValidArgv(IReadOnlyList<string> argv) => argv.Count > 0 && !string.IsNullOrWhiteSpace(argv[0]) && argv.All(value => value != null && !value.Contains('\0'));
+    private static bool ValidArgv(IReadOnlyList<string> argv) => AcceptanceArgv.NormalizeOrNull(argv) is not null;
     private static bool SamePath(string left, string? right)
     {
         try { return right != null && Path.GetFullPath(left) == Path.GetFullPath(right); }

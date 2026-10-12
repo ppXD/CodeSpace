@@ -93,8 +93,9 @@ public sealed partial class SupervisorTurnService
             : EmptyGuidSet;
 
         // The operator's OBJECTIVE acceptance command (L4 A3) — the argv a resolve verdict is graded against. Null
-        // (none / all-blank) → no objective grade runs, the resolver self-report marker stands (byte-identical to pre-A3).
-        var acceptanceCommand = NormalizeCommand(goalConfig?.AcceptanceChecks);
+        // (none, or an argv with no program or a NUL) → no objective grade runs, the resolver self-report marker stands
+        // (byte-identical to pre-A3).
+        var acceptanceCommand = AcceptanceArgv.NormalizeOrNull(goalConfig?.AcceptanceChecks);
 
         // C3 narrowing: the run's own ORACLE INVENTORY — the floor's program file(s), derived from the operator's
         // argv through the SAME extraction every protected grade uses. It is what separates a judge the run owns
@@ -803,11 +804,11 @@ public sealed partial class SupervisorTurnService
             }
 
             var spec = subtaskId is not null && acceptanceBySubtask.TryGetValue(subtaskId, out var found) ? found : null;
-            var command = spec is not null ? NormalizeCommand(spec.Command) : null;
+            var command = spec is not null ? AcceptanceArgv.NormalizeOrNull(spec.Command) : null;
 
-            // Ungraded — keep the result byte-identical — when the unit has no contract or its command is all-blank
-            // (the dominant no-contract case). A MULTI-repo unit (RepositoryResults present) is graded PER REPO below,
-            // mirroring the run-level stop floor's multi-target grade — it is no longer silently skipped.
+            // Ungraded — keep the result byte-identical — when the unit has no contract or its command has no program
+            // or carries a NUL (the dominant no-contract case). A MULTI-repo unit (RepositoryResults present) is graded
+            // PER REPO below, mirroring the run-level stop floor's multi-target grade — it is no longer silently skipped.
             if (command is null)
             {
                 graded.Add(results[i]);
@@ -1363,8 +1364,8 @@ public sealed partial class SupervisorTurnService
 
         // Each gate carries its FULL spec (triad S7 — a model-check's rubric/schema payload rides the spec); the
         // operator floor stays a bare TestsPass argv spec (the operator never authors a kind on this path).
-        var floorCommand = NormalizeCommand(context.AcceptanceChecks);
-        var modelCommand = NormalizeCommand(modelAcceptance?.Command);
+        var floorCommand = AcceptanceArgv.NormalizeOrNull(context.AcceptanceChecks);
+        var modelCommand = AcceptanceArgv.NormalizeOrNull(modelAcceptance?.Command);
 
         var gates = new (string Label, SupervisorAcceptanceSpec? Spec)[]
         {
@@ -1842,9 +1843,6 @@ public sealed partial class SupervisorTurnService
 
         return ids is { Count: > 0 } ? ids : null;
     }
-
-    /// <summary>Preserve argv boundaries exactly. A blank executable or invalid token never promotes a later argument into the executable.</summary>
-    private static IReadOnlyList<string>? NormalizeCommand(IReadOnlyList<string>? command) => command is { Count: > 0 } && !string.IsNullOrWhiteSpace(command[0]) && command.All(a => a is not null && !a.Contains('\0')) ? command.ToArray() : null;
 
     /// <summary>
     /// How many WorkflowRun ancestors this supervisor run already has (PR-E E5 depth cap) — walks the
