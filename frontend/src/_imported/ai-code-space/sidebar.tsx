@@ -2,7 +2,7 @@ import { useLocation, useNavigate } from "@tanstack/react-router";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 
-import { clearAuthState } from "@/api/auth";
+import { signOut } from "@/api/session";
 import type { MeTeam } from "@/api/types";
 import { CreateWorkspaceDialog } from "@/components/settings/CreateWorkspaceDialog";
 import { teamToUrlSlug, useActiveTeam } from "@/hooks/use-me";
@@ -227,8 +227,9 @@ export function Sidebar() {
         <div className="sb-pop-menu sb-pop-menu-danger">
           <button
             className="sb-pop-item sb-pop-item-danger"
-            onClick={() => {
-              clearAuthState();
+            onClick={async () => {
+              // The session is an HttpOnly cookie only the API can clear, so signing out asks it to.
+              await signOut();
               // Hard navigation — sheds the QueryClient cache and tears down any popups.
               window.location.assign("/signin");
             }}

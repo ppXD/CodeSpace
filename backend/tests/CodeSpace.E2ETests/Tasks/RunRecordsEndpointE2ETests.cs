@@ -142,8 +142,10 @@ public sealed class RunRecordsEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         Encoding.UTF8.GetString(output.ToArray()).ShouldBe(expected);
     }
 
-    [Fact]
-    public async Task Get_records_stream_tails_the_ledger_as_server_sent_events_and_ends_at_the_terminal_record()
+    [Theory]
+    [InlineData(false)]   // an API client's Authorization header
+    [InlineData(true)]    // the browser's HttpOnly session cookie — the SPA's tail sends no Authorization header at all
+    public async Task Get_records_stream_tails_the_ledger_as_server_sent_events_and_ends_at_the_terminal_record(bool viaSessionCookie)
     {
         var (userId, teamId) = await SeedTeamMembershipAsync();
         var runId = await SeedRunWithRecordsAsync(teamId);   // ends with run.failed → the terminal record closes the stream itself
@@ -151,7 +153,8 @@ public sealed class RunRecordsEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         using var client = _factory.CreateClient();
         client.Timeout = TimeSpan.FromSeconds(30);   // safety net — a correct tail closes the stream at the terminal record
         var request = new HttpRequestMessage(HttpMethod.Get, $"/api/workflows/runs/{runId}/records/stream?after=0");
-        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
+        if (viaSessionCookie) request.Headers.Add("Cookie", $"{SessionCookie.Name}={MintToken(userId)}");
+        else request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", MintToken(userId));
         request.Headers.Add("X-Team-Id", teamId.ToString());
 
         var response = await client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead);

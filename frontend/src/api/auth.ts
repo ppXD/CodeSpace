@@ -8,7 +8,12 @@ export interface SignInRequest {
 }
 
 export interface SignInResponse {
-  token: string;
+  /**
+   * For API clients. The browser's session is the HttpOnly cookie the same response sets — see `adoptSessionFrom`,
+   * which settles this and hands the rest on without it. Absent when the cookie carried the request: the API never
+   * puts a session in a body a page script could read on the strength of the cookie alone.
+   */
+  token?: string;
   expiresAt: string;
   user: MeResponse;
 }
@@ -22,10 +27,11 @@ export interface ChangePasswordResponse {
   user: MeResponse;
   /**
    * A token minted under the account's NEW security stamp. Changing a password revokes every token
-   * issued before it, including the one that made this call — store this or the caller is signed out
-   * by their own change.
+   * issued before it, including the one that made this call — the response also replaces the session
+   * cookie, and `adoptSessionFrom` must settle this token or the caller is signed out by their own change.
+   * Absent when the cookie carried the request: the replacement cookie is then the whole answer.
    */
-  token: string;
+  token?: string;
   expiresAt: string;
 }
 
@@ -48,23 +54,3 @@ export const authApi = {
       body: JSON.stringify({ newPassword }),
     }),
 };
-
-const JWT_STORAGE_KEY = "codespace.jwt";
-const ACTIVE_TEAM_STORAGE_KEY = "codespace.activeTeamId";
-
-export function storeJwt(token: string) {
-  localStorage.setItem(JWT_STORAGE_KEY, token);
-}
-
-export function readJwt(): string | null {
-  return localStorage.getItem(JWT_STORAGE_KEY);
-}
-
-export function clearAuthState() {
-  localStorage.removeItem(JWT_STORAGE_KEY);
-  localStorage.removeItem(ACTIVE_TEAM_STORAGE_KEY);
-}
-
-export function isAuthenticated(): boolean {
-  return readJwt() != null;
-}

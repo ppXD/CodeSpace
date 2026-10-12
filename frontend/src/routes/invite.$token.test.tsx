@@ -1,4 +1,4 @@
-import { screen, waitFor } from "@testing-library/react";
+import { fireEvent, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { renderRoute, stubFetch } from "@/test/route-harness";
@@ -52,6 +52,33 @@ describe("invite acceptance", () => {
     await waitFor(() => expect(screen.getByText("Create your account")).toBeTruthy());
     expect(screen.getByText("Set a password")).toBeTruthy();
     expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/signin");
+  });
+
+  it("lands a joining account signed in on the session cookie without writing the token to localStorage", async () => {
+    const user = { id: "u-1", email: "maya@team.dev", name: "Maya", passwordMustChange: false, permissions: [], teams: [{ id: "t-9", slug: "platform-team", name: "Platform Team" }] };
+    const answer = (body: unknown, status = 200) => new Response(body === null ? null : JSON.stringify(body), { status, headers: { "Content-Type": "application/json" } });
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const path = new URL(String(input), "http://spa.test").pathname;
+      const method = init?.method ?? "GET";
+      if (method === "GET" && path === "/api/invitations/good-token") return answer({ ...preview, forSignedInAccount: true });
+      if (method === "POST" && path === "/api/invitations/good-token/accept") return answer({ token: "minted-token", expiresAt: preview.expiresAt, user });
+      if (path === "/api/auth/session") return answer(null, 204);   // an API with the session cookie confirms it
+      return answer({ code: "not_found" }, 404);
+    }));
+    const tokenWrites: string[] = [];
+    const setItem = localStorage.setItem.bind(localStorage);
+    vi.spyOn(localStorage, "setItem").mockImplementation((key: string, value: string) => {
+      if (key === "codespace.jwt") tokenWrites.push(value);
+      setItem(key, value);
+    });
+
+    await renderRoute("/invite/good-token");
+    fireEvent.click(await screen.findByRole("button", { name: /Join/ }));
+
+    await waitFor(() => expect(localStorage.getItem("codespace.activeTeamId")).toBe("t-9"));
+    expect(localStorage.getItem("codespace.session")).toBe("cookie");
+    expect(tokenWrites).toEqual([]);
+    vi.restoreAllMocks();
   });
 
   it("explains a dead token in place instead of bouncing to sign-in", async () => {

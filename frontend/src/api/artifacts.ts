@@ -3,8 +3,8 @@ import { fetchResponse } from "./request";
 /**
  * Downloads a stored artifact by id.
  *
- * <p>Fetched rather than linked: the API authenticates on the Authorization and X-Team-Id HEADERS, which a plain
- * anchor cannot carry — an `href` to the same URL returns 401, not the file.</p>
+ * <p>Fetched rather than linked: the team scope is the X-Team-Id HEADER, which a plain anchor cannot carry, and a
+ * browser still on its pre-cookie bearer token authenticates by a header too.</p>
  */
 export async function downloadArtifact(artifactId: string, fileName: string): Promise<void> {
   const response = await fetchResponse(`/api/artifacts/${encodeURIComponent(artifactId)}`);

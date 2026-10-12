@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Auth;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -48,6 +49,12 @@ public sealed class InvitationEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         var body = JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement;
         body.GetProperty("token").GetString().ShouldNotBeNullOrWhiteSpace("the invitee must land signed in, not at a login form");
         body.GetProperty("user").GetProperty("email").GetString().ShouldBe(email);
+
+        // The browser lands signed in by the HttpOnly session cookie, carrying the same session the body hands an API client.
+        var cookie = (response.Headers.TryGetValues("Set-Cookie", out var setCookies) ? setCookies : []).SingleOrDefault(c => c.StartsWith($"{SessionCookie.Name}=", StringComparison.Ordinal));
+        cookie.ShouldNotBeNull("accepting an invitation mints a browser session, so it must hand the browser its cookie");
+        cookie.ShouldStartWith($"{SessionCookie.Name}={body.GetProperty("token").GetString()};");
+        cookie.ToLowerInvariant().ShouldContain("httponly");
 
         // The shipped page reads user.teams to pick which team to land in.
         body.GetProperty("user").GetProperty("teams").GetArrayLength().ShouldBeGreaterThanOrEqualTo(2, "the invited team plus the personal workspace acceptance creates");

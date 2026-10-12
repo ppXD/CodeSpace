@@ -1,8 +1,10 @@
+import { applySessionHeaders, clearAuthState, cookieSessionLive } from "./session";
+
 /**
- * Minimal fetch wrapper that mirrors the two middlewares in `client.ts` (Bearer JWT and
+ * Minimal fetch wrapper that mirrors the two middlewares in `client.ts` (session credentials and
  * X-Team-Id) so hand-rolled calls — used for endpoints not yet covered by the regenerated
  * openapi-fetch schema — get the same auth treatment. Centralises:
- *   • header injection
+ *   • the session cookie (credentials: "include") and header injection
  *   • JSON content-type defaults
  *   • backend error envelope → ApiError
  */
@@ -33,16 +35,17 @@ export async function fetchResponse(path: string, init: RequestInit = {}): Promi
   if (!headers.has("Accept")) headers.set("Accept", "application/json");
   if (init.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
 
-  const jwt = localStorage.getItem("codespace.jwt");
-  // Sign-in is anonymous. If a stale token is still in localStorage from a previous
+  // Sign-in is anonymous. If a stale pre-cookie token is still in localStorage from a previous
   // session, sending it would make the backend rotation-gate fire and 403 the request
   // before the new credentials are even checked.
-  if (jwt && path !== "/api/auth/sign-in") headers.set("Authorization", `Bearer ${jwt}`);
+  applySessionHeaders(headers, { bearer: path !== "/api/auth/sign-in" });
 
   const teamId = localStorage.getItem("codespace.activeTeamId");
   if (teamId) headers.set("X-Team-Id", teamId);
 
-  const response = await fetch(baseUrl + path, { ...init, headers });
+  // "include", not the default "same-origin": the deployed SPA calls the API at VITE_API_URL, another origin, where
+  // the browser would otherwise neither send the session cookie nor keep the one a response sets.
+  const response = await fetch(baseUrl + path, { credentials: "include", ...init, headers });
 
   if (response.ok) return response;
 
@@ -51,12 +54,13 @@ export async function fetchResponse(path: string, init: RequestInit = {}): Promi
   const code = (parsed as { code?: string })?.code ?? `http_${response.status}`;
   const message = (parsed as { message?: string })?.message ?? response.statusText;
 
-  // 401 means our JWT is invalid / expired / missing. Wipe it so the auth guard
+  // 401 means our session is invalid / expired / missing (a cookie session once the API,
+  // asked again, agrees — see handleUnauthorized). Wipe it so the auth guard
   // sends the user to /signin — except on the endpoints a signed-out visitor is
   // SUPPOSED to call, where a 401 is the answer to what they asked, not a broken
   // session (bad password; dead invite token). Bouncing those replaces the page's
   // own message with a redirect the visitor can do nothing with.
-  if (response.status === 401 && !isAnonymousSurface(path)) handleUnauthorized();
+  if (response.status === 401 && !isAnonymousSurface(path)) await handleUnauthorized();
 
   // 403 with password_rotation_required → user must rotate before continuing. Same
   // exemption: /api/auth/change-password is the rotation itself, so don't bounce on
@@ -88,7 +92,7 @@ function safeJsonParse(text: string): unknown {
   try { return JSON.parse(text); } catch { return text; }
 }
 
-function handleUnauthorized() {
+async function handleUnauthorized() {
   if (typeof window === "undefined") return;
 
   const currentPath = window.location.pathname;
@@ -96,8 +100,12 @@ function handleUnauthorized() {
   // leave the page alone so the user can recover via the form / popup as designed.
   if (currentPath === "/signin" || currentPath === "/oauth-callback") return;
 
-  localStorage.removeItem("codespace.jwt");
-  localStorage.removeItem("codespace.activeTeamId");
+  // On the cookie, a 401 may come from an API pod older than the cookie, mid rolling deploy: it reads only the
+  // Authorization header. If the API, asked again, still holds the session, the request met such a pod — the session
+  // stands, and the caller gets the 401 as an ordinary error (queries retry it) instead of a sign-out.
+  if (await cookieSessionLive()) return;
+
+  clearAuthState();
   window.location.assign("/signin");
 }
 

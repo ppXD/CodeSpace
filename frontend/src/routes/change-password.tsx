@@ -1,7 +1,7 @@
 import { createFileRoute, redirect, useNavigate, useRouter } from "@tanstack/react-router";
 import { useEffect, useRef, useState } from "react";
 
-import { isAuthenticated } from "@/api/auth";
+import { isAuthenticated } from "@/api/session";
 import { ApiError } from "@/api/request";
 import { AuthShell } from "@/components/auth/AuthShell";
 import { useChangePassword } from "@/hooks/use-change-password";
@@ -21,8 +21,8 @@ const MIN_PASSWORD_LENGTH = 12;
 
 export const Route = createFileRoute("/change-password")({
   beforeLoad: () => {
-    // No JWT → user must sign in first; rotation requires the current password verified
-    // by the bearer-token-protected endpoint.
+    // Not signed in → sign in first; rotation requires the current password verified
+    // by the session-protected endpoint.
     if (!isAuthenticated()) throw redirect({ to: "/signin" });
   },
   component: ChangePassword,

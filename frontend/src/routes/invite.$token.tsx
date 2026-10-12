@@ -2,7 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, createFileRoute, useNavigate, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 
-import { storeJwt } from "@/api/auth";
+import { adoptSessionFrom } from "@/api/session";
 import { invitationsApi, type InvitationPreview } from "@/api/invitations";
 import { ApiError } from "@/api/request";
 import { AuthShell } from "@/components/auth/AuthShell";
@@ -54,10 +54,10 @@ function AcceptForm({ token, invitation }: { token: string; invitation: Invitati
   const [password, setPassword] = useState("");
 
   const accept = useMutation({
-    mutationFn: () => invitationsApi.accept(token, invitation.forSignedInAccount ? {} : { name: name.trim(), password }),
+    // Settled inside mutationFn, so the result react-query keeps never holds the token, and dropped with the page.
+    mutationFn: async () => adoptSessionFrom(await invitationsApi.accept(token, invitation.forSignedInAccount ? {} : { name: name.trim(), password })),
+    gcTime: 0,
     onSuccess: async (response) => {
-      storeJwt(response.token);
-
       // Land the invitee in the team they were invited to rather than whichever team sorts first,
       // so the page they arrive on is the reason they clicked the link.
       const joined = response.user.teams.find((team) => team.name === invitation.teamName) ?? response.user.teams[0];
