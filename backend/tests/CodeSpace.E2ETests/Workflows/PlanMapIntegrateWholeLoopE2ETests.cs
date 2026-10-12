@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -105,6 +106,11 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
         outputs.GetProperty("integrationStatus").GetString().ShouldBe("Clean");
         outputs.GetProperty("integratedBranch").GetString().ShouldBe(integrationBranch);
         outputs.GetProperty("combined").GetString().ShouldNotBeNullOrWhiteSpace("the synth still narrates — the code reduce rides beside it, not instead of it");
+
+        // …and what the synth was SHOWN: the integrate node's own account of what landed. The fake synth echoes its
+        // prompt, so `combined` is the output of the real node → VariableResolver → llm.complete path, not a re-derivation.
+        outputs.GetProperty("combined").GetString()!.ShouldMatch(LandedBoth(integrationBranch) + @"$",
+            customMessage: "the reduce is handed what actually landed — which contributions, each beside the subtask number that places it among the results — in one factual sentence");
     }
 
     /// <summary>
@@ -114,10 +120,12 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
     /// candidate and the run's outputs were empty. With the projection declaring <c>continue</c>, the map finishes,
     /// the integrate step runs over the run's publish ledger, and the reduce narrates with the failure counted.
     ///
-    /// <para>Which contributions integrate is a LEDGER question, not an outcome one (<c>RunIntegrationContributions</c>
-    /// deliberately applies no outcome filter): a unit that captured a diff contributes even if its own gate later
-    /// flunked it, so a human reviews the produced work instead of losing it. What this test pins is the part that
-    /// was broken — that the candidate exists at all, and that the SUCCEEDED sibling's work is in its tree.</para>
+    /// <para>Which contributions integrate is a LEDGER question with exactly ONE verdict gate
+    /// (<c>RunIntegrationContributions</c>): a unit whose own definition-of-done REJECTED it (or whose verification a
+    /// human waived) is withheld from the candidate, while a unit that merely ended badly but captured a diff still
+    /// contributes. This test pins the part that was broken — the candidate exists at all, with the SUCCEEDED sibling's
+    /// work in its tree and the flunked unit's work off it — and that the reduce is TOLD the flunked unit was withheld,
+    /// by name, instead of narrating a whole deliverable over a candidate that lacks it.</para>
     /// </summary>
     [Fact]
     public async Task A_flunked_item_still_leaves_its_siblings_work_on_one_reviewable_candidate()
@@ -189,7 +197,19 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
             (await remote.BranchHasFileAsync(integrationBranch, FileWritingFakeCli.FileFor("do the second thing")))
                 .ShouldBeFalse(customMessage: "the flunked item's work must be withheld from the candidate — continue-on-error must not turn 'keep the siblings' into 'ship the rejected work'");
 
-            outputs.GetProperty("combined").GetString().ShouldNotBeNullOrWhiteSpace("the reduce ran too — the run narrates instead of dying at the map");
+            var combined = outputs.GetProperty("combined").GetString();
+
+            combined.ShouldNotBeNullOrWhiteSpace("the reduce ran too — the run narrates instead of dying at the map");
+
+            // What the synth was SHOWN: the flunked unit never reached the integrator, so the integration outcome alone
+            // would read as a clean, complete candidate. The integrate node names it as withheld — the label is the unit
+            // id of the failed attempts' shared (node, iteration) cell, read off the ledger rather than assumed.
+            var flunked = agentRuns.First(r => r.Status == AgentRunStatus.Failed);
+            var flunkedLabel = Core.Services.Agents.AgentAcceptanceContract.UnitId(flunked.NodeId, flunked.IterationKey ?? "");
+
+            flunkedLabel.ShouldBe("agent#map#1", "fixture check: the contract belongs to the plan's second item, so the subtask number below is its 1-based position");
+            combined.ShouldContain($"Integration outcome:\nIntegration: 1 contribution(s) landed on {integrationBranch}: subtask 1 (agent#map#0). Withheld before integration: subtask 2 ({flunkedLabel}) — acceptance Failed.",
+                customMessage: "the reduce must be told the flunked unit was withheld from the candidate — without it the candidate reads as the whole deliverable");
         }
         finally
         {
@@ -256,6 +276,22 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
             (await remote.BranchFileContentAsync(integrationBranch, FileWritingFakeCli.FileFor(clean))).ShouldContain(clean, customMessage: "the approved item's work is on the candidate");
             (await remote.BranchHasFileAsync(integrationBranch, FileWritingFakeCli.FileFor(flagged)))
                 .ShouldBeFalse(customMessage: "the reviewer flagged this item — its pushed branch must not reach the branch a human reviews as the run's candidate");
+
+            // …and what the synth was SHOWN. The flagged item never reached the integrator, so the integration outcome
+            // alone would read as a clean, complete candidate: it is named as withheld, in fixed words — the critic's own
+            // critique is model-authored text derived from the agent's output and must stay out of the prompt. The label is
+            // read off the ledger, not assumed.
+            var flaggedRun = agentRuns.First(r => JsonSerializer.Deserialize<AgentRunResult>(r.ResultJson!, Core.Services.Agents.AgentJson.Options)!.ExitReason == "output-flagged");
+            var flaggedResult = JsonSerializer.Deserialize<AgentRunResult>(flaggedRun.ResultJson!, Core.Services.Agents.AgentJson.Options)!;
+
+            Core.Services.Agents.AgentAcceptanceContract.UnitId(flaggedRun.NodeId, flaggedRun.IterationKey ?? "").ShouldBe("agent#map#1", "fixture check: the planted hack is the plan's second item");
+            flaggedResult.ReviewFeedback.ShouldNotBeNullOrWhiteSpace("fixture check: the critic really wrote a critique, so its absence from the prompt below proves something");
+
+            var combined = JsonDocument.Parse(run.OutputsJson!).RootElement.GetProperty("combined").GetString()!;
+
+            combined.ShouldContain($"Integration outcome:\nIntegration: 1 contribution(s) landed on {integrationBranch}: subtask 1 (agent#map#0). Withheld before integration: subtask 2 (agent#map#1) — output review flagged it.",
+                customMessage: "the reduce must be told the flagged item was withheld from the candidate — without it the candidate reads as the whole deliverable");
+            combined.ShouldNotContain(flaggedResult.ReviewFeedback!, customMessage: "the critic's critique is model-authored text — the account carries only the fixed reason");
         }
         finally
         {
@@ -327,6 +363,24 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
                 .ShouldBeFalse("no clean candidate ⇒ no candidate row");
 
             (await remote.RemoteHasBranchAsync($"codespace/integration/{runId:N}")).ShouldBeFalse("nothing was pushed for a conflicted set — the fragments stay the only branches");
+
+            // What the synth was SHOWN. The two items run in parallel, so which agent run is created — and therefore
+            // applied first — is not fixed, and neither is WHICH unit conflicts. It is read from ground truth instead:
+            // the fallback branch the park itself named, mapped back to its unit through the publish ledger.
+            var conflictedBranch = JsonDocument.Parse(wait.PayloadJson!).RootElement.GetProperty("fallbackBranches")[0].GetString()!;
+            var conflictedLabel = await UnitLabelOfBranchAsync(verify.Resolve<CodeSpaceDbContext>(), runId, conflictedBranch);
+            var combined = outputs.GetProperty("combined").GetString()!;
+
+            combined.ShouldContain("Integration outcome:\nIntegration conflicted: no integrated branch was published",
+                customMessage: "the reduce is told the candidate conflicted and that nothing landed on an integrated branch");
+            var position = int.Parse(conflictedLabel[(conflictedLabel.LastIndexOf('#') + 1)..]) + 1;
+
+            combined.ShouldContain($"Conflicted or held back: subtask {position} ({conflictedLabel}) → {conflictedBranch}",
+                customMessage: "…and which contribution conflicted, with the branch that still keeps its work — the fragments the reviewer was asked about");
+            combined.ShouldEndWith(" A reviewer rejected the retry.", customMessage: "the human review reaches the reduce as a fixed sentence — this run's reviewer rejected the retry");
+            combined.ShouldNotContain("ship the fragments", customMessage: "the reviewer's free-text comment is a person's words on their way into a model's prompt — the account states only the verdict");
+            combined.ShouldNotContain($"landed on codespace/integration/{runId:N}",
+                customMessage: "a conflicted set published no branch, so the reduce must never be handed one as where the work landed");
         }
         finally
         {
@@ -335,9 +389,102 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
         }
     }
 
+    /// <summary>
+    /// The failure a clean integration hides: ONE subtask edits its file and then DIES (an agent that crashed or timed
+    /// out after editing). Its run is a real <c>Failed</c> one, yet the executor still captured its diff and wrote its
+    /// manifest row; with no acceptance contract it is ungraded, so it is never withheld — and the integration comes out
+    /// Clean with that partial, unverified diff ON the candidate. The synth saw <c>[A, {"error": ...}]</c> and "2 landed"
+    /// and called the failed subtask missing. It must be told WHICH subtask landed although its own run failed.
+    /// </summary>
+    [Fact]
+    public async Task A_subtask_that_dies_after_editing_lands_on_the_candidate_flagged_as_partial_and_unverified()
+    {
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var crashing = $"do the second thing then {PartialWorkFakeCli.CrashMarker}";
+
+        using (var knob = _fixture.BeginScope())
+            knob.Resolve<WorkPlanPlanScript>().Instructions = new[] { "do the first thing", crashing };
+
+        try
+        {
+            var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+            var (_, plannerRowId) = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "workplan-model", provider: DeterministicWorkPlanLlmClient.ProviderTag);
+
+            using var cli = new PartialWorkFakeCli();
+
+            using var remote = new BareRemote();
+            await remote.SeedBaseAsync();
+            var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+            var jobClient = ResolveJobClient();
+            jobClient.Clear();
+            jobClient.AutoExecute = true;
+
+            var runId = await ProjectAndStartAsync(teamId, userId, plannerRowId, repoId, immediateRetries: true);
+
+            await RunEngineAsync(runId);
+            await jobClient.WaitForPendingAsync();
+
+            using var verify = _fixture.BeginScope();
+            var db = verify.Resolve<CodeSpaceDbContext>();
+
+            var run = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId);
+            run.Status.ShouldBe(WorkflowRunStatus.Success, $"one dead subtask must not sink the fan-out — error: {run.Error}");
+
+            var agentRuns = await db.AgentRun.AsNoTracking().Where(r => r.WorkflowRunId == runId).ToListAsync();
+            var failed = agentRuns.Where(r => r.Status == AgentRunStatus.Failed).ToList();
+
+            failed.ShouldNotBeEmpty("fixture check: the crashing subtask's agent run really failed — otherwise this arm proves nothing");
+            failed.Select(r => r.IterationKey).Distinct().ShouldHaveSingleItem("every failed row is an attempt of the SAME subtask");
+
+            var failedLabel = Core.Services.Agents.AgentAcceptanceContract.UnitId(failed[0].NodeId, failed[0].IterationKey ?? "");
+            failedLabel.ShouldBe("agent#map#1", "fixture check: the crashing instruction is the plan's second item");
+
+            var outputs = JsonDocument.Parse(run.OutputsJson!).RootElement;
+            var integrationBranch = $"codespace/integration/{runId:N}";
+
+            outputs.GetProperty("integrationStatus").GetString().ShouldBe("Clean", "an ungraded failed subtask is never withheld — the integration comes out Clean");
+            (await remote.BranchHasFileAsync(integrationBranch, FileWritingFakeCli.FileFor(crashing)))
+                .ShouldBeTrue("fixture check: the dead subtask's partial diff really is ON the candidate — the honest account has to say so");
+
+            outputs.GetProperty("combined").GetString()!.ShouldMatch(
+                LandedBoth(integrationBranch) + Regex.Escape(" Landed although its subtask failed (partial, unverified): subtask 2 (agent#map#1).") + "$",
+                customMessage: "the reduce must be told WHICH subtask landed although its own run failed — else the failed subtask reads as missing while its partial diff is on the branch");
+        }
+        finally
+        {
+            using var reset = _fixture.BeginScope();
+            reset.Resolve<WorkPlanPlanScript>().Reset();
+        }
+    }
+
+    /// <summary>
+    /// What the synth is shown when BOTH of the plan's two items landed, up to the clause after it: the contributions are
+    /// applied in agent-run creation order, and two parallel branches are created in no fixed order — so the assertion pins
+    /// WHICH landed (each beside the subtask number that places it), not the order they are listed in.
+    /// </summary>
+    private static string LandedBoth(string integrationBranch)
+    {
+        const string first = @"subtask 1 \(agent#map#0\)";
+        const string second = @"subtask 2 \(agent#map#1\)";
+
+        return $@"Integration outcome:\nIntegration: 2 contribution\(s\) landed on {Regex.Escape(integrationBranch)}: ({first}, {second}|{second}, {first})\.";
+    }
+
+    /// <summary>The unit label the integration outcome names a contribution by, found from ground truth: the agent attempt that pushed <paramref name="branch"/> (the run's publish ledger), then that agent run's (node, iteration) cell.</summary>
+    private static async Task<string> UnitLabelOfBranchAsync(CodeSpaceDbContext db, Guid runId, string branch)
+    {
+        var manifest = await db.PublishManifest.AsNoTracking().SingleAsync(m => m.WorkflowRunId == runId && m.Kind == PublishManifestKind.Agent && m.Branch == branch);
+        var agentRun = await db.AgentRun.AsNoTracking().SingleAsync(r => r.Id == manifest.AgentRunId);
+
+        return Core.Services.Agents.AgentAcceptanceContract.UnitId(agentRun.NodeId, agentRun.IterationKey ?? "");
+    }
+
     // ─── Projection (the production builder, planner pinned to the work-plan fake, synth retargeted) ───
 
-    private async Task<Guid> ProjectAndStartAsync(Guid teamId, Guid userId, Guid plannerRowId, Guid repoId, (ReviewMode Mode, Guid ReviewerRowId)? review = null)
+    private async Task<Guid> ProjectAndStartAsync(Guid teamId, Guid userId, Guid plannerRowId, Guid repoId, bool immediateRetries = false, (ReviewMode Mode, Guid ReviewerRowId)? review = null)
     {
         using var scope = _fixture.BeginScope();
 
@@ -350,10 +497,17 @@ public sealed class PlanMapIntegrateWholeLoopE2ETests
             PlannerModelRowId = plannerRowId,
         };
 
-        var definition = RetargetSynth(scope.Resolve<ITaskProjectionRegistry>().Resolve(context.Route.ProjectionKind).Build(context));
+        var built = RetargetSynth(scope.Resolve<ITaskProjectionRegistry>().Resolve(context.Route.ProjectionKind).Build(context));
+        var definition = immediateRetries ? WithoutRetryBackoff(built) : built;
 
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, launchPayloadJson: null, scopeRepositoryIds: null, projectionKind: null, session: null, CancellationToken.None);
     }
+
+    /// <summary>The retry POLICY stays — a crashed subtask is respawned, each attempt leaving its own row, which is the multi-attempt shape the partial-work arm must survive — but the engine WAITS the 30 s backoff for real, twice per dying subtask, so the arm zeroes the wait and nothing else.</summary>
+    private static WorkflowDefinition WithoutRetryBackoff(WorkflowDefinition definition) => definition with
+    {
+        Nodes = definition.Nodes.Select(n => n.Retry is { } retry ? n with { Retry = retry with { BackoffSeconds = 0 } } : n).ToList(),
+    };
 
     private static WorkflowDefinition RetargetSynth(WorkflowDefinition definition) => definition with
     {
