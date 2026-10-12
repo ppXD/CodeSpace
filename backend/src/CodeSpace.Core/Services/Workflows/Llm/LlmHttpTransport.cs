@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using CodeSpace.Core.Services.Redaction;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
 
@@ -50,7 +51,7 @@ internal static class LlmHttpTransport
                 var status = (int)response.StatusCode;
                 var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-                throw MarkIfAmbiguousSendPreceded(request, new LlmApiException(provider, status, LlmApiException.Classify(status, errorBody), errorBody, RetryAfterOf(response)));
+                throw MarkIfAmbiguousSendPreceded(request, new LlmApiException(provider, status, LlmApiException.Classify(status, errorBody), WithoutPresentedCredentials(request, errorBody), RetryAfterOf(response)));
             }
 
             try
@@ -97,7 +98,7 @@ internal static class LlmHttpTransport
                 var status = (int)response.StatusCode;
                 var errorBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
-                throw MarkIfAmbiguousSendPreceded(request, new LlmApiException(provider, status, LlmApiException.Classify(status, errorBody), errorBody, RetryAfterOf(response)));
+                throw MarkIfAmbiguousSendPreceded(request, new LlmApiException(provider, status, LlmApiException.Classify(status, errorBody), WithoutPresentedCredentials(request, errorBody), RetryAfterOf(response)));
             }
 
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken).ConfigureAwait(false);
@@ -127,6 +128,16 @@ internal static class LlmHttpTransport
 
         return content;
     }
+
+    /// <summary>
+    /// The gateway's error body with every value THIS request presented struck out — its credential headers and the
+    /// credential parts of its URL (<see cref="CredentialNeedles.FromRequest"/>). An upstream that echoes the key it
+    /// rejected, or a proxy that reflects request headers, would otherwise hand the write-only key to every reader of
+    /// the failure: the node, interaction and external-call failure records, and the run a Viewer opens. Struck HERE,
+    /// before the exception exists, so no consumer downstream can forget to. The category is classified from the raw
+    /// body by the caller — a struck echo never changes the retry/degrade decision.
+    /// </summary>
+    private static string WithoutPresentedCredentials(HttpRequestMessage request, string errorBody) => CredentialNeedles.Redactor(CredentialNeedles.FromRequest(request)).Redact(errorBody);
 
     /// <summary>Mark <paramref name="fault"/> as riding over a possibly-billed earlier attempt when a PRECEDING attempt of this same (Polly-retried) request was sent and got no response back — see <see cref="PhysicalLlmAccountingHandler.AmbiguousSendKey"/>. This is what keeps <c>LlmBudgetGuard.ObservedNoSpend</c> holding the reservation instead of reading THIS attempt's own — possibly clean — outcome as proof the call spent nothing.</summary>
     private static LlmApiException MarkIfAmbiguousSendPreceded(HttpRequestMessage request, LlmApiException fault) =>

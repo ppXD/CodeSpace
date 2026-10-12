@@ -15,6 +15,12 @@ public sealed class ProviderAuthResolver : IProviderAuthResolver, IScopedDepende
 
         if (!_strategies.TryGetValue(key, out var strategy)) throw new NotSupportedException($"No auth strategy registered for ({key.Provider}, {key.AuthType})");
 
-        return await strategy.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
+        var auth = await strategy.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
+
+        // Every token handed out here is one the provider may echo back in an error — remember it beside the instance
+        // so the resilience layer's SDK-error translation can strike it before a caller is shown the failure.
+        PresentedProviderCredentials.Remember(context.Instance, auth.Token);
+
+        return auth;
     }
 }

@@ -5,7 +5,7 @@ namespace CodeSpace.Messages.Dtos.ModelCredentials;
 /// <summary>
 /// A team's model credential as shown in the management UI — NEVER carries the secret. The key is
 /// surfaced only as a masked hint (last 4 chars, derived transiently on read, then discarded), exactly
-/// like the OpenAI / Anthropic consoles. <see cref="BaseUrl"/> is non-secret config and is shown verbatim.
+/// like the OpenAI / Anthropic consoles. <see cref="BaseUrl"/> is shown with its embedded credentials masked.
 /// </summary>
 public sealed record ModelCredentialSummary
 {
@@ -27,7 +27,11 @@ public sealed record ModelCredentialSummary
     /// </summary>
     public bool KeyUnreadable { get; init; }
 
-    /// <summary>Non-secret base-URL override (gateway / self-hosted endpoint), shown as-is. Null = the provider default.</summary>
+    /// <summary>
+    /// The base-URL override (gateway / self-hosted endpoint), with any credential it embeds masked — userinfo and
+    /// secret-named query values read <c>***</c> (<c>https://***:***@gw/v1?api-key=***</c>); a URL embedding none reads
+    /// exactly as stored. Sending this exact value back on update keeps the stored URL. Null = the provider default.
+    /// </summary>
     public string? BaseUrl { get; init; }
 
     public required CredentialStatus Status { get; init; }

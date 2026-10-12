@@ -60,7 +60,7 @@ public sealed class LlmApiException : Exception, IRetryClassifiedException
     /// <summary>The machine-actionable failure category callers branch on.</summary>
     public LlmErrorCategory Category { get; }
 
-    /// <summary>The raw provider error body (the rate-limit / context-length / auth message), shown verbatim to operators.</summary>
+    /// <summary>The provider error body (the rate-limit / context-length / auth message), shown to operators — verbatim but for any credential the request presented, which the transport strikes before this exists.</summary>
     public string ProviderMessage { get; }
 
     /// <summary>The honored <c>Retry-After</c> delay when the provider supplied one (a 429/503), else null.</summary>

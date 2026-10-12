@@ -6,6 +6,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.ModelCredentials;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using CodeSpace.Messages.Queries.ModelCredentials;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -96,10 +97,10 @@ public class ModelCredentialFlowTests
     public async Task Update_rotates_the_key_only_when_one_is_supplied()
     {
         var (userId, teamId) = await SeedTeamAsync();
-        var id = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "OpenAI", DisplayName = "Old name", ApiKey = "sk-old-aaaa" });
+        var id = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "OpenAI", DisplayName = "Old name", ApiKey = "sk-old-aaaa", BaseUrl = "https://gw/v1" });
 
-        // No key supplied → display name + base url change, key kept.
-        await SendAsync(userId, teamId, new UpdateModelCredentialCommand { Id = id, DisplayName = "New name", BaseUrl = "https://gw/v1" });
+        // No key supplied → display name + base url path change (same endpoint), key kept.
+        await SendAsync(userId, teamId, new UpdateModelCredentialCommand { Id = id, DisplayName = "New name", BaseUrl = "https://gw/v2" });
         (await DecryptKeyAsync(id)).ShouldBe("sk-old-aaaa", "a blank key on update keeps the existing one");
 
         // Key supplied → rotated.
@@ -109,6 +110,73 @@ public class ModelCredentialFlowTests
         var summary = (await SendAsync(userId, teamId, new ListModelCredentialsQuery())).ShouldHaveSingleItem();
         summary.DisplayName.ShouldBe("New name");
         summary.KeyHint.ShouldBe("····bbbb");
+    }
+
+    // ── The stored key is bound to the endpoint it was entered for (scheme, host, port) ──
+
+    [Fact]
+    public async Task Moving_the_endpoint_without_the_key_is_refused_and_changes_nothing()
+    {
+        var (userId, teamId) = await SeedTeamAsync();
+        var id = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "OpenAI", DisplayName = "Gateway", ApiKey = "sk-bound-0123456789", BaseUrl = "https://gw.example/v1" });
+
+        var refusal = await Should.ThrowAsync<ModelEndpointKeyRequiredException>(() => SendAsync(userId, teamId, new UpdateModelCredentialCommand { Id = id, DisplayName = "Repointed", BaseUrl = "https://attacker.example/v1" }));
+
+        refusal.CredentialId.ShouldBe(id);
+        var row = await LoadAsync(id);
+        row.BaseUrl.ShouldBe("https://gw.example/v1", "a refused repoint stores nothing — the key still answers only to its own endpoint");
+        row.DisplayName.ShouldBe("Gateway");
+        (await DecryptKeyAsync(id)).ShouldBe("sk-bound-0123456789");
+    }
+
+    [Theory]
+    [InlineData("sk-bound-0123456789", "https://attacker.example/v1", "sk-entered-with-the-move")]   // the key travels with the move because it was entered with it
+    [InlineData("sk-bound-0123456789", "https://gw.example/v2", null)]                              // path-only: same endpoint, key kept
+    [InlineData("sk-bound-0123456789", "https://GW.example:443/v1", null)]                          // same endpoint spelled differently
+    [InlineData(null, "https://other.example/v1", null)]                                            // keyless: nothing to carry
+    public async Task An_endpoint_change_that_carries_no_stored_key_elsewhere_is_accepted(string? addedKey, string nextUrl, string? updateKey)
+    {
+        var (userId, teamId) = await SeedTeamAsync();
+        var id = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "Custom", DisplayName = "Gateway", ApiKey = addedKey, BaseUrl = "https://gw.example/v1" });
+
+        await SendAsync(userId, teamId, new UpdateModelCredentialCommand { Id = id, DisplayName = "Gateway", BaseUrl = nextUrl, ApiKey = updateKey });
+
+        var row = await LoadAsync(id);
+        row.BaseUrl.ShouldBe(nextUrl);
+        if ((updateKey ?? addedKey) is { } expectedKey) (await DecryptKeyAsync(id)).ShouldBe(expectedKey);
+        else row.EncryptedApiKey.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task The_list_masks_embedded_credentials_and_sending_the_masked_value_back_keeps_the_stored_url()
+    {
+        const string stored = "https://svc:CANARY-MC-PW-01@gw.example/v1?api-key=CANARY-MC-Q-02&api-version=2024-01-01";
+        var (userId, teamId) = await SeedTeamAsync();
+        var id = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "Custom", DisplayName = "Embedded", ApiKey = "sk-embedded-0123456789", BaseUrl = stored });
+
+        var shown = (await SendAsync(userId, teamId, new ListModelCredentialsQuery())).ShouldHaveSingleItem().BaseUrl;
+        shown.ShouldBe("https://***:***@gw.example/v1?api-key=***&api-version=2024-01-01");
+
+        // What an edit form does: PUT back exactly what it was shown, with only the name changed.
+        await SendAsync(userId, teamId, new UpdateModelCredentialCommand { Id = id, DisplayName = "Renamed", BaseUrl = shown });
+
+        var row = await LoadAsync(id);
+        row.BaseUrl.ShouldBe(stored, "the masked round-trip keeps the real embedded credentials — the platform still needs them to call the gateway");
+        row.DisplayName.ShouldBe("Renamed");
+        (await DecryptKeyAsync(id)).ShouldBe("sk-embedded-0123456789");
+        (await SendAsync(userId, teamId, new ListModelCredentialsQuery())).ShouldHaveSingleItem().BaseUrl.ShouldNotContain("CANARY");
+    }
+
+    [Fact]
+    public async Task A_masked_placeholder_left_in_an_edited_url_is_refused_and_changes_nothing()
+    {
+        const string stored = "https://svc:CANARY-MC-PW-03@gw.example/v1";
+        var (userId, teamId) = await SeedTeamAsync();
+        var id = await SendAsync(userId, teamId, new AddModelCredentialCommand { Provider = "Custom", DisplayName = "Embedded", ApiKey = "sk-embedded-0123456789", BaseUrl = stored });
+
+        await Should.ThrowAsync<ArgumentException>(() => SendAsync(userId, teamId, new UpdateModelCredentialCommand { Id = id, DisplayName = "Embedded", BaseUrl = "https://***:***@gw.example/v2" }));
+
+        (await LoadAsync(id)).BaseUrl.ShouldBe(stored, "the placeholder is never stored as the credential");
     }
 
     [Fact]
@@ -219,6 +287,12 @@ public class ModelCredentialFlowTests
     {
         using var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin);
         return await scope.Resolve<IMediator>().Send(request);
+    }
+
+    private async Task<ModelCredential> LoadAsync(Guid id)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ModelCredential.AsNoTracking().SingleAsync(c => c.Id == id);
     }
 
     private async Task<string> DecryptKeyAsync(Guid id)

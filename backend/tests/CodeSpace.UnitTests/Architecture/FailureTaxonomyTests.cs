@@ -75,6 +75,9 @@ public class FailureTaxonomyTests
         FailureCodes.ProviderError.ShouldBe("provider_error");
         FailureCodes.RateLimited.ShouldBe("rate_limited");
         FailureCodes.CredentialDisconnected.ShouldBe("credential_disconnected");
+        FailureCodes.ModelEndpointKeyRequired.ShouldBe("model_endpoint_key_required");
+        FailureCodes.ProviderEndpointCredentialsBound.ShouldBe("provider_endpoint_credentials_bound");
+        FailureCodes.ProviderEndpointSecretRequired.ShouldBe("provider_endpoint_secret_required");
         FailureCodes.WorkflowDefinitionInvalid.ShouldBe("workflow_definition_invalid");
         FailureCodes.TaskRouteConfirmationRequired.ShouldBe("task_route_confirmation_required");
         FailureCodes.WorkspaceUnresolvable.ShouldBe("workspace_unresolvable");
