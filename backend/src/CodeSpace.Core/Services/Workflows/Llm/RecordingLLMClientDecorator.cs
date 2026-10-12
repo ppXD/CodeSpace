@@ -227,7 +227,7 @@ public class RecordingLLMClientDecorator : ILLMClient
     }
 
     /// <summary>Fold one redaction into THIS call's masking observation and hand its value back, so the flag the presence delta carries is a fact about the bytes that reached storage rather than about the configuration. A scope minted outside <see cref="LlmCallScope.ForOneCall"/> observes nothing and reads back verbatim, which is the conservative answer.</summary>
-    private static T Observe<T>(LlmCallScope scope, PersistenceRedaction<T> redaction) => scope.Masking is { } masking ? masking.Observe(redaction) : redaction.Value;
+    protected static T Observe<T>(LlmCallScope scope, PersistenceRedaction<T> redaction) => scope.Masking is { } masking ? masking.Observe(redaction) : redaction.Value;
 
     /// <summary>A plain-text field (a prompt / a text completion): the inline string when small, else a content-addressed <c>$artifact_id</c> ref. Null/empty rides as-is.</summary>
     protected static async Task<object?> OffloadTextAsync(LlmCallScope scope, string? text, CancellationToken cancellationToken)

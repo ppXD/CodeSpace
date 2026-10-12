@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
@@ -101,7 +102,7 @@ public sealed class NodeObservability : INodeObservability, INodeLossReporting
             // We still want to leave a trace so the timeline shows "this call was in flight when
             // we cancelled" — emit failed with the cancellation message, then re-throw.
             var duration = DateTimeOffset.UtcNow - startedAt;
-            await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, "Operation cancelled.", duration, category: null, CancellationToken.None).ConfigureAwait(false);
+            await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, persistedTarget, "Operation cancelled.", duration, category: null, CancellationToken.None).ConfigureAwait(false);
             throw;
         }
         catch (Exception ex)
@@ -133,7 +134,7 @@ public sealed class NodeObservability : INodeObservability, INodeLossReporting
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, target, "Operation cancelled.", DateTimeOffset.UtcNow - startedAt, category: null, CancellationToken.None).ConfigureAwait(false);
+                await _recordLogger.ExternalCallFailedAsync(_runId, _nodeId, correlationId, persistedTarget, "Operation cancelled.", DateTimeOffset.UtcNow - startedAt, category: null, CancellationToken.None).ConfigureAwait(false);
                 throw;
             }
             catch (Exception ex)
@@ -150,6 +151,7 @@ public sealed class NodeObservability : INodeObservability, INodeLossReporting
 
     public async Task<JsonElement> PersistArtifactAsync(string contentType, ReadOnlyMemory<byte> bytes, CancellationToken cancellationToken = default)
     {
+        bytes = RedactStoredContent(contentType, bytes);
         var artifactId = await _artifactStore.PutAsync(_teamId, bytes, contentType, cancellationToken).ConfigureAwait(false);
 
         // Build the canonical artifact-ref shape. Operators reading the ledger see:
@@ -164,6 +166,42 @@ public sealed class NodeObservability : INodeObservability, INodeLossReporting
         });
 
         return refJson;
+    }
+
+    /// <summary>
+    /// An artifact has no encrypted sidecar: what is stored is what every member downloads. So text and JSON are masked
+    /// the way the ledger is, JSON through its parsed values so an escaped spelling of a secret is caught as well. Opaque
+    /// bytes cannot be read for a secret and are stored as given; unchanged content keeps its exact bytes.
+    /// </summary>
+    private ReadOnlyMemory<byte> RedactStoredContent(string contentType, ReadOnlyMemory<byte> bytes)
+    {
+        if (IsJson(contentType) && TryParseJson(bytes) is { } json)
+        {
+            var redactedJson = _redactor.Redact(json);
+            return redactedJson.Changed ? Encoding.UTF8.GetBytes(redactedJson.Value.GetRawText()) : bytes;
+        }
+
+        if (!IsText(contentType)) return bytes;
+
+        var redactedText = _redactor.Redact(Encoding.UTF8.GetString(bytes.Span));
+        return redactedText.Changed ? Encoding.UTF8.GetBytes(redactedText.Value!) : bytes;
+    }
+
+    private static bool IsJson(string contentType) => contentType.Split(';')[0].Trim().EndsWith("json", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsText(string contentType) => IsJson(contentType) || contentType.StartsWith("text/", StringComparison.OrdinalIgnoreCase);
+
+    private static JsonElement? TryParseJson(ReadOnlyMemory<byte> bytes)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(bytes);
+            return document.RootElement.Clone();
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
     }
 
     /// <summary>

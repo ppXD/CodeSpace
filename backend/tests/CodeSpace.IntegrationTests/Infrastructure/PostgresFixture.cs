@@ -368,6 +368,14 @@ public sealed class PostgresFixture : IAsyncLifetime
             .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
             .SingleInstance();
 
+        // A streaming model that echoes a prompted value across the recorder's 32-KiB delta flush, for the
+        // interaction.delta redaction flows. Under its own tag; inert for every test that does not pin it.
+        builder.RegisterType<Workflows.Infrastructure.SecretEchoStreamingLlmClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.ILLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStructuredLLMClient>()
+            .As<CodeSpace.Core.Services.Workflows.Llm.IStreamingLLMClient>()
+            .SingleInstance();
+
         // A2: the model-plane OUTAGE fake, under its own tag ("TestFaulting"). Root-registered rather than
         // scope-overridden because the node holds ILLMClientRegistry from the root container — a scope override
         // would never reach it. Inert until a test dials its script, so sibling flows are unaffected.

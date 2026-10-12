@@ -141,4 +141,52 @@ public class SecretRedactorTests
         MemoryMarshal.TryGetArray(transformed.Bytes, out var segment).ShouldBeTrue();
         ReferenceEquals(segment.Array, source).ShouldBeTrue("a zero-pattern redactor must hand back the caller's own buffer, never a copy of it");
     }
+
+    private const string FrameKey = "sk-frame-BR6FZM29FGMQJMBZ262GMMFL6KSJH3ZJ";
+
+    /// <summary>
+    /// A line longer than one read pass arrives as a frame the reader cut (incomplete) and its continuation, and each
+    /// is persisted on its own — a native record, a transcript line. Exact matching per frame cannot see a key the cut
+    /// split, so the end of a cut frame that could start one is held back and redacted with its continuation. Every
+    /// split point of the line is tried, including several cuts in a row.
+    /// </summary>
+    [Fact]
+    public void Frame_stream_masks_a_key_split_across_cut_frames_wherever_the_cuts_land()
+    {
+        var redactor = new SecretRedactor(new[] { FrameKey });
+        var line = "xxxx " + FrameKey + " yyyy";
+
+        for (var first = 0; first <= line.Length; first++)
+        {
+            for (var second = first; second <= line.Length; second += 7)
+            {
+                var stream = redactor.CreateFrameStream();
+                var persisted = new[] { stream.Redact(line[..first], isComplete: false), stream.Redact(line[first..second], isComplete: false), stream.Redact(line[second..], isComplete: true) };
+
+                string.Concat(persisted).ShouldBe("xxxx *** yyyy", $"the frames concatenate to the masked line (cuts at {first} and {second})");
+                foreach (var frame in persisted)
+                    for (var start = 0; start + 6 <= FrameKey.Length; start++)
+                        frame.ShouldNotContain(FrameKey.Substring(start, 6), Case.Sensitive, $"a frame keeps '{FrameKey.Substring(start, 6)}' of the key (cuts at {first} and {second})");
+            }
+        }
+    }
+
+    [Fact]
+    public void Frame_stream_holds_back_only_what_a_cut_frame_could_still_turn_into_a_key()
+    {
+        var stream = new SecretRedactor(new[] { FrameKey }).CreateFrameStream();
+
+        stream.Redact("progress sk-fr", isComplete: false).ShouldBe("progress ", "the start of the key is held for the continuation");
+        stream.Redact("ame-nope", isComplete: false).ShouldBe("sk-frame-nope", "a continuation that does not finish the key releases the held text verbatim");
+        stream.Redact("done sk-", isComplete: true).ShouldBe("done sk-", "a complete frame ends its line: nothing can continue it, so nothing is held");
+    }
+
+    [Fact]
+    public void Frame_stream_with_no_secrets_passes_every_frame_through()
+    {
+        var stream = SecretRedactor.None.CreateFrameStream();
+        const string frame = "an incomplete frame";
+
+        ReferenceEquals(stream.Redact(frame, isComplete: false), frame).ShouldBeTrue("a run with nothing to mask must not copy its frames");
+    }
 }

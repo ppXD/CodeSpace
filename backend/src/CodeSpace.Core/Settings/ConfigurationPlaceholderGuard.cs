@@ -20,8 +20,10 @@ namespace CodeSpace.Core.Settings;
 ///
 /// <para>So an unrendered placeholder is refused everywhere, not only in Production: it is never a
 /// value anyone intended, and the environment it appears in does not change that. The failure names
-/// the key and shows the value, which is safe — a template is not a secret, and it is precisely the
-/// text the operator needs to find in their release definition.</para>
+/// the key and the placeholders, the text the operator searches their release definition for, and
+/// never the value: a partly rendered value (a connection string whose password was substituted and
+/// whose database name was not) carries a real credential beside the template, and this message is
+/// written to stderr before logging exists.</para>
 /// </summary>
 public static class ConfigurationPlaceholderGuard
 {
@@ -50,9 +52,9 @@ public static class ConfigurationPlaceholderGuard
         {
             if (string.IsNullOrEmpty(value)) continue;
 
-            var match = Unrendered.Match(value);
+            var placeholders = Unrendered.Matches(value).Select(match => match.Value).Distinct(StringComparer.Ordinal).ToList();
 
-            if (match.Success) violations.Add($"{key} = {value}   (unrendered {Describe(match.Value)})");
+            if (placeholders.Count > 0) violations.Add($"{key} contains {string.Join(", ", placeholders)}   (unrendered {Describe(placeholders[0])})");
         }
 
         return violations;

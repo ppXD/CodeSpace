@@ -1,6 +1,7 @@
 using System.Buffers;
 using System.Security.Cryptography;
 using System.Text;
+using CodeSpace.Core.Services.Redaction;
 
 namespace CodeSpace.Core.Services.Agents;
 
@@ -80,6 +81,41 @@ public sealed class SecretRedactor
     /// <see cref="SecretUtf8Redaction.SourceBytesConsumed"/> source bytes with each transformed result.
     /// </summary>
     public SecretUtf8RedactionStream CreateUtf8Stream() => new(_secrets);
+
+    /// <summary>
+    /// Creates a stateful redactor for decoded output frames, each persisted on its own (a native record, a transcript
+    /// line). A line longer than one read pass arrives as a frame the reader CUT — marked incomplete — and its
+    /// continuation; exact matching per frame cannot see a secret the cut split, so the end of a cut frame that a secret
+    /// could still run across is held back and redacted together with the frame that continues it.
+    /// </summary>
+    public SecretFrameRedactionStream CreateFrameStream() => new(this);
+
+    /// <summary>How much of <paramref name="text"/>, a text that may still continue, can be redacted on its own (<see cref="SecretBoundary.SettledLength"/>).</summary>
+    internal int SettledLength(string text) => SecretBoundary.SettledLength(text, _secrets);
+}
+
+public sealed class SecretFrameRedactionStream
+{
+    private readonly SecretRedactor _redactor;
+    private string _carry = "";
+
+    internal SecretFrameRedactionStream(SecretRedactor redactor) => _redactor = redactor;
+
+    /// <summary>
+    /// The redacted text to persist for one frame: the end held back from the cut frame before it, then this frame —
+    /// all of it when the frame ends its line, and when it was cut only what no secret can still run across, the rest
+    /// held for the frame that continues it. A stream that stops on a cut frame never persists what it held, so the
+    /// frames persisted always concatenate to a prefix of the line, redacted.
+    /// </summary>
+    public string Redact(string frame, bool isComplete)
+    {
+        var text = _carry + frame;
+        var settled = isComplete ? text.Length : _redactor.SettledLength(text);
+
+        _carry = text[settled..];
+
+        return _redactor.Redact(text[..settled]);
+    }
 }
 
 public sealed class SecretUtf8RedactionStream
