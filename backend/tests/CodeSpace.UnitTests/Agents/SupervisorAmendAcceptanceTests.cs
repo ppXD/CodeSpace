@@ -34,13 +34,48 @@ public class SupervisorAmendAcceptanceTests
 
         var question = JsonDocument.Parse(decision.PayloadJson!).RootElement.GetProperty("question").GetString()!;
         question.ShouldContain("AMEND subtask 's1'", customMessage: "the card names the target");
-        question.ShouldContain("sh check.sh", customMessage: "the card quotes the proposed check");
+        question.ShouldContain("""["sh","check.sh"]""", customMessage: "the card quotes the proposed check as the argv the grader would spawn");
         question.ShouldContain(SupervisorAmendAcceptance.AmendMarker, customMessage: "the marker is the card's identity");
 
         var readBack = SupervisorAmendAcceptance.ReadAmend(decision.PayloadJson)!;
         readBack.SubtaskId.ShouldBe("s1", "the STRUCTURED proposal rides the card — the co-sign overlay reads it back, never re-parsing prose");
         readBack.Waive.ShouldBeFalse();
         readBack.Acceptance!.Command.ShouldBe(new[] { "sh", "check.sh" });
+    }
+
+    [Theory]
+    [InlineData(new[] { " ", "dotnet", "test" }, """[" ","dotnet","test"]""", "a blank program reads as one, never trimmed into `dotnet test` for the human who co-signs it")]
+    [InlineData(new[] { "dotnet", "test", "--filter", "Category=Unit|Category=Smoke" }, """["dotnet","test","--filter","Category=Unit|Category=Smoke"]""", "a pipe inside an argument is a character, not a pipeline")]
+    [InlineData(new[] { "echo", "it's & <b> +1" }, """["echo","it's & <b> +1"]""", "what the default encoder would turn into \\u00XX codes")]
+    [InlineData(new[] { "sh", "-c", "a\nb" }, """["sh","-c","a\nb"]""", "a newline stays a visible escape, so the card keeps the line structure it was written with")]
+    [InlineData(new[] { "custom-check", "", "  ", "quoted argument" }, """["custom-check","","  ","quoted argument"]""", "empty, blank and space-bearing elements")]
+    public void The_card_quotes_the_proposed_check_as_the_argv_the_grader_would_spawn_and_nothing_else(string[] argv, string expected, string what)
+    {
+        var decision = SupervisorAmendAcceptance.IntoAskHuman(Amend(spec: new SupervisorAcceptanceSpec { Command = argv }));
+
+        var question = JsonDocument.Parse(decision.PayloadJson!).RootElement.GetProperty("question").GetString()!;
+
+        question.ShouldContain($"\nProposed check: {expected}\n{SupervisorAmendAcceptance.AmendMarker}", Case.Sensitive,
+            customMessage: $"{what} — the grader spawns this argv with NO shell, so the card is the array itself between its label and the marker, the same line the supervisor prompt shows");
+    }
+
+    [Theory]
+    [InlineData(0, false)]   // exactly at the card's cap — verbatim, no ellipsis
+    [InlineData(1, true)]    // one over — cut at the cap and marked with an ellipsis, like the reason beside it
+    public void The_proposed_check_is_capped_like_the_reason_beside_it(int overTheCap, bool cut)
+    {
+        // A one-element argv is four characters of JSON punctuation (["…"]) around its text, so the line is exactly that long.
+        var element = new string('x', SupervisorAmendAcceptance.MaxQuotedChars + overTheCap - 4);
+        var json = $"[\"{element}\"]";
+
+        var decision = SupervisorAmendAcceptance.IntoAskHuman(Amend(spec: new SupervisorAcceptanceSpec { Command = new[] { element } }));
+
+        var question = JsonDocument.Parse(decision.PayloadJson!).RootElement.GetProperty("question").GetString()!;
+
+        var shown = cut ? json[..SupervisorAmendAcceptance.MaxQuotedChars] + "…" : json;
+
+        question.ShouldContain($"\nProposed check: {shown}\n{SupervisorAmendAcceptance.AmendMarker}", Case.Sensitive,
+            customMessage: "the argv is model-authored and unbounded, and the card is a headline — a longer line is cut and marked, never left to push the marker off the card");
     }
 
     [Fact]

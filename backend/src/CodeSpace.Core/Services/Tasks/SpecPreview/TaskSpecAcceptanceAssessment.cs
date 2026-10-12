@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Contracts;
 using CodeSpace.Messages.Tasks;
 
@@ -15,7 +16,7 @@ internal static class TaskSpecAcceptanceAssessment
         var reason = "Source support is unknown; this proposal is not prefilled as a mandatory check.";
         var status = TaskSpecEvidenceStatus.Unknown;
         var source = TaskSpecCheckSource.ProposedUnverified;
-        var validCommand = argv.Length is > 0 and <= 256 && !string.IsNullOrWhiteSpace(argv[0]) && argv.All(t => t is not null && !t.Contains('\0'));
+        var validCommand = argv.Length <= 256 && AcceptanceArgv.NormalizeOrNull(argv) is not null;
         var citations = review?.Citations ?? [];
         var validCitations = context is not null && citations.Count is > 0 and <= 8;
         foreach (var citation in citations.Take(8))

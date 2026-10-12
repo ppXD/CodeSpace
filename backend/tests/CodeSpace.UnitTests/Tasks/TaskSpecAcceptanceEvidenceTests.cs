@@ -93,6 +93,24 @@ public sealed class TaskSpecAcceptanceEvidenceTests
         result.AcceptanceCriteria.ShouldBe(["The report satisfies the user's requirements."]);
     }
 
+    [Theory]
+    [InlineData(256, true)]    // exactly at the bound — adopted
+    [InlineData(257, false)]   // one over — refused as malformed, whatever the review says
+    public void A_proposed_argv_is_adopted_up_to_256_tokens_and_refused_beyond(int tokens, bool adopted)
+    {
+        var result = TaskSpecCompiler.ToSuggestion(Compilation() with { AcceptanceChecks = Enumerable.Repeat("custom-audit", tokens).ToArray() }, Context(TaskSpecRepositoryState.NotRequested), Review("user-explicit", "supported", "goal", Goal))!;
+
+        if (adopted)
+        {
+            result.AcceptanceProposal!.Status.ShouldBe(TaskSpecEvidenceStatus.Supported, "a well-formed argv at the bound passes the shared rule and the bound together");
+            result.AcceptanceChecks.Count.ShouldBe(tokens);
+            return;
+        }
+
+        result.AcceptanceChecks.ShouldBeEmpty();
+        result.AcceptanceProposal!.Reason.ShouldContain("malformed", customMessage: "the bound refuses it as malformed, not for some other reason");
+    }
+
     [Fact]
     public void Legacy_wire_json_leaves_evidence_and_usage_unknown_and_new_proposal_roundtrips_without_a_verified_claim()
     {

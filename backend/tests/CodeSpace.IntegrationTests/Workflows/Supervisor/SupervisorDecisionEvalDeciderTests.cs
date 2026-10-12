@@ -154,6 +154,31 @@ public class SupervisorDecisionEvalDeciderTests
         decision.RetryTargetReasked.ShouldBeTrue("…and the decision says it cost a second round-trip, so a scored run can be told apart from a clean one");
     }
 
+    /// <summary>
+    /// The operator-floor block's effect on STOPPING is measured here only while the prompt the REAL decider puts on the
+    /// wire for a stop-only tape actually carries the floor — the fidelity corpus pins <c>BuildUserPromptForTest</c>, and this
+    /// is the same claim at the eval's own grain: drive, see what the model was shown, score. <c>clean-integration</c> accepts
+    /// nothing but a stop, so a model that reads the block's "drive the work until it passes" as a reason to keep working
+    /// fails it — and the canned stop still passes with the floor in front of it, so the tape's right answer is unmoved.
+    /// </summary>
+    [Fact]
+    public async Task The_stop_only_scenario_is_decided_under_the_operator_floor_block()
+    {
+        var scenario = Scenario("clean-integration");
+        var client = new CannedStructuredClient(CorrectDecisionJson(scenario.Name));
+
+        var decision = await DecideAsync(scenario, client);
+
+        var shown = client.LastUserPrompt.ShouldNotBeNull("the decider never asked the model anything");
+
+        shown.ShouldContain(LlmSupervisorDecider.OperatorFloorHeader, Case.Sensitive,
+            "the scenario that measures what the floor block does to a stop must show the model the floor it is graded under");
+        shown.ShouldContain($"""{LlmSupervisorDecider.OperatorFloorHeader}{Environment.NewLine}  ["dotnet","test"]{Environment.NewLine}""", Case.Sensitive,
+            "…and the argv itself, on the line right under the header — a floor block that lost its argv tells the model a check runs without saying which");
+        scenario.AcceptedKinds.ShouldBe([SupervisorDecisionKinds.Stop], "the floor's presence must not widen or move the only right answer on this tape");
+        SupervisorDecisionEval.Score(scenario, decision).Pass.ShouldBeTrue("a stop over a clean, fully integrated tape is still the right answer with the operator floor on the wire");
+    }
+
     private static SupervisorGoldenScenario Scenario(string name) => SupervisorDecisionGoldenScenarios.All.Single(s => s.Name == name);
 
     /// <summary>Drive the real decider over a SEQUENCE of replies — the payload-less first reply then the correction — so the eval exercises the coherence gate's re-ask, not just the happy projection.</summary>
@@ -165,9 +190,11 @@ public class SupervisorDecisionEvalDeciderTests
         return await decider.DecideAsync(scenario.Context, CancellationToken.None);
     }
 
-    private static async Task<SupervisorDecision> DecideAsync(SupervisorGoldenScenario scenario, string cannedModelJson)
+    private static Task<SupervisorDecision> DecideAsync(SupervisorGoldenScenario scenario, string cannedModelJson) => DecideAsync(scenario, new CannedStructuredClient(cannedModelJson));
+
+    private static async Task<SupervisorDecision> DecideAsync(SupervisorGoldenScenario scenario, CannedStructuredClient client)
     {
-        var registry = new LLMClientRegistry(new ILLMClient[] { new CannedStructuredClient(cannedModelJson) });
+        var registry = new LLMClientRegistry(new ILLMClient[] { client });
         var decider = new LlmSupervisorDecider(registry, new StubPoolSelector(CannedProvider), new CodeSpace.Core.Services.Agents.AgentHarnessRegistry(System.Array.Empty<CodeSpace.Core.Services.Agents.IAgentHarness>()), RealModelLiveWire.Personas(), new InMemoryTapeSummaryStore(), new NullRepoGrounding(), NullLogger<LlmSupervisorDecider>.Instance);
 
         return await decider.DecideAsync(scenario.Context, CancellationToken.None);
@@ -224,10 +251,18 @@ public class SupervisorDecisionEvalDeciderTests
         private readonly JsonElement _json;
         public CannedStructuredClient(string modelJson) => _json = JsonDocument.Parse(modelJson).RootElement.Clone();
 
+        /// <summary>The user prompt of the last request — what the model was actually shown.</summary>
+        public string? LastUserPrompt { get; private set; }
+
         public string Provider => CannedProvider;
         public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken cancellationToken) => throw new NotSupportedException("the eval uses the structured path only");
-        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken) =>
-            Task.FromResult(new StructuredLLMCompletion { Json = _json, Model = request.Model });
+
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken cancellationToken)
+        {
+            LastUserPrompt = request.UserPrompt;
+
+            return Task.FromResult(new StructuredLLMCompletion { Json = _json, Model = request.Model });
+        }
     }
 
     /// <summary>An <see cref="IStructuredLLMClient"/> that walks a fixed sequence of replies (the last one repeats) — the seam a bounded repair round-trip is visible at.</summary>
