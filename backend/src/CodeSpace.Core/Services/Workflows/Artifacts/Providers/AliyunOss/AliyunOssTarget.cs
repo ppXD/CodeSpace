@@ -45,6 +45,33 @@ internal sealed record AliyunOssTarget
     }
 
     /// <summary>
+    /// The bucket namespace this target addresses, spelled one way: the canonical configuration every spelling that
+    /// reaches the same bucket and prefix projects to.
+    ///
+    /// <para>The host is only a ROUTE to a bucket: the public, <c>-internal</c> VPC and accelerate hosts, with or
+    /// without the <c>https://</c> scheme, all reach the bucket of one region. A custom domain or proxy cannot say
+    /// which bucket it fronts, and an identity that cannot tell two routes apart must merge them rather than split
+    /// them; OSS bucket names are unique service-wide and every request is signed for the bucket's region, so the one
+    /// OSS bucket any route can reach is that region's bucket of that name. So the identity names the region's public
+    /// host whatever host was written. An empty key prefix is the bucket root and is spelled by leaving it out. A
+    /// configuration already written this way projects to exactly itself, which keeps the fingerprint every such
+    /// revision already stored.</para>
+    /// </summary>
+    public JsonElement NamespaceConfiguration()
+    {
+        var namespaceConfiguration = new SortedDictionary<string, string>(StringComparer.Ordinal)
+        {
+            ["bucket"] = Bucket,
+            ["endpoint"] = $"{ServiceHostPrefix}{Region}{ServiceDomainSuffix}",
+        };
+
+        if (KeyPrefix.Length > 0) namespaceConfiguration["keyPrefix"] = KeyPrefix;
+
+        using var document = JsonDocument.Parse(JsonSerializer.Serialize(namespaceConfiguration));
+        return document.RootElement.Clone();
+    }
+
+    /// <summary>
     /// Projects a caller's object key onto a bucket key, refusing anything that could escape the profile's prefix.
     /// Traversal and empty segments are rejected rather than normalized so two different caller keys can never
     /// collapse onto one stored object.

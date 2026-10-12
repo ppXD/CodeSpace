@@ -7,8 +7,14 @@ namespace CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 /// driver or activate it through <see cref="ArtifactStore"/>: that store continues to receive the convention-registered
 /// <see cref="IArtifactBlobBackend"/> exactly as before until the profile/runtime cutover lands.
 /// </summary>
-public sealed class LocalRwxStorageProviderModule : IStorageProviderModule, IStorageProviderTeamNamespace
+public sealed class LocalRwxStorageProviderModule : IStorageProviderModule, IStorageProviderTeamNamespace, IStorageProviderPhysicalObjects
 {
+    /// <summary>
+    /// The directory beneath the root that <see cref="LocalRwxArtifactStorageDriver"/> keeps every object in
+    /// (<c>TryResolveObjectPath</c>); restated here, and pinned against the real driver by a unit test.
+    /// </summary>
+    private const string ObjectsDirectory = "objects";
+
     private static readonly JsonElement Config = ParseSchema("""
         {
           "$schema": "https://json-schema.org/draft/2020-12/schema",
@@ -52,6 +58,12 @@ public sealed class LocalRwxStorageProviderModule : IStorageProviderModule, ISto
         | StorageProviderCapabilities.Delete
         | StorageProviderCapabilities.HealthProbe;
     public Type FactoryType => typeof(LocalRwxArtifactStorageDriverFactory);
+
+    /// <summary>The directory the root reaches, not the text that names it: see <see cref="LocalRootPath"/>.</summary>
+    public JsonElement GetNamespaceConfiguration(JsonElement nonSecretConfiguration) => LocalRootPath.NamespaceConfiguration(nonSecretConfiguration);
+
+    /// <summary>The file the driver's delete of that key would unlink, every link on the way to it followed: see <see cref="LocalRootPath.ObjectPath"/>.</summary>
+    public string PhysicalObject(JsonElement nonSecretConfiguration, string objectKey) => LocalRootPath.ObjectPath(nonSecretConfiguration, ObjectsDirectory, objectKey);
 
     private static JsonElement ParseSchema(string json)
     {

@@ -44,6 +44,53 @@ internal static class StorageProfileRules
         return "sha256:" + Convert.ToHexString(SHA256.HashData(input)).ToLowerInvariant();
     }
 
+    /// <summary>
+    /// The identity of the PHYSICAL namespace a configuration reaches: the provider's own canonical projection of it,
+    /// hashed. The one derivation behind the fingerprint a revision stores and behind the retention reaper's later
+    /// comparison of two revisions' objects (<see cref="TryObjectIdentity"/>), so the two cannot disagree about what
+    /// "the same namespace" means.
+    /// </summary>
+    public static string NamespaceFingerprint(IStorageProviderModule module, JsonElement nonSecretConfiguration)
+    {
+        var namespaceConfig = module.GetNamespaceConfiguration(nonSecretConfiguration);
+        if (namespaceConfig.ValueKind != JsonValueKind.Object)
+            throw new InvalidOperationException($"Storage provider '{module.TypeKey}' namespace configuration projection must be a JSON object.");
+
+        return NamespaceFingerprint(module.TypeKey, namespaceConfig);
+    }
+
+    /// <summary>
+    /// WHICH physical object a STORED placement's key reaches, derived now from its revision's configuration rather
+    /// than read from the fingerprint the revision stored, or null when it cannot be derived: the provider is not
+    /// registered in this build, the configuration no longer parses, or the provider cannot place the key.
+    ///
+    /// <para>A provider that can name the object itself (<see cref="IStorageProviderPhysicalObjects"/>) is asked for it,
+    /// because for a filesystem a link beneath the root can carry a key out of the namespace its root names. Every other
+    /// provider's object is its namespace and the key together.</para>
+    ///
+    /// <para>Null is "unknown", never "different". A caller comparing objects must treat it as possibly the same object
+    /// as anything at that key, which is why every failure lands here instead of propagating: the comparison this feeds
+    /// decides whether bytes are deleted, and there only a kept byte is a safe mistake.</para>
+    /// </summary>
+    public static string? TryObjectIdentity(IStorageProviderModuleCatalog catalog, string providerTypeKey, string nonSecretConfigJson, string objectKey)
+    {
+        try
+        {
+            var module = catalog.Get(providerTypeKey);
+            if (module == null) return null;
+
+            using var configuration = JsonDocument.Parse(nonSecretConfigJson);
+            return ObjectIdentity(module, configuration.RootElement, objectKey);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static string ObjectIdentity(IStorageProviderModule module, JsonElement configuration, string objectKey) =>
+        module is IStorageProviderPhysicalObjects physical ? physical.PhysicalObject(configuration, objectKey) : $"{NamespaceFingerprint(module, configuration)}/{objectKey}";
+
     public static bool TryParseCredentialRef(string? value, out StorageProfileCredentialReference reference)
     {
         reference = default;

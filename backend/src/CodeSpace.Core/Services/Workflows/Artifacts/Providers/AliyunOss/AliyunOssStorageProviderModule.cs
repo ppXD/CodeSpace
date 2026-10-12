@@ -120,6 +120,12 @@ public sealed class AliyunOssStorageProviderModule : IStorageProviderModule, ISt
     /// </summary>
     public void EnsureConfigurationReadable(JsonElement nonSecretConfiguration) => AliyunOssTarget.Parse(nonSecretConfiguration);
 
+    /// <summary>
+    /// The bucket and prefix the configuration reaches, read through the same parser activation uses: a configuration
+    /// the driver could never open has no namespace to name, so it is refused rather than given an identity.
+    /// </summary>
+    public JsonElement GetNamespaceConfiguration(JsonElement nonSecretConfiguration) => AliyunOssTarget.Parse(nonSecretConfiguration).NamespaceConfiguration();
+
     private static JsonElement ParseSchema(string json)
     {
         using var document = JsonDocument.Parse(json);

@@ -1,5 +1,7 @@
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Messages.Artifacts;
 using CodeSpace.Messages.Constants;
@@ -60,11 +62,14 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     private readonly IArtifactBlobPurge? _purge;
     private readonly IArtifactCasPurgeCoordinator _routedPurge;
 
+    /// <summary>The provider modules a routed placement's object is derived through when its key collides with another's.</summary>
+    private readonly IStorageProviderModuleCatalog _modules;
+
     private readonly ILogger<ArtifactRetentionReaper> _logger;
     private readonly ArtifactRetentionReaperOptions _options;
 
     public ArtifactRetentionReaper(DbContextOptions<CodeSpaceDbContext> dbOptions, IArtifactReferenceOracle oracle, IArtifactBlobBackend blobs,
-        IArtifactCasPurgeCoordinator routedPurge, ILogger<ArtifactRetentionReaper> logger) : this(new ArtifactRetentionReaperServices(dbOptions, oracle, blobs, routedPurge, logger), Defaults) { }
+        IArtifactCasPurgeCoordinator routedPurge, IStorageProviderModuleCatalog modules, ILogger<ArtifactRetentionReaper> logger) : this(new ArtifactRetentionReaperServices(dbOptions, oracle, blobs, routedPurge, modules, logger), Defaults) { }
 
     internal ArtifactRetentionReaper(ArtifactRetentionReaperServices services, ArtifactRetentionReaperOptions options)
     {
@@ -75,6 +80,7 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
         _oracle = services.Oracle;
         _purge = services.Blobs as IArtifactBlobPurge;
         _routedPurge = services.RoutedPurge;
+        _modules = services.Modules;
         _logger = services.Logger;
         _options = options;
     }
@@ -447,14 +453,24 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     /// The routed arm of the same sharing question the local arm asks below, and it has to be asked for the same
     /// reason: <c>ArtifactStore.ObjectKeyFor</c> builds <c>workflow-artifacts/{aa}/{bb}/{sha256}</c> with NO team
     /// segment, so two objects holding identical content land on the same key. Whether that key is the same PHYSICAL
-    /// object then depends entirely on whether the two profile revisions name the same namespace — which is what
-    /// <c>storage_profile_revision.namespace_fingerprint</c> identifies, and the only thing that identifies it.
+    /// object then depends on where each profile revision's key actually leads.
     ///
-    /// <para>Comparing the object key ALONE would be unsound in the safe direction but useless in practice: every team
-    /// storing the same bytes shares a key, so the reaper would refuse to collect any deduplicated content even when
-    /// the two teams are in different buckets. Comparing the fingerprint alone would be unsound in the other
-    /// direction. Both together are the question "is this the same object", which is the one the local arm answers
-    /// with a <c>storage_url</c> comparison because there the url already carries both.</para>
+    /// <para>That object is re-derived HERE, from each revision's configuration through its own provider module
+    /// (<see cref="StorageProfileRules.TryObjectIdentity"/>), and never read from
+    /// <c>storage_profile_revision.namespace_fingerprint</c>. The stored column cannot answer: revisions are immutable,
+    /// and every one admitted before namespaces were canonical hashed the configuration exactly as typed, so a root
+    /// spelled <c>R</c> by one team and <c>R/</c> by another stored two fingerprints for one directory — and this probe,
+    /// reading them, let one team's sweep delete the other team's live bytes. Nor can any namespace, for a filesystem:
+    /// a link beneath a root the collector owns outright (<c>objects</c>, or any directory below it) carries its key
+    /// into the victim's directory, so a local provider is asked for the file the key reaches, every link on the way
+    /// followed as the operating system follows it, at the moment of the sweep.</para>
+    ///
+    /// <para>A placement whose object cannot be derived — a provider this build does not register, a configuration
+    /// it can no longer read — is "unknown", and unknown collides with everything at its key. Comparing the object key
+    /// ALONE would be unsound in the safe direction but useless in practice: every team storing the same bytes shares
+    /// a key, so the reaper would refuse to collect any deduplicated content even when the two teams are in different
+    /// buckets. The key and the namespace together are the question "is this the same object", which is the one the
+    /// local arm answers with a <c>storage_url</c> comparison because there the url already carries both.</para>
     ///
     /// <para>Deliberately NOT team-scoped, and deliberately not filtered by <see cref="ArtifactLocationState"/>. A
     /// location whose bytes are already Purged cannot really be harmed, so including it only ever costs a kept
@@ -466,31 +482,46 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
     /// commits. Closing it would need the placement path to hold a lock across its transfer and its location insert,
     /// which this lane does not change.</para>
     /// </summary>
-    private static async Task<ArtifactPurgePath> RoutedPurgePathAsync(CodeSpaceDbContext db, Guid objectId, CancellationToken cancellationToken)
+    private async Task<ArtifactPurgePath> RoutedPurgePathAsync(CodeSpaceDbContext db, Guid objectId, CancellationToken cancellationToken)
     {
-        var mine = await db.ArtifactLocation.AsNoTracking()
-            .Where(location => location.ArtifactObjectId == objectId)
-            .Join(db.StorageProfileRevision.AsNoTracking(), location => location.StorageProfileRevisionId, revision => revision.Id,
-                (location, revision) => new PlacedAt(location.ObjectKey, revision.NamespaceFingerprint))
-            .Distinct()
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
+        var mine = await StoredPlacementsAsync(db, db.ArtifactLocation.AsNoTracking().Where(location => location.ArtifactObjectId == objectId), cancellationToken).ConfigureAwait(false);
 
         if (mine.Count == 0) return ArtifactPurgePath.Routed;
 
         var keys = mine.Select(placed => placed.ObjectKey).Distinct().ToList();
+        var collisions = await StoredPlacementsAsync(db, db.ArtifactLocation.AsNoTracking().Where(location => location.ArtifactObjectId != objectId && keys.Contains(location.ObjectKey)), cancellationToken).ConfigureAwait(false);
 
-        var collisions = await db.ArtifactLocation.AsNoTracking()
-            .Where(location => location.ArtifactObjectId != objectId && keys.Contains(location.ObjectKey))
+        if (collisions.Count == 0) return ArtifactPurgePath.Routed;
+
+        return SharesAnObject(Identify(mine), Identify(collisions)) ? ArtifactPurgePath.RoutedObjectShared : ArtifactPurgePath.Routed;
+    }
+
+    private static async Task<List<StoredPlacement>> StoredPlacementsAsync(CodeSpaceDbContext db, IQueryable<ArtifactLocation> locations, CancellationToken cancellationToken) =>
+        await locations
             .Join(db.StorageProfileRevision.AsNoTracking(), location => location.StorageProfileRevisionId, revision => revision.Id,
-                (location, revision) => new PlacedAt(location.ObjectKey, revision.NamespaceFingerprint))
+                (location, revision) => new StoredPlacement(location.ObjectKey, revision.ProviderTypeKey, revision.NonSecretConfigJson))
             .Distinct()
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return collisions.Any(mine.Contains) ? ArtifactPurgePath.RoutedObjectShared : ArtifactPurgePath.Routed;
-    }
+    /// <summary>Each placement's key beside the object it reaches today, derived through the provider that owns it.</summary>
+    private List<PlacedAt> Identify(List<StoredPlacement> placements) =>
+        placements.Select(placed => new PlacedAt(placed.ObjectKey, StorageProfileRules.TryObjectIdentity(_modules, placed.ProviderTypeKey, placed.NonSecretConfigJson, placed.ObjectKey))).ToList();
 
-    /// <summary>One physical destination: the key, plus the namespace identity that says WHICH store that key is inside.</summary>
-    private sealed record PlacedAt(string ObjectKey, string NamespaceFingerprint);
+    private static bool SharesAnObject(List<PlacedAt> mine, List<PlacedAt> collisions) => collisions.Any(other => mine.Any(own => own.IsOnePhysicalObjectWith(other)));
+
+    /// <summary>A location's key and its revision's configuration, as stored: the raw material of an object identity, not the identity itself.</summary>
+    private sealed record StoredPlacement(string ObjectKey, string ProviderTypeKey, string NonSecretConfigJson);
+
+    /// <summary>
+    /// One physical destination: the key, plus the identity of the object that key reaches. A null identity is one that
+    /// could not be derived, and it is treated as every object at that key at once: the only cost of that reading is a
+    /// kept byte.
+    /// </summary>
+    private sealed record PlacedAt(string ObjectKey, string? Object)
+    {
+        public bool IsOnePhysicalObjectWith(PlacedAt other) =>
+            ObjectKey == other.ObjectKey && (Object == null || other.Object == null || Object == other.Object);
+    }
 
     /// <summary>
     /// Applies the outcome under a proven claim. The COLLECT arm additionally re-asks the reference question inside this
@@ -729,6 +760,6 @@ public sealed class ArtifactRetentionReaper : IArtifactRetentionReaper
 }
 
 internal sealed record ArtifactRetentionReaperServices(DbContextOptions<CodeSpaceDbContext> DbOptions, IArtifactReferenceOracle Oracle,
-    IArtifactBlobBackend Blobs, IArtifactCasPurgeCoordinator RoutedPurge, ILogger<ArtifactRetentionReaper> Logger);
+    IArtifactBlobBackend Blobs, IArtifactCasPurgeCoordinator RoutedPurge, IStorageProviderModuleCatalog Modules, ILogger<ArtifactRetentionReaper> Logger);
 
 internal sealed record ArtifactRetentionReaperOptions(int BatchSize, int ClaimSize, int MaxAttempts, TimeSpan LeaseDuration, TimeSpan OperationTimeout, TimeSpan RetryDelay);

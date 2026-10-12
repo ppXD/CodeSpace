@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Backends;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Retention;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Core.Services.Workflows.Runtime;
@@ -67,13 +68,13 @@ public sealed class ArtifactRetentionPolicyTests
         var options = new ArtifactRetentionReaperOptions(batch, claim, attempts, TimeSpan.FromSeconds(leaseSeconds), TimeSpan.FromSeconds(operationSeconds), TimeSpan.FromMinutes(retryMinutes));
 
         Should.Throw<ArgumentOutOfRangeException>(() => new ArtifactRetentionReaper(new ArtifactRetentionReaperServices(
-            DbOptions(), Oracle(), Blobs(), Purge(), NullLogger<ArtifactRetentionReaper>.Instance), options));
+            DbOptions(), Oracle(), Blobs(), Purge(), Modules(), NullLogger<ArtifactRetentionReaper>.Instance), options));
     }
 
     [Fact]
     public void The_shipped_reaper_configuration_is_accepted()
     {
-        Should.NotThrow(() => new ArtifactRetentionReaper(DbOptions(), Oracle(), Blobs(), Purge(), NullLogger<ArtifactRetentionReaper>.Instance));
+        Should.NotThrow(() => new ArtifactRetentionReaper(DbOptions(), Oracle(), Blobs(), Purge(), Modules(), NullLogger<ArtifactRetentionReaper>.Instance));
     }
 
     [Fact]
@@ -171,6 +172,8 @@ public sealed class ArtifactRetentionPolicyTests
     private static IArtifactBlobBackend Blobs() => new LocalFileArtifactBlobBackend(Path.Combine(Path.GetTempPath(), $"artifact-retention-{Guid.NewGuid():N}"));
 
     private static IArtifactCasPurgeCoordinator Purge() => new RefusingCasPurgeCoordinator();
+
+    private static IStorageProviderModuleCatalog Modules() => new StorageProviderModuleCatalog([]);
 
     private static string FindRepoRoot()
     {

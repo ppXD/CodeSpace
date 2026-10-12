@@ -52,6 +52,9 @@ public sealed class LocalLegacyStorageProviderModule : IStorageProviderModule, I
     public StorageProviderCapabilities Capabilities => StorageProviderCapabilities.HealthProbe | StorageProviderCapabilities.StreamingRead;
     public Type FactoryType => typeof(LocalLegacyArtifactStorageDriverFactory);
 
+    /// <summary>The directory the root reaches, not the text that names it: see <see cref="LocalRootPath"/>.</summary>
+    public JsonElement GetNamespaceConfiguration(JsonElement nonSecretConfiguration) => LocalRootPath.NamespaceConfiguration(nonSecretConfiguration);
+
     public string? ResolveLegacyObjectKey(JsonElement nonSecretConfiguration, string sha256, string recordedLocator)
     {
         var key = LegacyLocalObjectKeys.For(sha256);

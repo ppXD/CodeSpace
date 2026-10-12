@@ -121,7 +121,7 @@ public sealed partial class LegacyPlacementAdoptionTests : IDisposable
             var blobs = new CountingBlobBackend(scope.Resolve<IArtifactBlobBackend>(), originalUrl);
             var routed = new TrackingCasPurgeCoordinator(scope.Resolve<IArtifactCasPurgeCoordinator>(), placement.ArtifactObjectId);
             var reaper = new ArtifactRetentionReaper(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactReferenceOracle>(),
-                blobs, routed, NullLogger<ArtifactRetentionReaper>.Instance);
+                blobs, routed, scope.Resolve<IStorageProviderModuleCatalog>(), NullLogger<ArtifactRetentionReaper>.Instance);
 
             await SweepUntilAsync(reaper, retained.ArtifactId, ArtifactRetentionState.Quarantined);
             await AgeQuarantineAsync(retained.ArtifactId, TimeSpan.FromDays(2));
@@ -645,7 +645,7 @@ public sealed partial class LegacyPlacementAdoptionTests : IDisposable
             {
                 var backend = new BlockingAfterDeleteBlobBackend(reaperScope.Resolve<IArtifactBlobBackend>(), deletion);
                 var reaper = new ArtifactRetentionReaper(reaperScope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), reaperScope.Resolve<IArtifactReferenceOracle>(),
-                    backend, reaperScope.Resolve<IArtifactCasPurgeCoordinator>(), NullLogger<ArtifactRetentionReaper>.Instance);
+                    backend, reaperScope.Resolve<IArtifactCasPurgeCoordinator>(), reaperScope.Resolve<IStorageProviderModuleCatalog>(), NullLogger<ArtifactRetentionReaper>.Instance);
                 sweep = reaper.SweepAsync(CancellationToken.None);
                 await deletion.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
                 File.Exists(new Uri(retained.StorageUrl).LocalPath).ShouldBeFalse("the reaper has removed bytes while its retention UPDATE lock is still held");
@@ -760,7 +760,7 @@ public sealed partial class LegacyPlacementAdoptionTests : IDisposable
             {
                 var backend = new BlockingAfterDeleteBlobBackend(reaperScope.Resolve<IArtifactBlobBackend>(), deletion);
                 var reaper = new ArtifactRetentionReaper(reaperScope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), reaperScope.Resolve<IArtifactReferenceOracle>(),
-                    backend, reaperScope.Resolve<IArtifactCasPurgeCoordinator>(), NullLogger<ArtifactRetentionReaper>.Instance);
+                    backend, reaperScope.Resolve<IArtifactCasPurgeCoordinator>(), reaperScope.Resolve<IStorageProviderModuleCatalog>(), NullLogger<ArtifactRetentionReaper>.Instance);
                 sweep = reaper.SweepAsync(CancellationToken.None);
                 await deletion.Started.Task.WaitAsync(TimeSpan.FromSeconds(10));
                 File.Exists(new Uri(retained.StorageUrl).LocalPath).ShouldBeFalse("retention removed the behind-cursor witness while its declaration lock remains held");

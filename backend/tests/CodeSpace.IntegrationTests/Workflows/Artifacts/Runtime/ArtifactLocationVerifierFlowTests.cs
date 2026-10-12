@@ -42,10 +42,8 @@ public sealed class ArtifactLocationVerifierFlowTests : IAsyncLifetime
         var world = await SeedStoredArtifactAsync();
         var before = (await LocationAsync(world)).VerifiedAt.ShouldNotBeNull();
 
-        var summary = await VerifyAsync();
+        var location = await VerifyUntilAsync(world, seen => seen.VerifiedAt > before, "re-verified");
 
-        summary.Checked.ShouldBeGreaterThanOrEqualTo(1);
-        var location = await LocationAsync(world);
         location.State.ShouldBe(ArtifactLocationState.Available);
         location.VerifiedAt.ShouldNotBeNull().ShouldBeGreaterThan(before);
     }
@@ -58,9 +56,8 @@ public sealed class ArtifactLocationVerifierFlowTests : IAsyncLifetime
         var world = await SeedStoredArtifactAsync();
         DeleteStoredObject(world);
 
-        await VerifyAsync();
+        var location = await VerifyUntilAsync(world, ArtifactLocationState.Missing);
 
-        var location = await LocationAsync(world);
         location.State.ShouldBe(ArtifactLocationState.Missing);
         location.LastErrorCode.ShouldBe("location-object-missing");
         location.LastErrorMessage.ShouldNotBeNullOrWhiteSpace("a demoted location must say what the destination answered");
@@ -79,9 +76,8 @@ public sealed class ArtifactLocationVerifierFlowTests : IAsyncLifetime
         var world = await SeedStoredArtifactAsync();
         OverwriteStoredObject(world, "a different object entirely");
 
-        await VerifyAsync();
+        var location = await VerifyUntilAsync(world, ArtifactLocationState.Corrupt);
 
-        var location = await LocationAsync(world);
         location.State.ShouldBe(ArtifactLocationState.Corrupt);
         location.LastErrorCode.ShouldBe("location-object-mismatch");
     }
@@ -133,8 +129,7 @@ public sealed class ArtifactLocationVerifierFlowTests : IAsyncLifetime
         // Moved rather than rewritten, so the object comes back byte-identical AND metadata-identical — the shape of a
         // destination that was briefly serving an incomplete view of itself, not of someone editing the bytes.
         File.Move(path, stashed);
-        await VerifyAsync();
-        (await LocationAsync(world)).State.ShouldBe(ArtifactLocationState.Missing);
+        await VerifyUntilAsync(world, ArtifactLocationState.Missing);
 
         File.Move(stashed, path);
 
@@ -155,9 +150,7 @@ public sealed class ArtifactLocationVerifierFlowTests : IAsyncLifetime
         // Missing it carries no risk of being a false demotion, and re-reading it would only invite flapping.
         var world = await SeedStoredArtifactAsync();
         OverwriteStoredObject(world, "a different object entirely");
-        await VerifyAsync();
-        (await LocationAsync(world)).State.ShouldBe(ArtifactLocationState.Corrupt);
-        var demoted = await LocationAsync(world);
+        var demoted = await VerifyUntilAsync(world, ArtifactLocationState.Corrupt);
 
         await VerifyAsync();
 
@@ -351,30 +344,45 @@ public sealed class ArtifactLocationVerifierFlowTests : IAsyncLifetime
     /// would be asserting that this row won a race it has no reason to win — and would get harder to satisfy as the
     /// suite grows.</para>
     /// </summary>
-    private async Task<ArtifactLocation> VerifyUntilAsync(StoredArtifact world, ArtifactLocationState state, TimeSpan? within = null)
+    private Task<ArtifactLocation> VerifyUntilAsync(StoredArtifact world, ArtifactLocationState state, TimeSpan? within = null) => VerifyUntilAsync(world, seen => seen.State == state, $"in state {state}", within);
+
+    /// <summary>
+    /// Sweeps until THIS test's location satisfies <paramref name="settled"/>. A row written moments ago is freshly
+    /// verified, so every location an earlier test left Available sorts ahead of it; one pass reaches it only while
+    /// fewer of those exist than the batch holds, which is a property of the suite, not of the verifier.
+    /// </summary>
+    private async Task<ArtifactLocation> VerifyUntilAsync(StoredArtifact world, Func<ArtifactLocation, bool> settled, string expectation, TimeSpan? within = null)
     {
         var deadline = DateTimeOffset.UtcNow + (within ?? TimeSpan.FromSeconds(10));
         ArtifactLocation? seen = null;
+        ArtifactLocationVerificationSummary? pass = null;
 
         while (DateTimeOffset.UtcNow < deadline)
         {
-            await VerifyAsync();
+            pass = await VerifyAsync();
             seen = await LocationAsync(world);
 
-            if (seen.State == state) return seen;
+            if (settled(seen)) return seen;
         }
 
         throw new Xunit.Sdk.XunitException(
-            $"The location for artifact {world.ArtifactId} never reached {state} (last seen {seen?.State.ToString() ?? "absent"}, "
-            + $"last error {seen?.LastErrorCode ?? "none"}). The sweep is deployment-wide and its recovery share is bounded, "
-            + "so check whether earlier tests left more Missing rows than that share holds.");
+            $"The location for artifact {world.ArtifactId} was never {expectation} (last seen {seen?.State.ToString() ?? "absent"}, "
+            + $"verified at {seen?.VerifiedAt?.ToString("O") ?? "never"}, last error {seen?.LastErrorCode ?? "none"}). The last pass checked "
+            + $"{pass?.Checked}: {pass?.Confirmed} confirmed, {pass?.Inconclusive} inconclusive, {pass?.Skipped} skipped. The sweep is "
+            + "deployment-wide and bounded, so check whether earlier tests left more rows ahead of this one than a batch holds.");
     }
 
+    /// <summary>
+    /// One pass at the verifier's own ceiling. A freshly written row sorts behind every row an earlier test left
+    /// Available, and a row whose destination that test deleted on cleanup never answers, so it never moves and holds
+    /// its place ahead of this one in every pass. The suite leaves dozens of those behind; a pass smaller than that
+    /// never reaches this test's row however often it runs.
+    /// </summary>
     private async Task<ArtifactLocationVerificationSummary> VerifyAsync()
     {
         using var scope = _fixture.BeginScope();
 
-        return await scope.Resolve<IArtifactLocationVerifier>().VerifyStaleAsync(100, CancellationToken.None);
+        return await scope.Resolve<IArtifactLocationVerifier>().VerifyStaleAsync(500, CancellationToken.None);
     }
 
     /// <summary>Runs the real verifier with an observer around only this test's exact destination.</summary>
