@@ -40,4 +40,7 @@ public sealed record LaunchTaskResult
 
     /// <summary>The external entity the task was launched from, when the seed carried one.</summary>
     public LinkedEntityRef? LinkedEntity { get; init; }
+
+    /// <summary>What the route did with each route-dependent operator control the launch carried — applied, clamped or not applicable, with the reason. A refused control never reaches a result: it stops the launch. Empty when the launch carried none.</summary>
+    public IReadOnlyList<LaunchControlDisposition> ControlDispositions { get; init; } = [];
 }

@@ -55,6 +55,7 @@ public sealed class AgentCodeNode : INodeRuntime
                 "model":          { "type": "string", "description": "Model id within the harness's catalog. Leave empty to use the persona's model, or the harness default.", "x-spotlight": 2 },
                 "modelCredentialId": { "type": "string", "format": "uuid", "x-selector": "modelCredential", "description": "Model credential the agent authenticates with. Leave empty to use the persona's default, or the team/operator default." },
                 "modelCredentialModelId": { "type": "string", "format": "uuid", "x-selector": "credentialedModel", "description": "Pick a specific model from a credential's maintained list — sets BOTH the model and its backing credential from one choice. Takes precedence over 'model' / 'modelCredentialId' above. Leave empty to use those loose fields." },
+                "allowedModelIds": { "type": "array", "items": { "type": "string", "format": "uuid" }, "description": "The operator's allowed model pool, as credentialed-model ids. Dispatch holds the agent to it: a model outside it, or one that can no longer run, moves to a pooled row and the move is named on the run's timeline; a pool with nothing runnable fails the run. Escalation never climbs outside it. Leave empty for the team's whole pool." },
                 "approvalConversationId": { "type": "string", "format": "uuid", "x-selector": "conversation", "description": "Conversation the run posts its tool-approval cards into. Leave empty for no approval surface." },
                 "tools":          { "type": "array", "items": { "type": "string" }, "description": "Tool allow-list the agent is restricted to (e.g. Read, Grep, Bash). Empty = the harness default. Added to (not replacing) the persona's tools; enforced by harnesses that support an allow-list (Claude Code), carried otherwise (Codex restricts via sandbox)." },
                 "runnerKind":     { "type": "string", "description": "Sandbox runner (e.g. \"local\"). Empty → the deployment default, set by the Agents:DefaultRunnerKind configuration key (Agents__DefaultRunnerKind in the environment); \"local\" when that is unset." },
@@ -148,6 +149,8 @@ public sealed class AgentCodeNode : INodeRuntime
 
         if (!TryReadModelCredentialModelId(context, out var modelCredentialModelId)) return Fail("Config 'modelCredentialModelId' must be a credentialed-model id (uuid).");
 
+        if (!TryReadAllowedModelIds(context.Config, out var allowedModelIds)) return Fail("Config 'allowedModelIds' must be an array of credentialed-model ids (uuid).");
+
         if (string.IsNullOrWhiteSpace(harness)) return Fail("Config 'harness' is required.");
 
         // A persona supplies the prompt floor (its system prompt), so 'goal' is only required without one.
@@ -182,6 +185,7 @@ public sealed class AgentCodeNode : INodeRuntime
             AgentDefinitionId = agentDefinitionId,
             ModelCredentialId = modelCredentialId,
             ModelCredentialModelId = modelCredentialModelId,
+            AllowedModelIds = allowedModelIds,
             Tools = ReadStringArray(context.Config, "tools"),
             RepositoryId = repositoryId,
             Workspace = workspace,
@@ -376,6 +380,11 @@ public sealed class AgentCodeNode : INodeRuntime
             // keeps its own code and stays retryable, because another worker may admit it.
             var argumentTooLong = exitReason == FailureCodes.SandboxArgumentTooLong;
 
+            // The same shape once more, from the pool's side: the run is bound to the operator's allowed model pool and
+            // nothing in that pool can run (every pooled model disabled, or its credential inactive). A respawn meets
+            // the SAME pool, so it is refused identically — retrying only buries the one fact the operator needs.
+            var modelPoolUnresolvable = exitReason == FailureCodes.AgentModelPoolUnresolvable;
+
             // D3: the third carve-out, and the only one that is not about the FAILURE's nature but about whether
             // anything can be done differently. A non-infra acceptance failure is a verdict the SAME model will
             // reproduce — which is why it is deterministic — but the finished attempt may have left a resolved
@@ -402,7 +411,7 @@ public sealed class AgentCodeNode : INodeRuntime
             // failed grade, and stands down for any classified cause, so an overflowing attempt carries no proposal.
             var contextWindowExceeded = cause == Supervisor.AgentRetryCauses.ContextWindowExceeded;
 
-            var deterministic = ((status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted || argumentTooLong || contextWindowExceeded)
+            var deterministic = ((status is nameof(AgentRunStatus.NeedsReview) or nameof(AgentRunStatus.Cancelled) || acceptanceFailed || resourceExhausted || argumentTooLong || modelPoolUnresolvable || contextWindowExceeded)
                                 && !acceptanceInfraFault
                                 && !stalled
                                 && !escalationAvailable)
@@ -696,6 +705,25 @@ public sealed class AgentCodeNode : INodeRuntime
         if (!Guid.TryParse(raw, out var id)) return false;
 
         modelCredentialModelId = id;
+        return true;
+    }
+
+    /// <summary>Read the optional <c>allowedModelIds</c> config — the operator's allowed model pool a task-launch projection bakes, as string uuids. Absent / empty → null (unbounded, byte-identical). Any entry that is not a uuid → false (a clean node failure): a pool is a bound, and one that half-parsed would silently bound the run to a different set of models — or, emptied, to none at all.</summary>
+    private static bool TryReadAllowedModelIds(IReadOnlyDictionary<string, JsonElement> config, out IReadOnlyList<Guid>? allowedModelIds)
+    {
+        allowedModelIds = null;
+
+        if (!config.TryGetValue("allowedModelIds", out var raw) || raw.ValueKind == JsonValueKind.Null) return true;
+        if (raw.ValueKind != JsonValueKind.Array) return false;
+
+        var ids = new List<Guid>();
+        foreach (var entry in raw.EnumerateArray())
+        {
+            if (entry.ValueKind != JsonValueKind.String || !Guid.TryParse(entry.GetString(), out var id)) return false;
+            ids.Add(id);
+        }
+
+        allowedModelIds = ids.Count > 0 ? ids : null;
         return true;
     }
 

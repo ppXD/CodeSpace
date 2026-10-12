@@ -59,6 +59,12 @@ public static class FailureCodes
     public const string WorkflowDefinitionInvalid = "workflow_definition_invalid";
     public const string TaskRouteConfirmationRequired = "task_route_confirmation_required";
     public const string TaskRouteSnapshotMismatch = "task_route_snapshot_mismatch";
+
+    /// <summary>The resolved route cannot honour a launch control the operator set (an acceptance check a plan-map route cannot grade, a persona the allowed pool excludes, …), so the launch stopped before any session or run. The details name each control and why. Remedy: drop the control or choose a route that consumes it — a retry of the same input is refused again.</summary>
+    public const string TaskLaunchControlRefused = "task_launch_control_refused";
+
+    /// <summary>An agent run bound to an operator's allowed model pool found nothing in that pool it can run on — every pooled model is disabled, or its credential is no longer active — so it was refused rather than run on a model outside the pool. Deterministic: a respawn meets the same pool. Remedy: re-enable a pooled model or its credential, or relaunch with a pool that has one.</summary>
+    public const string AgentModelPoolUnresolvable = "agent_model_pool_unresolvable";
     public const string WorkspaceUnresolvable = "workspace_unresolvable";
 
     /// <summary>An agent's tool call could not be shown to a human as it would run — the pull request it names could not be read, its head or base is not the one the call names, or its arguments are too long to show whole — so it was answered instead of put to a reviewer. Remedy: read the pull request again, or shorten the arguments, then re-issue the call.</summary>

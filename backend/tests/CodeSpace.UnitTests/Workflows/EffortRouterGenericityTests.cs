@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Heuristic;
 using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
+using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;
@@ -60,7 +61,8 @@ public class EffortRouterGenericityTests
             new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier(), new FakeClassifier() }),
             new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new FakeRecipe() }),
             new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new FakeBounds() }),
-            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
+            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()),
+            new TaskProjectionRegistry(Array.Empty<IWorkflowDefinitionBuilder>()));
 
         // RequestedEffort = the fake bounds kind so the effort-mode ≡ preset-kind convention resolves the fake caps;
         // RequestedRecipe = the fake recipe so its DefaultProjectionKind drives the projection.
@@ -94,7 +96,8 @@ public class EffortRouterGenericityTests
             new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier(), new FakeClassifier() }),
             new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe() }),
             new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset() }),
-            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
+            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()),
+            new TaskProjectionRegistry(Array.Empty<IWorkflowDefinitionBuilder>()));
 
         var plan = await router.RouteAsync(Request(), CancellationToken.None);
 

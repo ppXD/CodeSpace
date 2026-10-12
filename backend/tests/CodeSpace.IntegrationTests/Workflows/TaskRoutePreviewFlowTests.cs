@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Tasks.RoutePreview;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Commands.Tasks;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -144,7 +145,99 @@ public class TaskRoutePreviewFlowTests
         persisted.Decision!.ClassifierKind.ShouldBe(result.Route.Decision!.ClassifierKind, "who decided the tier is the whole point of recording it");
     }
 
+    [Fact]
+    public async Task The_preview_reports_the_same_control_dispositions_the_launch_then_applies()
+    {
+        // One resolver, two callers: a Quick launch that pins a model outside its own pool (Clamped), sends a delivery
+        // spec and a plan critic Quick has no lane for (NotApplicable) — previewed, then launched on that very preview.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var pooled = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pooled-model");
+        var outside = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "outside-model");
+
+        var jobClient = ResolveJobClient();
+        jobClient.Clear();
+        using var manual = jobClient.ManualExecution();
+
+        var request = Request(teamId, userId, "Fix the typo in the README", TaskEffortModes.Quick) with
+        {
+            Autonomy = "Confined",
+            AllowedModelIds = [pooled.RowId],
+            DeliverySpec = new DeliverySpec { OpenPullRequest = true },
+            PlannerReviewMode = ReviewMode.Gate,
+            Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local", ModelCredentialModelId = outside.RowId },
+        };
+
+        TaskRoutePreviewResult preview;
+        using (var scope = _fixture.BeginScope()) preview = await scope.Resolve<ITaskRoutePreviewService>().PreviewAsync(request, CancellationToken.None);
+
+        var launched = await LaunchAsync(request with { RouteSnapshotId = preview.RouteSnapshotId });
+
+        preview.ControlDispositions.ShouldNotBeNull();
+        preview.ControlDispositions.Select(d => (d.Control, d.Outcome)).ShouldBe(new[]
+        {
+            (LaunchControls.AllowedModelIds, LaunchControlOutcome.Clamped),
+            (LaunchControls.DeliverySpec, LaunchControlOutcome.NotApplicable),
+            (LaunchControls.PlannerReviewMode, LaunchControlOutcome.NotApplicable),
+        });
+        JsonSerializer.Serialize(launched.ControlDispositions, Json).ShouldBe(JsonSerializer.Serialize(preview.ControlDispositions, Json),
+            customMessage: "the launch applied a different disposition than its own preview promised — they must share one resolver");
+    }
+
+    [Theory]
+    [InlineData(true)]    // a pooled model row the operator disabled after the composer loaded
+    [InlineData(false)]   // a pooled persona deleted after the composer loaded
+    public async Task A_pool_member_gone_since_the_composer_loaded_is_the_same_not_found_on_the_preview_as_on_the_launch(bool modelPool)
+    {
+        // The launch has always 404'd a pool it cannot honour in full; the preview used to skip that check and answer
+        // Applied — a promise the launch then broke. Both now run the launch's own team-scope checks.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var usable = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "pooled-model");
+        var disabled = await WorkflowsTestSeed.SeedCredentialedModelAsync(_fixture, teamId, "disabled-model");
+        await DisableModelRowAsync(disabled.RowId);
+
+        var request = Request(teamId, userId, "Fix the typo in the README", TaskEffortModes.Quick) with
+        {
+            AllowedModelIds = modelPool ? [usable.RowId, disabled.RowId] : [],
+            AllowedAgentDefinitionIds = modelPool ? [] : [await SeedPersonaAsync(teamId), await SeedPersonaAsync(teamId, deleted: true)],
+            Overrides = new TaskExecutionOverrides { Harness = "codex-cli", RunnerKind = "local" },
+        };
+
+        var previewed = await Should.ThrowAsync<KeyNotFoundException>(() => PreviewAsync(request));
+        var launched = await Should.ThrowAsync<KeyNotFoundException>(() => LaunchAsync(request));
+
+        previewed.Message.ShouldBe(launched.Message, "the preview answers exactly what the launch answers");
+        previewed.Message.ShouldContain("not found or not accessible");
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().TaskRouteSnapshot.AsNoTracking().CountAsync(r => r.TeamId == teamId)).ShouldBe(0, "a preview the launch would reject persists no route to launch from");
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
+
+    private async Task DisableModelRowAsync(Guid rowId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.ModelCredentialModel.SingleAsync(m => m.Id == rowId)).Enabled = false;
+        await db.SaveChangesAsync();
+    }
+
+    private async Task<Guid> SeedPersonaAsync(Guid teamId, bool deleted = false)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var now = DateTimeOffset.UtcNow;
+        var agent = new AgentDefinition
+        {
+            Id = Guid.NewGuid(), TeamId = teamId, Slug = "persona-" + Guid.NewGuid().ToString("N")[..8], Name = "Pool persona",
+            SystemPrompt = "You are a pool persona.", Origin = AgentDefinitionOrigin.Authored, DeletedDate = deleted ? now : null,
+            CreatedDate = now, CreatedBy = SystemUsers.SeederId, LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
+        };
+        db.AgentDefinition.Add(agent);
+        await db.SaveChangesAsync();
+        return agent.Id;
+    }
 
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web);
 

@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents.ModelCredentials;
+using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Tasks.Bounds;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Deep;
 using CodeSpace.Core.Services.Tasks.Bounds.Presets.Quick;
@@ -8,6 +9,11 @@ using CodeSpace.Core.Services.Tasks.Capabilities;
 using CodeSpace.Core.Services.Tasks.Effort;
 using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Heuristic;
 using CodeSpace.Core.Services.Tasks.Effort.Classifiers.Llm;
+using CodeSpace.Core.Services.Tasks.Projection;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapDynamic;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.PlanMapSynth;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.SingleAgent;
+using CodeSpace.Core.Services.Tasks.Projection.Builders.Supervisor;
 using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
@@ -171,7 +177,8 @@ public class LlmEffortClassifierTests
             new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier(), llm }),
             recipes,
             new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
-            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
+            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()),
+            ProductionProjections());
 
         var plan = await router.RouteAsync(Request("Add validation to the signup endpoint across the service with tests"), CancellationToken.None);
 
@@ -194,7 +201,8 @@ public class LlmEffortClassifierTests
             new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier(), llm }),
             recipes,
             new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
-            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
+            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()),
+            ProductionProjections());
 
         var plan = await router.RouteAsync(Request("do the thing"), CancellationToken.None);
 
@@ -215,7 +223,8 @@ public class LlmEffortClassifierTests
             new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier(), llm }),
             recipes,
             new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
-            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
+            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()),
+            ProductionProjections());
 
         var plan = await router.RouteAsync(Request("Drop the production users table and deploy"), CancellationToken.None);
 
@@ -224,6 +233,128 @@ public class LlmEffortClassifierTests
         plan.Confirm.ShouldNotBeNull();
         plan.EffortMode.ShouldBe(TaskEffortModes.Deep, "the risky task still routes to deep");
     }
+
+    [Fact]
+    public async Task The_router_STILL_confirms_an_AMBIGUOUS_task_even_when_the_model_is_confident()
+    {
+        // The ambiguity veto: a confident model that ALSO reports the goal under-specified must not have it routed as
+        // though it were understood. The signal was produced by every classifier and read by nothing, while the confirm
+        // exception told the operator it was stopping "this ambiguous or potentially risky task".
+        var plan = await LlmRouter(Reply(needsCodeChange: true, ambiguous: true, confidence: 0.9)).RouteAsync(Request("Make the dashboard better"), CancellationToken.None);
+
+        plan.ClassifierConfidence.ShouldBe(0.9, "the model was confident");
+        plan.NeedsConfirmCard.ShouldBeTrue("an ambiguous goal confirms regardless of model confidence — the gate the model cannot talk its way past");
+        plan.Confirm.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task An_operator_floor_moves_a_confident_standard_route_off_the_plan_map_lane_and_says_so()
+    {
+        // Standard's default lane (plan-map-synth) grades no operator command, so an auto route that must honour an
+        // acceptance floor takes the policy's next matching row — the single-agent tier, whose one agent the floor grades.
+        // The same reply without a floor still routes plan-map: the confident-routing win is untouched.
+        var reply = Reply(needsCodeChange: true, crossFile: true, confidence: 0.9);
+
+        var unfloored = await LlmRouter(reply).RouteAsync(Request(), CancellationToken.None);
+        var floored = await LlmRouter(reply).RouteAsync(Request() with { HasOperatorFloor = true }, CancellationToken.None);
+
+        unfloored.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth);
+        floored.EffortMode.ShouldBe(TaskEffortModes.Quick, "the Standard row is set aside, and the next matching row down is the cheap catch-all");
+        floored.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "an operator floor never lands an auto route on a lane that cannot grade it");
+        floored.NeedsConfirmCard.ShouldBeFalse("the move is the router's own on a confident route — there is nothing new for the operator to confirm");
+        floored.DegradedReason.ShouldNotBeNull("the route moved, so it says why — never silent");
+        floored.DegradedReason!.ShouldContain(TaskProjectionKinds.PlanMapSynth);
+    }
+
+    [Theory]
+    [InlineData(TaskEffortModes.Standard, null)]   // the operator chose the tier
+    [InlineData(null, TaskRecipeKinds.MapFanout)]  // the operator pinned the recipe on the auto path
+    public async Task An_operator_floor_never_moves_a_lane_the_operator_chose(string? effort, string? recipe)
+    {
+        // The launch refuses the floor on a chosen plan-map lane by name; rerouting it would override the operator.
+        var request = Request() with { HasOperatorFloor = true, RequestedEffort = effort, RequestedRecipe = recipe };
+
+        var plan = await LlmRouter(Reply(needsCodeChange: true, crossFile: true, confidence: 0.9)).RouteAsync(request, CancellationToken.None);
+
+        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.PlanMapSynth);
+        plan.DegradedReason.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_rerouted_auto_route_that_still_needs_confirming_suggests_the_tier_it_took()
+    {
+        // An unsure model with Standard-shaped signals and an operator floor: the route moves to Quick, and the confirm
+        // card must pre-select Quick. Suggesting the Standard tier the floor set aside would send a confirmed launch to
+        // plan-map — where the check is refused, or stripped by a composer that sends no check on Standard.
+        var plan = await LlmRouter(Reply(needsCodeChange: true, crossFile: true, confidence: 0.4)).RouteAsync(Request() with { HasOperatorFloor = true }, CancellationToken.None);
+
+        plan.NeedsConfirmCard.ShouldBeTrue();
+        plan.EffortMode.ShouldBe(TaskEffortModes.Quick);
+        plan.Confirm!.SuggestedMode.ShouldBe(TaskEffortModes.Quick, "the card pre-selects the tier the route actually took");
+    }
+
+    [Theory]
+    [InlineData(" ")]
+    [InlineData("sh\0x")]
+    public void A_malformed_floor_is_no_routing_signal(string executable)
+    {
+        // No builder bakes this argv, so it grades nothing and must not move the route — the launch refuses it by name.
+        var request = new TaskLaunchRequest { TeamId = Guid.NewGuid(), ActorUserId = Guid.NewGuid(), SurfaceKind = "chat", TaskText = "x", AcceptanceChecks = [executable, "check.sh"] };
+        var seed = new TaskLaunchSeed { Goal = "x", SurfaceKind = "chat", TeamId = request.TeamId };
+
+        TaskLaunchService.BuildRouteRequest(seed, request).HasOperatorFloor.ShouldBeFalse();
+        TaskLaunchService.BuildRouteRequest(seed, request with { AcceptanceChecks = ["sh", "check.sh"] }).HasOperatorFloor.ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task An_operator_floor_keeps_deep_where_its_supervisor_grades_it_against_a_repository()
+    {
+        // Deep's supervisor lane grades the floor at its terminal stop, against the branch it publishes — nothing to move.
+        var plan = await LlmRouter(Reply(estimatedCostTier: "high", confidence: 0.9)).RouteAsync(Request() with { HasOperatorFloor = true, HasRepository = true }, CancellationToken.None);
+
+        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.Supervisor);
+        plan.DegradedReason.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task A_repo_less_operator_floor_moves_a_deep_route_to_the_single_agent_that_grades_it()
+    {
+        // With no repository the supervisor's stop has no branch to grade, so the floor would go ungraded there; the single
+        // agent grades it in its own workspace. Every tier the floor cannot be graded on is set aside — Deep AND Standard.
+        var plan = await LlmRouter(Reply(estimatedCostTier: "high", needsCodeChange: true, crossFile: true, confidence: 0.9)).RouteAsync(Request() with { HasOperatorFloor = true, HasRepository = false }, CancellationToken.None);
+
+        plan.EffortMode.ShouldBe(TaskEffortModes.Quick);
+        plan.ProjectionKind.ShouldBe(TaskProjectionKinds.SingleAgent, "a repo-less floor never lands an auto route on Deep, where it would go ungraded");
+        plan.DegradedReason.ShouldNotBeNull().ShouldContain(TaskProjectionKinds.Supervisor, customMessage: "the move is named on the route, never silent");
+    }
+
+    [Fact]
+    public void The_route_request_says_whether_the_launch_binds_a_repository()
+    {
+        var request = new TaskLaunchRequest { TeamId = Guid.NewGuid(), ActorUserId = Guid.NewGuid(), SurfaceKind = "chat", TaskText = "x" };
+        var seed = new TaskLaunchSeed { Goal = "x", SurfaceKind = "chat", TeamId = request.TeamId };
+
+        TaskLaunchService.BuildRouteRequest(seed, request).HasRepository.ShouldBeFalse();
+        TaskLaunchService.BuildRouteRequest(seed, request with { RepositoryId = Guid.NewGuid() }).HasRepository.ShouldBeTrue("a repository the request names");
+        TaskLaunchService.BuildRouteRequest(seed with { RepositoryId = Guid.NewGuid() }, request).HasRepository.ShouldBeTrue("a repository the surface's seed carries");
+    }
+
+    /// <summary>The production router over a canned LLM reply, the real recipes + bounds presets, and the REAL projection builders — whose <c>OperatorAcceptance</c> advertisements are what the floor rule reads.</summary>
+    private static EffortRouter LlmRouter(JsonElement reply)
+    {
+        var recipes = new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe(), new SupervisorRecipe() });
+        var llm = new LlmEffortClassifier(new FakeClients(new CannedClient(reply)), new FakeSelector(Pick()), recipes, new HeuristicEffortClassifier());
+
+        return new EffortRouter(
+            new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier(), llm }),
+            recipes,
+            new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() }),
+            new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()),
+            ProductionProjections());
+    }
+
+    private static TaskProjectionRegistry ProductionProjections() =>
+        new(new IWorkflowDefinitionBuilder[] { new SingleAgentDefinitionBuilder(), new PlanMapSynthDefinitionBuilder(), new PlanMapDynamicDefinitionBuilder(), new SupervisorDefinitionBuilder() });
 
     // ── Schema commit-contract pin ──
 

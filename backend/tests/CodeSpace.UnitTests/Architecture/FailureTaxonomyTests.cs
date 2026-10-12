@@ -77,6 +77,8 @@ public class FailureTaxonomyTests
         FailureCodes.CredentialDisconnected.ShouldBe("credential_disconnected");
         FailureCodes.WorkflowDefinitionInvalid.ShouldBe("workflow_definition_invalid");
         FailureCodes.TaskRouteConfirmationRequired.ShouldBe("task_route_confirmation_required");
+        FailureCodes.TaskLaunchControlRefused.ShouldBe("task_launch_control_refused");
+        FailureCodes.AgentModelPoolUnresolvable.ShouldBe("agent_model_pool_unresolvable");
         FailureCodes.WorkspaceUnresolvable.ShouldBe("workspace_unresolvable");
         FailureCodes.ToolCallNotPreviewable.ShouldBe("tool_call_not_previewable");
         FailureCodes.PullRequestMoved.ShouldBe("pull_request_moved");

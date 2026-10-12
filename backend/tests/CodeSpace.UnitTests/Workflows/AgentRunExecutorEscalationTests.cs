@@ -50,15 +50,18 @@ public sealed class AgentRunExecutorEscalationTests
     // ─── applying the pick ────────────────────────────────────────────────────
 
     [Fact]
-    public void An_escalated_pick_overrides_the_tasks_pinned_model()
+    public void An_escalated_pick_overrides_the_tasks_pinned_model_and_its_row()
     {
         // The supervisor lane's precedent (#1061): an operator's ordinary model choice is a FLOOR for untested work,
-        // not a ceiling once the run's own check has disproved it.
-        var task = TaskWith("claude-haiku-4-5");
+        // not a ceiling once the run's own check has disproved it. The row moves with the model: a task that kept the
+        // row it started on would name, to the output review's producer identity, a model that did not do the work.
+        var escalatedRow = Guid.NewGuid();
+        var task = TaskWith("claude-haiku-4-5") with { ModelCredentialModelId = Guid.NewGuid() };
 
-        var escalated = AgentRunExecutor.ApplyEscalation(task, new AgentModelEscalation { From = "claude-haiku-4-5", To = "claude-sonnet-4-5", Reason = "r" });
+        var escalated = AgentRunExecutor.ApplyEscalation(task, new AgentRunExecutor.EscalationPick(new AgentModelEscalation { From = "claude-haiku-4-5", To = "claude-sonnet-4-5", Reason = "r" }, escalatedRow));
 
         escalated.Model.ShouldBe("claude-sonnet-4-5");
+        escalated.ModelCredentialModelId.ShouldBe(escalatedRow);
     }
 
     [Fact]
@@ -66,7 +69,7 @@ public sealed class AgentRunExecutorEscalationTests
     {
         var task = TaskWith("claude-haiku-4-5");
 
-        var same = AgentRunExecutor.ApplyEscalation(task, new AgentModelEscalation { From = "claude-haiku-4-5", To = null, Reason = "r" });
+        var same = AgentRunExecutor.ApplyEscalation(task, new AgentRunExecutor.EscalationPick(new AgentModelEscalation { From = "claude-haiku-4-5", To = null, Reason = "r" }, RowId: null));
 
         same.Model.ShouldBe("claude-haiku-4-5", "a one-model team keeps its only model — the FACT is recorded elsewhere, the dispatch is untouched");
         same.ShouldBe(task, "byte-identical task — a no-op escalation must not perturb the dispatch at all");
