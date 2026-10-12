@@ -7,10 +7,16 @@ import { createRoot } from "react-dom/client";
 // across the whole product so character widths render the same on every device.
 import "@fontsource-variable/geist-mono";
 
+import { migrateLegacySession } from "./api/session";
 import { ActorIdentityProvider } from "./components/identities/ActorIdentityGate";
 import { DialogProvider } from "./components/dialog";
 import "./index.css";
 import { routeTree } from "./routeTree.gen";
+
+// A browser signed in before the session cookie existed trades its stored token for the cookie, once. Not awaited:
+// until the API confirms the cookie, every request keeps sending that token, so nothing waits on it and nobody is
+// signed out by the deploy.
+void migrateLegacySession();
 
 const router = createRouter({
   routeTree,

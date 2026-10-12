@@ -1,13 +1,15 @@
+import { applySessionHeaders } from "@/api/session";
 import type { RunRecordView } from "@/api/workflows";
 
 const baseUrl = import.meta.env.VITE_API_URL ?? "";
 
 /**
  * Subscribe to a run's LIVE ledger tail over Server-Sent Events (the backend `/records/stream` endpoint). Uses
- * `fetch` + `ReadableStream` — NOT native `EventSource` — because auth is a Bearer + X-Team-Id HEADER pair EventSource
- * can't set (the same headers `fetchJson` injects). Parses SSE frames (`id: {seq}\nevent: {type}\ndata: {json}\n\n`) and
- * invokes `onRecord` with each `RunRecordView`. Reconnects with `?after={lastSeenSequence}` on a transient mid-stream
- * drop; STOPS on a clean server close (the run reached a terminal record) or when the signal aborts. Errors are
+ * `fetch` + `ReadableStream` — NOT native `EventSource` — because the team scope is an X-Team-Id HEADER EventSource
+ * can't set (it sends the same session credentials and headers `fetchJson` does). Parses SSE frames
+ * (`id: {seq}\nevent: {type}\ndata: {json}\n\n`) and invokes `onRecord` with each `RunRecordView`. Reconnects with
+ * `?after={lastSeenSequence}` on a transient mid-stream drop; STOPS on a clean server close (the run reached a
+ * terminal record) or when the signal aborts. Errors are
  * swallowed — the 2s room/journal poll is the correctness fallback, so a dropped stream never loses data.
  */
 export async function streamRunRecords(runId: string, getAfter: () => number, onRecord: (record: RunRecordView) => void, signal: AbortSignal): Promise<void> {
@@ -15,12 +17,11 @@ export async function streamRunRecords(runId: string, getAfter: () => number, on
     let opened = false;
     try {
       const headers = new Headers({ Accept: "text/event-stream" });
-      const jwt = localStorage.getItem("codespace.jwt");
-      if (jwt) headers.set("Authorization", `Bearer ${jwt}`);
+      applySessionHeaders(headers);
       const teamId = localStorage.getItem("codespace.activeTeamId");
       if (teamId) headers.set("X-Team-Id", teamId);
 
-      const response = await fetch(`${baseUrl}/api/workflows/runs/${runId}/records/stream?after=${getAfter()}`, { headers, signal });
+      const response = await fetch(`${baseUrl}/api/workflows/runs/${runId}/records/stream?after=${getAfter()}`, { headers, signal, credentials: "include" });
       if (!response.ok || !response.body) return; // a non-2xx (401 / 404) is not transient — stop, the poll covers it
 
       opened = true;

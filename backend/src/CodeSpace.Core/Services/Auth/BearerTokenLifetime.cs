@@ -19,8 +19,9 @@ public static class BearerTokenLifetime
     /// including its <c>exp</c> plus <see cref="ClockSkew"/>. False for a principal with no readable <c>exp</c>, which no
     /// token the handler lets through lacks.
     /// </summary>
-    public static bool Accepts(ClaimsPrincipal? principal, DateTimeOffset now) => ReadExpiry(principal) is { } expiresAt && now <= expiresAt + ClockSkew;
+    public static bool Accepts(ClaimsPrincipal? principal, DateTimeOffset now) => ExpiresAt(principal) is { } expiresAt && now <= expiresAt + ClockSkew;
 
-    private static DateTimeOffset? ReadExpiry(ClaimsPrincipal? principal) =>
+    /// <summary>The principal's token <c>exp</c>, or null when it carries no readable one. Also how long a browser session cookie holding that token may live.</summary>
+    public static DateTimeOffset? ExpiresAt(ClaimsPrincipal? principal) =>
         long.TryParse(principal?.FindFirst(JwtRegisteredClaimNames.Exp)?.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds) ? DateTimeOffset.FromUnixTimeSeconds(seconds) : null;
 }

@@ -41,6 +41,21 @@ public class BearerTokenLifetimeTests
         BearerTokenLifetime.Accepts(null, Expiry.AddHours(-1)).ShouldBeFalse();
     }
 
+    /// <summary>A browser session cookie is set to die with the token it carries, so the expiry is read from the same claim the handler checks.</summary>
+    [Fact]
+    public void ExpiresAt_reads_the_tokens_exp()
+    {
+        BearerTokenLifetime.ExpiresAt(PrincipalWithExpiry(Expiry.ToUnixTimeSeconds().ToString())).ShouldBe(Expiry);
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("tomorrow")]
+    public void ExpiresAt_is_null_without_a_readable_exp(string? exp)
+    {
+        BearerTokenLifetime.ExpiresAt(PrincipalWithExpiry(exp)).ShouldBeNull();
+    }
+
     /// <summary>The handler's skew. Moving it moves the moment an open tail ends; pinned so that is a visible decision.</summary>
     [Fact]
     public void ClockSkew_is_five_minutes()

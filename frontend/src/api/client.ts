@@ -1,15 +1,16 @@
 import createClient, { type Middleware } from "openapi-fetch";
 
 import type { paths } from "./schema";
+import { applySessionHeaders } from "./session";
 
 /**
- * Bearer token injector. JWT is stored in localStorage. Keep this as the only place that
- * knows where the token lives.
+ * Session credentials. The session itself is the HttpOnly cookie the browser attaches (`credentials: "include"`
+ * below); this adds the CSRF header, and the bearer token only while this browser is not yet on the cookie.
+ * session.ts is the only place that knows where the session lives.
  */
 const authMiddleware: Middleware = {
   async onRequest({ request }) {
-    const token = localStorage.getItem("codespace.jwt");
-    if (token) request.headers.set("Authorization", `Bearer ${token}`);
+    applySessionHeaders(request.headers);
     return request;
   },
 };
@@ -33,6 +34,8 @@ export const api = createClient<paths>({
   // Set VITE_API_URL=http://host:port in .env.local to bypass the proxy and hit a backend
   // directly (e.g. another machine, custom port). See .env.example for the full notes.
   baseUrl: import.meta.env.VITE_API_URL ?? "",
+  // The session cookie must travel to an API on another origin too — the deployed image's shape (see request.ts).
+  credentials: "include",
 });
 
 api.use(authMiddleware);

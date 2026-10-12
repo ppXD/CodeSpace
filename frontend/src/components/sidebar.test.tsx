@@ -63,4 +63,31 @@ describe("sidebar team switcher", () => {
     expect(screen.getByText("Create workspace")).toBeTruthy();
     expect(document.querySelector(".sb-pop-foot")).toBeTruthy();
   });
+
+  /**
+   * The session is an HttpOnly cookie the page cannot delete, so signing out has to ask the API to clear it. Wiping
+   * localStorage alone — what sign-out used to be — would leave the browser holding a live session.
+   */
+  it("signs out by having the API clear the session cookie, then forgets the session and leaves for /signin", async () => {
+    stubFetch({ "/api/users/me": me([]), "/api/teams/members": [], "/api/teams/invitations": [], "/api/auth/session": {} });
+    localStorage.setItem("codespace.activeTeamId", team.id);
+
+    await renderRoute("/teams/platform-team/members");
+    await waitFor(() => expect(screen.getAllByText("Platform Team").length).toBeGreaterThan(0));
+
+    fireEvent.click(document.querySelector(".sb-foot") as HTMLElement);
+    const signOut = await screen.findByText("Sign out");
+
+    const assign = vi.fn();
+    Object.defineProperty(window, "location", { configurable: true, value: { pathname: "/teams/platform-team/members", assign } });
+
+    fireEvent.click(signOut);
+
+    await waitFor(() => expect(assign).toHaveBeenCalledWith("/signin"));
+
+    const cleared = vi.mocked(fetch).mock.calls.find(([url, init]) => String(url).endsWith("/api/auth/session") && init?.method === "DELETE");
+    expect(cleared?.[1]?.credentials).toBe("include");
+    expect(localStorage.getItem("codespace.session")).toBeNull();
+    expect(localStorage.getItem("codespace.activeTeamId")).toBeNull();
+  });
 });

@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Dtos.Users;
 using CodeSpace.Messages.Mediation;
@@ -24,9 +25,11 @@ public sealed record ChangePasswordResponse
     /// <summary>
     /// A token minted under the NEW security stamp. Changing a password ends every session for the
     /// account, including the one that asked — without handing this back, the act of rotating would
-    /// sign the rotator out.
+    /// sign the rotator out. Absent from the wire when the request was authenticated by the browser's session cookie,
+    /// as on <see cref="SignInResponse.Token"/>: that caller gets the new session as the replacement cookie alone.
     /// </summary>
-    public required string Token { get; init; }
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public required string? Token { get; init; }
 
     public required DateTimeOffset ExpiresAt { get; init; }
 }

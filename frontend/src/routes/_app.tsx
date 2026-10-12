@@ -1,6 +1,6 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { isAuthenticated } from "@/api/auth";
+import { isAuthenticated } from "@/api/session";
 import { AppShell } from "@/components/AppShell";
 import { ChatDockProvider } from "@/components/chat/ChatDockContext";
 

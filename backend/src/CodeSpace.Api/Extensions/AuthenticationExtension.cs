@@ -33,11 +33,16 @@ public static class AuthenticationExtension
                     IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtKey))
                 };
 
+                // Kept on the request (never persisted) so POST /api/auth/session can hand the browser the very token
+                // it authenticated with, rather than minting a longer-lived one.
+                options.SaveToken = true;
+
                 // Signature and lifetime say the token was minted by us and has not aged out. Neither
                 // says the account behind it is still live, and a stateless token cannot: that is a
                 // fact only the server holds. Checking it HERE covers every authenticated request,
-                // including the streaming endpoints and anything that never reaches the mediator.
-                options.Events = new JwtBearerEvents { OnTokenValidated = RejectDeadSessionsAsync };
+                // including the streaming endpoints and anything that never reaches the mediator —
+                // and whichever carrier, header or cookie, the token arrived in.
+                options.Events = new JwtBearerEvents { OnMessageReceived = ReadSessionCookie, OnTokenValidated = RejectDeadSessionsAsync };
             });
 
         services.AddAuthorization(options =>
@@ -48,6 +53,26 @@ public static class AuthenticationExtension
             // Without this, missing [Authorize] silently means anonymous access — the v1 P0 footgun.
             options.FallbackPolicy = policy;
         });
+    }
+
+    /// <summary>
+    /// A browser carries its session in <see cref="SessionCookie"/>, which no page script can read, rather than in a
+    /// header. Read only when the request has no Authorization header, so every header-carrying client authenticates
+    /// exactly as before. A write the cookie alone would authorize must also carry <see cref="SessionCookie.CsrfHeader"/>;
+    /// without it the cookie is not believed, and the request is as anonymous as one another site could have sent.
+    /// </summary>
+    private static Task ReadSessionCookie(MessageReceivedContext context)
+    {
+        var token = SessionCookie.ReadToken(context.Request);
+
+        if (token == null) return Task.CompletedTask;
+
+        if (SessionCookie.IsUnguardedWrite(context.Request))
+            context.Fail($"A {context.Request.Method} authenticated by the session cookie must carry the {SessionCookie.CsrfHeader} header.");
+        else
+            context.Token = token;
+
+        return Task.CompletedTask;
     }
 
     private static async Task RejectDeadSessionsAsync(TokenValidatedContext context)

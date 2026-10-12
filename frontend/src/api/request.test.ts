@@ -4,7 +4,8 @@ import { ApiError, fetchJson } from "./request";
 
 /**
  * Tests for the hand-rolled fetch wrapper. Targets the security-critical
- * paths: JWT injection, X-Team-Id injection, the sign-in exclusion that stops
+ * paths: the session cookie + CSRF header, pre-cookie JWT injection,
+ * X-Team-Id injection, the sign-in exclusion that stops
  * stale tokens from rejecting fresh credentials, and the 401/403 redirect
  * branches that silently wipe state on the way to /signin or /change-password.
  *
@@ -63,7 +64,22 @@ describe("fetchJson", () => {
     expect(result).toBeUndefined();
   });
 
-  it("injects the Bearer JWT header when a token is in localStorage", async () => {
+  it("sends the session cookie and the CSRF header, and no Authorization once the browser is on the cookie", async () => {
+    // The session is the HttpOnly cookie, which the browser attaches only to a credentialed request — and the API is
+    // another origin in the deployed image. The CSRF header is what the API demands of a cookie-authenticated write.
+    localStorage.setItem("codespace.session", "cookie");
+    fetchMock.mockResolvedValueOnce(ok({}));
+
+    await fetchJson("/api/projects", { method: "POST", body: JSON.stringify({ name: "x" }) });
+
+    const init = fetchMock.mock.calls[0]?.[1] as RequestInit;
+    expect(init.credentials).toBe("include");
+    const headers = capturedHeaders();
+    expect(headers.get("X-CodeSpace-Csrf")).toBe("1");
+    expect(headers.has("Authorization")).toBe(false);
+  });
+
+  it("injects the Bearer JWT header when a pre-cookie token is in localStorage", async () => {
     localStorage.setItem("codespace.jwt", "my-token");
     fetchMock.mockResolvedValueOnce(ok({}));
 
@@ -111,16 +127,51 @@ describe("fetchJson", () => {
     });
   });
 
-  it("on 401 from a non-auth path: wipes JWT + activeTeamId AND redirects to /signin", async () => {
+  it("on 401 from a non-auth path: wipes the session (cookie flag + any pre-cookie JWT) + activeTeamId AND redirects to /signin", async () => {
+    localStorage.setItem("codespace.session", "cookie");
     localStorage.setItem("codespace.jwt", "expired");
     localStorage.setItem("codespace.activeTeamId", "team-x");
+    fetchMock.mockResolvedValueOnce(err(401, { code: "unauthorized", message: "" }));
+    fetchMock.mockResolvedValueOnce(err(401, { code: "unauthorized", message: "" }));   // and the API, asked again, agrees: the cookie is dead
+
+    await expect(fetchJson("/api/me")).rejects.toBeInstanceOf(ApiError);
+
+    expect(localStorage.getItem("codespace.session")).toBeNull();
+    expect(localStorage.getItem("codespace.jwt")).toBeNull();
+    expect(localStorage.getItem("codespace.activeTeamId")).toBeNull();
+    expect(locationAssignMock).toHaveBeenCalledWith("/signin");
+  });
+
+  it("on 401 on the bearer token: signs out at once — every API pod reads a header, so the 401 is the session's", async () => {
+    localStorage.setItem("codespace.jwt", "expired");
     fetchMock.mockResolvedValueOnce(err(401, { code: "unauthorized", message: "" }));
 
     await expect(fetchJson("/api/me")).rejects.toBeInstanceOf(ApiError);
 
+    expect(fetchMock).toHaveBeenCalledOnce();
     expect(localStorage.getItem("codespace.jwt")).toBeNull();
-    expect(localStorage.getItem("codespace.activeTeamId")).toBeNull();
     expect(locationAssignMock).toHaveBeenCalledWith("/signin");
+  });
+
+  it("on 401 on the cookie that the API, asked again, answers live: keeps the session and surfaces the error instead of signing out", async () => {
+    // Mid rolling deploy an API pod from before the cookie reads only the Authorization header, so a browser on the
+    // cookie gets a 401 from it for a session that is fine. The probe that follows reached a pod that reads the cookie.
+    localStorage.setItem("codespace.session", "cookie");
+    localStorage.setItem("codespace.activeTeamId", "team-x");
+    fetchMock.mockResolvedValueOnce(err(401, { code: "http_401", message: "" }));
+    fetchMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const act = fetchJson("/api/projects");
+
+    await expect(act).rejects.toMatchObject({ status: 401 });
+    expect(locationAssignMock).not.toHaveBeenCalled();
+    expect(localStorage.getItem("codespace.session")).toBe("cookie");
+    expect(localStorage.getItem("codespace.activeTeamId")).toBe("team-x");
+
+    const [probeUrl, probe] = fetchMock.mock.calls[1] as [string, RequestInit];
+    expect(new URL(probeUrl, "http://spa.test").pathname).toBe("/api/auth/session");
+    expect(probe.credentials).toBe("include");
+    expect(new Headers(probe.headers).has("Authorization")).toBe(false);
   });
 
   it("on 401 from /api/auth/* does NOT bounce the page — the sign-in form needs the error inline", async () => {

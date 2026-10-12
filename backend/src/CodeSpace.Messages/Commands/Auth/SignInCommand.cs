@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Dtos.Users;
 using CodeSpace.Messages.Mediation;
@@ -23,7 +24,13 @@ public sealed record SignInCommand : ICommand<SignInResponse>, IBypassPasswordRo
 
 public sealed record SignInResponse
 {
-    public required string Token { get; init; }
+    /// <summary>
+    /// The session, for a caller that keeps it itself — an API client, the CLI. Absent from the wire when the request
+    /// was authenticated by the browser's session cookie: the response hands that caller its session as the cookie
+    /// alone, because a body is readable by any script running in the page.
+    /// </summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public required string? Token { get; init; }
     public required DateTimeOffset ExpiresAt { get; init; }
     public required MeResponse User { get; init; }
 }

@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Auth;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Exceptions;
@@ -33,14 +34,16 @@ public sealed class ArtifactDownloadEndpointE2ETests : IClassFixture<TaskLaunchA
 
     public ArtifactDownloadEndpointE2ETests(TaskLaunchApiFactory factory) { _factory = factory; }
 
-    [Fact]
-    public async Task An_artifact_whose_bytes_live_at_a_provider_downloads_over_http()
+    [Theory]
+    [InlineData(false)]   // an API client's Authorization header
+    [InlineData(true)]    // the browser's HttpOnly session cookie — a download is a GET, so it needs nothing else
+    public async Task An_artifact_whose_bytes_live_at_a_provider_downloads_over_http(bool viaSessionCookie)
     {
         var world = await SeedRoutedTeamAsync();
         var payload = Payload("bytes that only exist at the destination");
         var artifactId = await PutAsync(world.TeamId, payload);
 
-        var response = await SendAsync(world, artifactId);
+        var response = await SendAsync(world, artifactId, viaSessionCookie: viaSessionCookie);
 
         response.StatusCode.ShouldBe(HttpStatusCode.OK, await response.Content.ReadAsStringAsync());
         (await response.Content.ReadAsByteArrayAsync()).ShouldBe(payload, "every byte must survive the driver, the controller and the wire");
@@ -96,10 +99,12 @@ public sealed class ArtifactDownloadEndpointE2ETests : IClassFixture<TaskLaunchA
 
     // ─── World + helpers ─────────────────────────────────────────────────────
 
-    private async Task<HttpResponseMessage> SendAsync(RoutedTeam world, Guid artifactId, bool authenticated = true)
+    private async Task<HttpResponseMessage> SendAsync(RoutedTeam world, Guid artifactId, bool authenticated = true, bool viaSessionCookie = false)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, $"/api/artifacts/{artifactId}");
-        if (authenticated) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TestToken.Mint(world.UserId, TestToken.SeedStamp));
+        var token = TestToken.Mint(world.UserId, TestToken.SeedStamp);
+        if (authenticated && viaSessionCookie) request.Headers.Add("Cookie", $"{SessionCookie.Name}={token}");
+        else if (authenticated) request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
         request.Headers.Add("X-Team-Id", world.TeamId.ToString());
 
         return await _factory.CreateClient().SendAsync(request);

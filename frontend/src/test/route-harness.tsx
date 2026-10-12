@@ -29,8 +29,9 @@ export function stubFetch(routes: Record<string, unknown>): void {
 }
 
 export async function renderRoute(initialUrl: string) {
-  // Pass the _app auth gate (isAuthenticated() reads this).
-  localStorage.setItem("codespace.jwt", "test-jwt");
+  // Pass the _app auth gate as a browser on the session cookie does (isAuthenticated() reads this flag; the cookie
+  // itself is the browser's, invisible to the page and to these tests).
+  localStorage.setItem("codespace.session", "cookie");
 
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false, gcTime: 0, staleTime: 0 } },
@@ -58,5 +59,5 @@ export async function renderRoute(initialUrl: string) {
   // the router is genuinely stuck, and waiting longer for the second case costs nothing.
   await waitFor(() => expect(router.state.status).toBe("idle"), { timeout: 15_000 });
 
-  return { router, currentPath: () => router.state.location.pathname, ...utils };
+  return { router, queryClient, currentPath: () => router.state.location.pathname, ...utils };
 }
