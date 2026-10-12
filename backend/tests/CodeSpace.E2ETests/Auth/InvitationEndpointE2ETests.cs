@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Shouldly;
 
@@ -105,6 +106,39 @@ public sealed class InvitationEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized, await DescribeAsync(response, "401"));
     }
 
+    /// <summary>
+    /// Two bodies, not every malformed shape (the integration tier walks those): the invitation endpoints share one
+    /// anonymous budget of <c>AnonymousRateLimitExtension.PermitsPerWindow</c> per minute, and every test in this class
+    /// spends from it.
+    /// </summary>
+    [Theory]
+    [InlineData("x", "x")]
+    [InlineData("probe@elsewhere", "correct-horse-battery")]
+    public async Task A_malformed_accept_answers_the_same_whether_or_not_the_address_has_an_account(string name, string password)
+    {
+        // Any account can open a workspace and invite an address of its choosing. An accept whose body could never
+        // create an account used to answer 401 invitation_requires_sign_in where the address had an account and 400
+        // where it had none — whether an address is registered, read off without side effects.
+        var tenants = new TenantHarness(_factory);
+        var registered = $"registered-{Guid.NewGuid():N}@other-corp.test";
+        await tenants.AccountAsync(email: registered);
+
+        var (atRegistered, _) = await SeedInvitationAsync(registered);
+        var (atUnregistered, unregistered) = await SeedInvitationAsync();
+
+        var registeredAnswer = await _factory.CreateClient().PostAsJsonAsync($"/api/invitations/{atRegistered}/accept", new { name, password });
+        var unregisteredAnswer = await _factory.CreateClient().PostAsJsonAsync($"/api/invitations/{atUnregistered}/accept", new { name, password });
+
+        var registeredBody = await registeredAnswer.Content.ReadAsStringAsync();
+        var unregisteredBody = await unregisteredAnswer.Content.ReadAsStringAsync();
+
+        unregisteredAnswer.StatusCode.ShouldBe(HttpStatusCode.BadRequest, unregisteredBody);
+        registeredAnswer.StatusCode.ShouldBe(unregisteredAnswer.StatusCode, $"the status must not depend on whether the address has an account — registered: {registeredBody} | unregistered: {unregisteredBody}");
+        Field(registeredBody, "code").ShouldBe(Field(unregisteredBody, "code"), "nor may the code");
+        Field(registeredBody, "message").ShouldBe(Field(unregisteredBody, "message"), "nor may the message");
+        (await tenants.DbAsync(db => db.User.CountAsync(u => u.Email == unregistered))).ShouldBe(0, "nothing was created");
+    }
+
     // ─── Helpers ────────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -112,7 +146,7 @@ public sealed class InvitationEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     /// Going through the create endpoint would need a signed-in member with members.manage, which is a
     /// different thing to test and would make a failure here ambiguous.
     /// </summary>
-    private async Task<(string Token, string Email)> SeedInvitationAsync()
+    private async Task<(string Token, string Email)> SeedInvitationAsync(string? invitee = null)
     {
         using var scope = _factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
@@ -122,7 +156,7 @@ public sealed class InvitationEndpointE2ETests : IClassFixture<TaskLaunchApiFact
         var team = new Team { Id = Guid.NewGuid(), Slug = $"wire-{suffix}", Name = "Wire Team", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId };
 
         var token = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N");
-        var email = $"invitee-{suffix}@test.local";
+        var email = invitee ?? $"invitee-{suffix}@test.local";
 
         db.User.Add(owner);
         db.Team.Add(team);
@@ -145,6 +179,8 @@ public sealed class InvitationEndpointE2ETests : IClassFixture<TaskLaunchApiFact
 
         return (token, email);
     }
+
+    private static string? Field(string body, string name) => JsonDocument.Parse(body).RootElement.GetProperty(name).GetString();
 
     private static async Task<string> DescribeAsync(HttpResponseMessage response, string expectation) =>
         $"expected {expectation}; got {(int)response.StatusCode}; body: {await response.Content.ReadAsStringAsync()}";

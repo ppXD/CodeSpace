@@ -83,7 +83,13 @@ public static class FailureCodes
     public const string InvitationEmailMismatch = "invitation_email_mismatch";
     public const string InvitationRequiresSignIn = "invitation_requires_sign_in";
     public const string InvitationRoleExceedsGranter = "invitation_role_exceeds_granter";
+
+    /// <summary>The invitation grants a role above the caller's, or at it and someone else sent it, so regenerating or revoking it is out of the caller's reach. Remedy: ask a member who outranks it, or whoever sent it.</summary>
+    public const string InvitationOutranksActor = "invitation_outranks_actor";
     public const string PersonalTeamNotInvitable = "personal_team_not_invitable";
+
+    /// <summary>An invitation was addressed to something without '@'. Addresses and display names are both sign-in identifiers and are kept apart by that one character, so an '@'-less address could take over somebody's display-name sign-in. Remedy: invite a full email address.</summary>
+    public const string InvitationAddressNotAnEmail = "invitation_address_not_an_email";
 
     /// <summary>
     /// The provider refused because the account's PLAN does not include the feature, not because the
@@ -100,6 +106,19 @@ public static class FailureCodes
     public const string RoleOutranksActor = "role_outranks_actor";
     public const string AccountDeactivated = "account_deactivated";
     public const string PasswordResetNotUsable = "password_reset_not_usable";
+
+    // ── Accounts ───────────────────────────────────────────────────────────────────
+
+    /// <summary>A display name containing '@' was refused: names are sign-in identifiers, and one shaped like an address could stand in for somebody's address. Remedy: choose a name without '@'.</summary>
+    public const string DisplayNameLooksLikeEmail = "display_name_looks_like_email";
+
+    /// <summary>A display name was refused because a live account already signs in with it, as its name or its address. Remedy: choose a different name.</summary>
+    public const string DisplayNameTaken = "display_name_taken";
+
+    // ── Chat ───────────────────────────────────────────────────────────────────────
+
+    /// <summary>A conversation was asked to hold a user who is not a member of its team — another team's user and an id naming nobody answer alike. Remedy: pick someone from this team's roster.</summary>
+    public const string ConversationParticipantNotInTeam = "conversation_participant_not_in_team";
 
     /// <summary>The masked answer for anything unclassified. Never carries a message from the exception.</summary>
     public const string Internal = "internal_error";

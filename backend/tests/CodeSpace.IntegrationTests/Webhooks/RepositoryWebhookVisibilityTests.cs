@@ -245,7 +245,7 @@ public class RepositoryWebhookVisibilityTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var suffix = Guid.NewGuid().ToString("N")[..8];
-        var admin = new User { Id = Guid.NewGuid(), Email = $"adm-{suffix}@x", Name = "admin" };
+        var admin = new User { Id = Guid.NewGuid(), Email = $"adm-{suffix}@x", Name = $"admin-{suffix}" };
         var member = new User { Id = Guid.NewGuid(), Email = $"mem-{suffix}@x", Name = "member" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"hooks-{suffix}", Name = "Hooks" };
 

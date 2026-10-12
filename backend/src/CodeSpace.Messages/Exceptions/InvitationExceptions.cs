@@ -51,6 +51,25 @@ public sealed class InvitationRequiresSignInException : Exception, IFailure
 }
 
 /// <summary>
+/// An invitation was addressed to something with no '@' in it that no live account holds.
+///
+/// <para>Addresses and display names are both sign-in identifiers, and '@' is the line between them: no display name
+/// may contain one, and sign-in looks an identifier without one up as a name. An invitation used to accept any text as
+/// its address, so an account able to open a workspace could invite <c>admin</c> — or any other account's name — accept
+/// it, and hold an account at an address that answered for that name.</para>
+/// </summary>
+public sealed class InvitationAddressNotAnEmailException : Exception, IFailure
+{
+    public InvitationAddressNotAnEmailException() : base("An invitation must be addressed to an email address containing '@'.") { }
+
+    public FailureKind Kind => FailureKind.Invalid;
+
+    public string Code => FailureCodes.InvitationAddressNotAnEmail;
+
+    public string? ClientMessage => "Invite a full email address, like name@example.com.";
+}
+
+/// <summary>
 /// A member tried to grant a role above their own. Granting upward would make every Admin an Owner
 /// one invitation later.
 /// </summary>
@@ -77,6 +96,36 @@ public sealed class InvitationRoleExceedsGranterException : Exception, IFailure
     public string? ClientMessage => $"Your role on this team is {Granter}, so you can invite up to {Granter}.";
 
     public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["yourRole"] = Granter.ToString(), ["requestedRole"] = Requested.ToString(), ["maximumGrantableRole"] = Granter.ToString() };
+}
+
+/// <summary>
+/// The caller tried to regenerate or revoke an invitation outside their reach.
+///
+/// <para>An invitation IS the role it grants, waiting to be accepted — regenerating one hands the regenerator a
+/// fresh working link to it — so regenerating is acting at that role: above your own rank never, at it only when it
+/// is yours (an invitation you sent), unless you are an Owner. Without this an Admin regenerated a pending Owner
+/// invitation, accepted it with an account of their own and was Owner a minute later. Revoking raises nobody, so it
+/// is refused only above your own rank, and never for an invitation you sent.</para>
+/// </summary>
+public sealed class InvitationOutranksActorException : Exception, IFailure
+{
+    public InvitationOutranksActorException(TeamRole actor, TeamRole invitationRole) : base($"{actor} cannot manage this invitation at {invitationRole}.")
+    {
+        Actor = actor;
+        InvitationRole = invitationRole;
+    }
+
+    public TeamRole Actor { get; }
+    public TeamRole InvitationRole { get; }
+
+    public FailureKind Kind => FailureKind.Forbidden;
+
+    public string Code => FailureCodes.InvitationOutranksActor;
+
+    /// <summary>Both roles, for the same reason <c>RoleOutranksActorException</c> names both: only the pair explains the refusal, and each is already visible to the caller on the invitation list.</summary>
+    public string? ClientMessage => $"Your role on this team is {Actor}, so you can't change this {InvitationRole} invitation.";
+
+    public IReadOnlyDictionary<string, object?>? Details => new Dictionary<string, object?> { ["yourRole"] = Actor.ToString(), ["invitationRole"] = InvitationRole.ToString() };
 }
 
 /// <summary>

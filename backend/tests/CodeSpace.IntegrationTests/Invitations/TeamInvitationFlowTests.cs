@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Invitations;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Invitations;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -190,6 +191,184 @@ public class TeamInvitationFlowTests
         result.InviteUrl.ShouldContain("/invite/");
     }
 
+    [Theory]
+    [InlineData(TeamRole.Admin, TeamRole.Admin)]   // at your own rank, your own invitation is yours
+    [InlineData(TeamRole.Admin, TeamRole.Member)]
+    [InlineData(TeamRole.Owner, TeamRole.Owner)]
+    public async Task An_invitation_you_sent_at_or_below_your_rank_can_be_regenerated_and_revoked(TeamRole actorRole, TeamRole invitationRole)
+    {
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var actor = team.UserFor(actorRole);
+        var invitationId = await SeedPendingInvitationAsync(team.TeamId, invitationRole, sentBy: actor).ConfigureAwait(false);
+
+        await ManageAsync(actor, team.TeamId, new RegenerateTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+        await ManageAsync(actor, team.TeamId, new RevokeTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+
+        (await LoadInvitationAsync(invitationId).ConfigureAwait(false)).Status.ShouldBe(InvitationStatus.Revoked);
+    }
+
+    [Theory]
+    [InlineData(TeamRole.Owner, TeamRole.Admin)]
+    [InlineData(TeamRole.Owner, TeamRole.Member)]
+    [InlineData(TeamRole.Admin, TeamRole.Member)]
+    public async Task An_invitation_below_your_rank_can_be_managed_whoever_sent_it(TeamRole actorRole, TeamRole invitationRole)
+    {
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var sender = await SeedMemberAsync(team.TeamId, TeamRole.Owner).ConfigureAwait(false);
+        var invitationId = await SeedPendingInvitationAsync(team.TeamId, invitationRole, sentBy: sender).ConfigureAwait(false);
+
+        await ManageAsync(team.UserFor(actorRole), team.TeamId, new RegenerateTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+        await ManageAsync(team.UserFor(actorRole), team.TeamId, new RevokeTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+
+        (await LoadInvitationAsync(invitationId).ConfigureAwait(false)).Status.ShouldBe(InvitationStatus.Revoked);
+    }
+
+    [Theory]
+    [InlineData(false)]   // the escalation: regenerate someone else's Owner invitation, accept it with a puppet, be promoted
+    [InlineData(true)]    // their own, sent while they were Owner — demoted since, it is above them now
+    public async Task An_invitation_above_your_rank_cannot_be_regenerated_and_is_revocable_only_when_you_sent_it(bool sentByActor)
+    {
+        // Re-issuing an invitation above you would be a way up — for a demoted sender, a way back. Withdrawing one raises
+        // nobody, so the sender keeps that, as they always had; someone else's stays with the ranks at or above it.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var sender = sentByActor ? team.Admin : await SeedMemberAsync(team.TeamId, TeamRole.Owner).ConfigureAwait(false);
+        var invitationId = await SeedPendingInvitationAsync(team.TeamId, TeamRole.Owner, sentBy: sender).ConfigureAwait(false);
+        var before = await LoadInvitationAsync(invitationId).ConfigureAwait(false);
+
+        var regenerate = async () => await ManageAsync(team.Admin, team.TeamId, new RegenerateTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+        var revoke = async () => await ManageAsync(team.Admin, team.TeamId, new RevokeTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+
+        var refusedRegenerate = await regenerate.ShouldThrowAsync<InvitationOutranksActorException>().ConfigureAwait(false);
+
+        refusedRegenerate.Actor.ShouldBe(TeamRole.Admin);
+        refusedRegenerate.InvitationRole.ShouldBe(TeamRole.Owner);
+        (await LoadInvitationAsync(invitationId).ConfigureAwait(false)).TokenHash.ShouldBe(before.TokenHash, "a refused regenerate rotates nothing — the sender's own link still works");
+
+        if (sentByActor)
+        {
+            await revoke().ConfigureAwait(false);
+            (await LoadInvitationAsync(invitationId).ConfigureAwait(false)).Status.ShouldBe(InvitationStatus.Revoked, "the sender may always withdraw what they sent");
+            return;
+        }
+
+        (await revoke.ShouldThrowAsync<InvitationOutranksActorException>().ConfigureAwait(false)).Code.ShouldBe("invitation_outranks_actor");
+        (await LoadInvitationAsync(invitationId).ConfigureAwait(false)).Status.ShouldBe(InvitationStatus.Pending, "a refused revoke withdraws nothing");
+    }
+
+    [Fact]
+    public async Task A_peer_admins_admin_invitation_can_be_revoked_but_not_regenerated()
+    {
+        // Regenerating hands the caller a working link to a peer's grant — acting ACROSS their rank. Revoking raises
+        // nobody: the worst it does is make the peer send the invitation again.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var peer = await SeedMemberAsync(team.TeamId, TeamRole.Admin).ConfigureAwait(false);
+        var invitationId = await SeedPendingInvitationAsync(team.TeamId, TeamRole.Admin, sentBy: peer).ConfigureAwait(false);
+        var before = await LoadInvitationAsync(invitationId).ConfigureAwait(false);
+
+        var regenerate = async () => await ManageAsync(team.Admin, team.TeamId, new RegenerateTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+
+        (await regenerate.ShouldThrowAsync<InvitationOutranksActorException>().ConfigureAwait(false)).Code.ShouldBe("invitation_outranks_actor");
+        (await LoadInvitationAsync(invitationId).ConfigureAwait(false)).TokenHash.ShouldBe(before.TokenHash, "a refused regenerate rotates nothing");
+
+        await ManageAsync(team.Admin, team.TeamId, new RevokeTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+
+        (await LoadInvitationAsync(invitationId).ConfigureAwait(false)).Status.ShouldBe(InvitationStatus.Revoked);
+    }
+
+    [Theory]
+    [InlineData(true)]    // a co-Owner's, the co-Owner still in the team
+    [InlineData(false)]   // a departed Owner's — before this, nobody at all could withdraw it
+    public async Task An_owner_regenerates_and_revokes_another_owners_owner_invitation(bool senderStillMember)
+    {
+        // Nobody ranks above an Owner to arbitrate, and an Owner may invite at Owner outright, so there is no climb to
+        // stop — and a leaked Owner link must always have someone able to kill it.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var sender = senderStillMember ? await SeedMemberAsync(team.TeamId, TeamRole.Owner).ConfigureAwait(false) : (await SeedUserAsync().ConfigureAwait(false)).Id;
+        var invitationId = await SeedPendingInvitationAsync(team.TeamId, TeamRole.Owner, sentBy: sender).ConfigureAwait(false);
+
+        await ManageAsync(team.Owner, team.TeamId, new RegenerateTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+        await ManageAsync(team.Owner, team.TeamId, new RevokeTeamInvitationCommand { InvitationId = invitationId }).ConfigureAwait(false);
+
+        (await LoadInvitationAsync(invitationId).ConfigureAwait(false)).Status.ShouldBe(InvitationStatus.Revoked);
+    }
+
+    [Fact]
+    public async Task The_instance_admin_regenerates_and_revokes_an_owner_invitation_in_any_team()
+    {
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var sender = await SeedMemberAsync(team.TeamId, TeamRole.Owner).ConfigureAwait(false);
+        var invitationId = await SeedPendingInvitationAsync(team.TeamId, TeamRole.Owner, sentBy: sender).ConfigureAwait(false);
+        var instanceAdmin = (await SeedUserAsync().ConfigureAwait(false)).Id;
+
+        await ManageAsync(instanceAdmin, team.TeamId, new RegenerateTeamInvitationCommand { InvitationId = invitationId }, Roles.Admin).ConfigureAwait(false);
+        await ManageAsync(instanceAdmin, team.TeamId, new RevokeTeamInvitationCommand { InvitationId = invitationId }, Roles.Admin).ConfigureAwait(false);
+
+        (await LoadInvitationAsync(invitationId).ConfigureAwait(false)).Status.ShouldBe(InvitationStatus.Revoked);
+    }
+
+    [Fact]
+    public async Task An_account_cannot_be_created_under_a_name_shaped_like_an_address()
+    {
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var invite = await InviteAsync(team, $"newcomer-{Guid.NewGuid():N}@x", TeamRole.Member).ConfigureAwait(false);
+
+        var act = async () => await AcceptAsync(TokenOf(invite), $"victim-{Guid.NewGuid():N}@corp.test", "correct-horse-battery").ConfigureAwait(false);
+
+        await act.ShouldThrowAsync<DisplayNameLooksLikeEmailException>().ConfigureAwait(false);
+        (await PreviewAsync(TokenOf(invite)).ConfigureAwait(false)).Email.ShouldNotBeNullOrWhiteSpace("a refused acceptance spends nothing — the link still works");
+    }
+
+    [Theory]
+    [InlineData(false)]   // another account's display name
+    [InlineData(true)]    // another account's address (one with no '@', so only the uniqueness rule can catch it)
+    public async Task An_account_cannot_be_created_under_an_identifier_another_live_account_signs_in_with(bool claimedAsAddress)
+    {
+        var claimed = $"Claimed {Guid.NewGuid():N}";
+        await SeedUserAsync(email: claimedAsAddress ? claimed : $"holder-{Guid.NewGuid():N}@x", name: claimedAsAddress ? $"holder-{Guid.NewGuid():N}" : claimed).ConfigureAwait(false);
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var invite = await InviteAsync(team, $"newcomer-{Guid.NewGuid():N}@x", TeamRole.Member).ConfigureAwait(false);
+
+        var act = async () => await AcceptAsync(TokenOf(invite), $"  {claimed.ToUpperInvariant()} ", "correct-horse-battery").ConfigureAwait(false);
+
+        await act.ShouldThrowAsync<DisplayNameTakenException>().ConfigureAwait(false);
+    }
+
+    [Fact]
+    public async Task A_name_only_a_departed_account_held_is_free_again()
+    {
+        var name = $"Departed {Guid.NewGuid():N}";
+        var departed = await SeedUserAsync(email: $"gone-{Guid.NewGuid():N}@x", name: name).ConfigureAwait(false);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            (await db.User.SingleAsync(u => u.Id == departed.Id).ConfigureAwait(false)).DeletedDate = DateTimeOffset.UtcNow;
+            await db.SaveChangesAsync().ConfigureAwait(false);
+        }
+
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var invite = await InviteAsync(team, $"newcomer-{Guid.NewGuid():N}@x", TeamRole.Member).ConfigureAwait(false);
+
+        var session = await AcceptAsync(TokenOf(invite), name, "correct-horse-battery").ConfigureAwait(false);
+
+        session.User.Name.ShouldBe(name);
+    }
+
+    [Fact]
+    public async Task The_preview_tells_only_the_invited_account_that_the_invitation_is_its_own()
+    {
+        // It used to say to anyone holding a token whether the address had an account at all — and anyone who can
+        // open a workspace can mint a token for any address.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var invited = await SeedUserAsync().ConfigureAwait(false);
+        var bystander = await SeedUserAsync().ConfigureAwait(false);
+        var invite = await InviteAsync(team, invited.Email.ToUpperInvariant(), TeamRole.Member).ConfigureAwait(false);
+
+        (await PreviewAsync(TokenOf(invite)).ConfigureAwait(false)).ForSignedInAccount.ShouldBeFalse("anonymous");
+        (await PreviewAsAsync(TokenOf(invite), bystander.Id).ConfigureAwait(false)).ForSignedInAccount.ShouldBeFalse("another account");
+        (await PreviewAsAsync(TokenOf(invite), invited.Id).ConfigureAwait(false)).ForSignedInAccount.ShouldBeTrue("the invited account itself");
+    }
+
     [Fact]
     public async Task A_personal_workspace_cannot_have_anyone_invited_into_it()
     {
@@ -211,7 +390,7 @@ public class TeamInvitationFlowTests
 
         var invite = await InviteAsync(team, existing.Email, TeamRole.Member).ConfigureAwait(false);
 
-        var act = async () => await AcceptAsync(TokenOf(invite), "Impostor", "correct-horse-battery").ConfigureAwait(false);
+        var act = async () => await AcceptAsync(TokenOf(invite), $"Impostor {Guid.NewGuid():N}", "correct-horse-battery").ConfigureAwait(false);
 
         await act.ShouldThrowAsync<InvitationRequiresSignInException>().ConfigureAwait(false);
     }
@@ -225,10 +404,108 @@ public class TeamInvitationFlowTests
 
         var invite = await InviteAsync(team, invited.Email, TeamRole.Member).ConfigureAwait(false);
 
-        using var scope = _fixture.BeginScopeAs(bystander.Id, teamId: null);
-        var act = async () => await scope.Resolve<IMediator>().Send(new AcceptInvitationCommand { Token = TokenOf(invite) }).ConfigureAwait(false);
+        // A well-formed body — what the page sends once the bystander fills in the form it shows them.
+        var act = async () => await AcceptAsAsync(TokenOf(invite), bystander.Id, $"Bystander {Guid.NewGuid():N}", "correct-horse-battery").ConfigureAwait(false);
 
         await act.ShouldThrowAsync<InvitationEmailMismatchException>().ConfigureAwait(false);
+    }
+
+    [Theory]
+    [InlineData("admin")]
+    [InlineData("  Admin ")]
+    [InlineData("someone-elses-display-name")]
+    public async Task An_address_without_an_at_sign_cannot_be_invited(string address)
+    {
+        // '@' is the line between addresses and display names. Inviting "admin" used to create an account at an address
+        // that answered for the seeded admin's NAME — any account that can open a workspace could do it.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(team.Owner, team.TeamId);
+        var act = async () => await scope.Resolve<IMediator>().Send(new CreateTeamInvitationCommand { Email = address, Role = TeamRole.Viewer }).ConfigureAwait(false);
+
+        await act.ShouldThrowAsync<InvitationAddressNotAnEmailException>().ConfigureAwait(false);
+        (await scope.Resolve<CodeSpaceDbContext>().TeamInvitation.AsNoTracking().AnyAsync(i => i.TeamId == team.TeamId).ConfigureAwait(false)).ShouldBeFalse("a refused address leaves no invitation behind");
+    }
+
+    [Fact]
+    public async Task An_at_less_address_a_live_account_holds_can_be_invited_and_only_that_account_accepts()
+    {
+        // Earlier versions accepted any text as an address, and invitations are the only way into a team — so refusing
+        // every '@'-less address would shut those accounts out of every team they are not already in. Inviting one is
+        // safe: the address has an account, so accepting takes that account signed in and never creates another.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var legacy = await SeedUserAsync(email: $"Legacy{Guid.NewGuid():N}").ConfigureAwait(false);
+
+        var invite = await InviteAsync(team, legacy.Email, TeamRole.Member).ConfigureAwait(false);
+
+        var anonymous = async () => await AcceptAsync(TokenOf(invite), $"Impostor {Guid.NewGuid():N}", "correct-horse-battery").ConfigureAwait(false);
+        await anonymous.ShouldThrowAsync<InvitationRequiresSignInException>().ConfigureAwait(false);
+
+        var session = await AcceptAsAsync(TokenOf(invite), legacy.Id, name: null, password: null).ConfigureAwait(false);
+
+        session.User.Id.ShouldBe(legacy.Id);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        (await db.TeamMembership.AsNoTracking().SingleAsync(m => m.TeamId == team.TeamId && m.UserId == legacy.Id).ConfigureAwait(false)).Role.ShouldBe(TeamRole.Member);
+        (await db.User.AsNoTracking().CountAsync(u => u.DeletedDate == null && u.Email.ToLower() == legacy.Email.ToLower()).ConfigureAwait(false)).ShouldBe(1, "no second account at an address a live account holds");
+    }
+
+    public static TheoryData<string?, string?> MalformedNewAccounts => new()
+    {
+        { null, null },
+        { "x", "x" },
+        { "   ", "correct-horse-battery" },
+        { "Maya", "too-short" },
+        { "maya@home", "correct-horse-battery" },
+    };
+
+    [Theory]
+    [MemberData(nameof(MalformedNewAccounts))]
+    public async Task A_malformed_accept_answers_alike_whether_or_not_the_address_has_an_account(string? name, string? password)
+    {
+        // Anyone who can open a workspace can mint an invitation for an address of their choosing. The refusal of a body
+        // no account could be created from used to differ — "sign in first" where the address had an account, "password
+        // too short" where it had none — which answered whether the address was registered, with no side effect.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var registered = await SeedUserAsync().ConfigureAwait(false);
+        var bystander = await SeedUserAsync().ConfigureAwait(false);
+        var unregistered = $"nobody-{Guid.NewGuid():N}@x";
+        var atRegistered = TokenOf(await InviteAsync(team, registered.Email, TeamRole.Viewer).ConfigureAwait(false));
+        var atUnregistered = TokenOf(await InviteAsync(team, unregistered, TeamRole.Viewer).ConfigureAwait(false));
+
+        foreach (Guid? caller in new Guid?[] { null, bystander.Id })
+        {
+            var registeredAnswer = await Record.ExceptionAsync(() => AcceptAsAsync(atRegistered, caller, name, password)).ConfigureAwait(false);
+            var unregisteredAnswer = await Record.ExceptionAsync(() => AcceptAsAsync(atUnregistered, caller, name, password)).ConfigureAwait(false);
+
+            var who = caller == null ? "anonymous" : "a signed-in bystander";
+            registeredAnswer.ShouldNotBeNull($"{who}: a malformed accept must be refused");
+            unregisteredAnswer.ShouldNotBeNull($"{who}: a malformed accept must be refused");
+            unregisteredAnswer.GetType().ShouldBe(registeredAnswer.GetType(), $"{who}: the refusal must not depend on whether the address has an account");
+            unregisteredAnswer.Message.ShouldBe(registeredAnswer.Message, $"{who}: the refusal must not depend on whether the address has an account");
+        }
+
+        using var scope = _fixture.BeginScope();
+        (await scope.Resolve<CodeSpaceDbContext>().User.AsNoTracking().AnyAsync(u => u.Email == unregistered).ConfigureAwait(false)).ShouldBeFalse("nothing was created");
+    }
+
+    [Fact]
+    public async Task A_taken_name_answers_alike_whether_or_not_the_address_has_an_account()
+    {
+        // The name is checked before the address, so a probe holding a name it knows is taken learns nothing about the
+        // address from the refusal.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var registered = await SeedUserAsync().ConfigureAwait(false);
+        var taken = await SeedUserAsync().ConfigureAwait(false);
+        var atRegistered = TokenOf(await InviteAsync(team, registered.Email, TeamRole.Viewer).ConfigureAwait(false));
+        var atUnregistered = TokenOf(await InviteAsync(team, $"nobody-{Guid.NewGuid():N}@x", TeamRole.Viewer).ConfigureAwait(false));
+
+        var registeredAnswer = async () => await AcceptAsync(atRegistered, taken.Name, "correct-horse-battery").ConfigureAwait(false);
+        var unregisteredAnswer = async () => await AcceptAsync(atUnregistered, taken.Name, "correct-horse-battery").ConfigureAwait(false);
+
+        await registeredAnswer.ShouldThrowAsync<DisplayNameTakenException>().ConfigureAwait(false);
+        await unregisteredAnswer.ShouldThrowAsync<DisplayNameTakenException>().ConfigureAwait(false);
     }
 
     [Fact]
@@ -308,6 +585,20 @@ public class TeamInvitationFlowTests
     }
 
     [Fact]
+    public async Task The_listing_names_who_sent_each_invitation()
+    {
+        // The reach rule lets an actor manage an invitation at their own role only when they sent it; the members screen
+        // can hide what would be refused only if it knows the sender.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        await InviteAsync(team, $"sent-{Guid.NewGuid():N}@x", TeamRole.Member).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(team.Owner, team.TeamId);
+        var listed = await scope.Resolve<IMediator>().Send(new ListTeamInvitationsQuery()).ConfigureAwait(false);
+
+        listed.ShouldHaveSingleItem().InvitedByUserId.ShouldBe(team.Owner);
+    }
+
+    [Fact]
     public async Task The_token_is_never_stored_in_a_form_that_could_be_replayed_from_the_database()
     {
         var team = await SeedTeamAsync().ConfigureAwait(false);
@@ -340,9 +631,59 @@ public class TeamInvitationFlowTests
         return await scope.Resolve<IMediator>().Send(new PreviewInvitationQuery { Token = token }).ConfigureAwait(false);
     }
 
-    private async Task<Messages.Commands.Auth.SignInResponse> AcceptAsync(string token, string name, string password)
+    private async Task<InvitationPreview> PreviewAsAsync(string token, Guid userId)
     {
-        using var scope = _fixture.BeginScopeAs(userId: null, teamId: null);
+        using var scope = _fixture.BeginScopeAs(userId, teamId: null);
+
+        return await scope.Resolve<IMediator>().Send(new PreviewInvitationQuery { Token = token }).ConfigureAwait(false);
+    }
+
+    private async Task ManageAsync<TResponse>(Guid actor, Guid teamId, IRequest<TResponse> command, params string[] roles)
+    {
+        using var scope = _fixture.BeginScopeAs(actor, teamId, roles);
+
+        await scope.Resolve<IMediator>().Send(command).ConfigureAwait(false);
+    }
+
+    /// <summary>Straight to the row, so the test sets exactly who sent it — the rule under test reads that column.</summary>
+    private async Task<Guid> SeedPendingInvitationAsync(Guid teamId, TeamRole role, Guid sentBy)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var invitation = new TeamInvitation { Id = Guid.NewGuid(), TeamId = teamId, Email = $"pending-{Guid.NewGuid():N}@x", Role = role, TokenHash = Guid.NewGuid().ToString("N") + Guid.NewGuid().ToString("N"), Status = InvitationStatus.Pending, ExpiresAt = DateTimeOffset.UtcNow.AddDays(7), InvitedByUserId = sentBy };
+
+        db.TeamInvitation.Add(invitation);
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return invitation.Id;
+    }
+
+    private async Task<TeamInvitation> LoadInvitationAsync(Guid invitationId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().TeamInvitation.AsNoTracking().SingleAsync(i => i.Id == invitationId).ConfigureAwait(false);
+    }
+
+    private async Task<Guid> SeedMemberAsync(Guid teamId, TeamRole role)
+    {
+        var user = await SeedUserAsync().ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = user.Id, Role = role });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return user.Id;
+    }
+
+    private async Task<Messages.Commands.Auth.SignInResponse> AcceptAsync(string token, string name, string password) =>
+        await AcceptAsAsync(token, userId: null, name, password).ConfigureAwait(false);
+
+    private async Task<Messages.Commands.Auth.SignInResponse> AcceptAsAsync(string token, Guid? userId, string? name, string? password)
+    {
+        using var scope = _fixture.BeginScopeAs(userId, teamId: null);
 
         return await scope.Resolve<IMediator>().Send(new AcceptInvitationCommand { Token = token, Name = name, Password = password }).ConfigureAwait(false);
     }
@@ -359,11 +700,11 @@ public class TeamInvitationFlowTests
 
     private static string TokenOf(CreateInvitationResult invite) => invite.InviteUrl[(invite.InviteUrl.LastIndexOf('/') + 1)..];
 
-    private async Task<User> SeedUserAsync()
+    private async Task<User> SeedUserAsync(string? email = null, string? name = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
-        var user = new User { Id = Guid.NewGuid(), Email = $"existing-{Guid.NewGuid():N}@x", Name = "Existing" };
+        var user = new User { Id = Guid.NewGuid(), Email = email ?? $"existing-{Guid.NewGuid():N}@x", Name = name ?? $"Existing {Guid.NewGuid():N}" };
 
         db.User.Add(user);
         await db.SaveChangesAsync().ConfigureAwait(false);
@@ -378,7 +719,7 @@ public class TeamInvitationFlowTests
 
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"own-{suffix}@x", Name = "owner" };
-        var admin = new User { Id = Guid.NewGuid(), Email = $"adm-{suffix}@x", Name = "admin" };
+        var admin = new User { Id = Guid.NewGuid(), Email = $"adm-{suffix}@x", Name = $"admin-{suffix}" };
         var member = new User { Id = Guid.NewGuid(), Email = $"mem-{suffix}@x", Name = "member" };
         var viewer = new User { Id = Guid.NewGuid(), Email = $"vie-{suffix}@x", Name = "viewer" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"inv-{suffix}", Name = "Invitees", Kind = kind };

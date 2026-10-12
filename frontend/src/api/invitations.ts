@@ -22,8 +22,12 @@ export interface InvitationPreview {
   /** The address the invitation is bound to; acceptance must match it. */
   email: string;
   expiresAt: string;
-  /** True when the address already has a CodeSpace account, so the page asks them to sign in instead of setting a password. */
-  accountExists: boolean;
+  /**
+   * True only when this request carries the session of the account the invitation is addressed to, so the page
+   * asks that account to join rather than to set a password. Never says whether the address has an account —
+   * an anonymous preview answering that was an existence oracle for any address.
+   */
+  forSignedInAccount: boolean;
 }
 
 export interface AcceptInvitationRequest {

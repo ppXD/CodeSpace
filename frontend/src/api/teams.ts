@@ -21,6 +21,8 @@ export interface TeamInvitationSummary {
   email: string;
   role: TeamRole;
   invitedByName: string;
+  /** Who sent it — an invitation at your own role is yours to regenerate or revoke only if you sent it. */
+  invitedByUserId: string;
   expiresAt: string;
   isExpired: boolean;
 }

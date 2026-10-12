@@ -27,6 +27,9 @@ export const TeamPermissions = {
   MembersManage: "members.manage",
   TeamManage: "team.manage",
   ReposManage: "repos.manage",
+  // Revoking a credential that is not your own Personal one — a teammate's, or the team's service token.
+  // Your own personal credential stays yours to disconnect on membership alone.
+  CredentialsManage: "credentials.manage",
   // Every storage surface — reads included — declares this one on the server
   // (`TeamPermissions.StorageManage`), so a caller without it gets an empty page rather than a
   // read-only one. The UI still gates its writes on it: a control that can only answer 403 is worse

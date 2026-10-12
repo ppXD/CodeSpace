@@ -61,7 +61,7 @@ public sealed class QualificationClaimResolver : IQualificationClaimResolver, IS
             ReceiptId = backing?.Id,
             SuiteDigest = backing?.SuiteDigest,
             ExpiresAt = backing?.ExpiresAt,
-            Cohort = backing is null ? null : Parse<LaunchCohortDescriptor>(backing.CohortJson),
+            Cohort = backing is null ? null : ToClaimCohort(Parse<LaunchCohortDescriptor>(backing.CohortJson)),
             Seal = backing is null ? null : new ContractSeal
             {
                 CapabilityKey = backing.CapabilityKey,
@@ -70,6 +70,15 @@ public sealed class QualificationClaimResolver : IQualificationClaimResolver, IS
             },
         };
     }
+
+    private static ClaimCohort? ToClaimCohort(LaunchCohortDescriptor? cohort) => cohort is null ? null : new ClaimCohort
+    {
+        TeamId = cohort.TeamId,
+        Mode = cohort.Mode,
+        Tier = cohort.Tier,
+        CompletionPolicyVersion = cohort.CompletionPolicyVersion,
+        ProjectionKind = cohort.ProjectionKind,
+    };
 
     /// <summary>Legacy ad-hoc json (or a shape missing the noun's required keys) reads NULL — a partial identity is no identity, never a half-filled record.</summary>
     private static T? Parse<T>(string? json) where T : class

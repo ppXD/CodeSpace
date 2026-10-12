@@ -37,7 +37,7 @@ public class RequestAuthorizationInventoryTests
         ["ReceiveConnectionWebhookCommand"] = "the same inbound, from a group/organization hook; proof is the HMAC verified against THAT hook's own secret, never a repository's.",
         ["ResumeWorkflowCallbackCommand"] = "proof is the single-use high-entropy callback token in the URL.",
         ["WebhookExistsQuery"] = "asked before a delivery's body is read; it answers only whether the hook id names a hook, which the delivery's own 404 already tells the caller.",
-        ["CompleteCredentialOAuthCommand"] = "the provider redirect carries no JWT; proof is the one-time OAuthPendingState row.",
+        ["CompleteCredentialOAuthCommand"] = "the provider redirect carries no JWT; proof is the one-time OAuthPendingState row together with the nonce cookie only the starting browser holds.",
         ["AcceptInvitationCommand"] = "the invitee has no account yet; proof is the single-use invitation token in the route.",
         ["PreviewInvitationQuery"] = "same token, read-only, and it answers nothing at all unless the token checks out.",
         ["ResetPasswordCommand"] = "someone who cannot sign in is exactly who needs this; proof is the single-use reset token in the route.",

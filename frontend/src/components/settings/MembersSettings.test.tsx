@@ -2,6 +2,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
+import type { TeamInvitationSummary } from "@/api/teams";
 import type { MeResponse, MeTeam } from "@/api/types";
 import { DialogProvider } from "@/components/dialog";
 import { MembersSettings } from "./MembersSettings";
@@ -40,11 +41,11 @@ describe("members settings", () => {
     }));
   }
 
-  function renderAs(t: MeTeam) {
+  function renderAs(t: MeTeam, invitations: TeamInvitationSummary[] = []) {
     localStorage.setItem("codespace.jwt", "test-jwt");
     localStorage.setItem("codespace.activeTeamId", t.id);
 
-    stub({ "/api/users/me": me(t), "/api/teams/members": roster, "/api/teams/invitations": [] });
+    stub({ "/api/users/me": me(t), "/api/teams/members": roster, "/api/teams/invitations": invitations });
 
     const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
 
@@ -138,6 +139,58 @@ describe("members settings", () => {
 
     await waitFor(() => expect(deletes()).toHaveLength(1));
     expect(deletes()[0][0]).toContain("/api/teams/members/u-other");
+  });
+
+  const invitation = (email: string, role: TeamInvitationSummary["role"], invitedByUserId: string): TeamInvitationSummary => ({
+    id: `inv-${email}`, email, role, invitedByName: "someone", invitedByUserId, expiresAt: "2099-01-01T00:00:00Z", isExpired: false,
+  });
+
+  /** The actions an invitation's menu offers, or null when it offers no menu at all. */
+  function actionsFor(email: string): string[] | null {
+    const menu = screen.queryByRole("button", { name: `Actions for ${email}` });
+
+    if (menu == null) return null;
+
+    fireEvent.click(menu);
+    const offered = ["Regenerate link", "Revoke"].filter((name) => screen.queryByRole("button", { name }) != null);
+    fireEvent.click(menu);
+
+    return offered;
+  }
+
+  it("offers an admin a new link only within their reach, and revoke up to their own rank", async () => {
+    // Regenerating hands the caller a working link to the role the invitation grants, so it follows the member reach
+    // rule: below you, or at your own role only when you sent it. Revoking raises nobody, so it reaches every
+    // invitation up to your own role, and any you sent. The server answers anything else with invitation_outranks_actor.
+    renderAs(team("Admin", ["members.manage"]), [
+      invitation("member@test.local", "Member", "u-owner"),
+      invitation("own-admin@test.local", "Admin", "u-viewer"),
+      invitation("other-admin@test.local", "Admin", "u-owner"),
+      invitation("owner@test.local", "Owner", "u-owner"),
+      invitation("own-owner@test.local", "Owner", "u-viewer"),   // sent as Owner, demoted since
+    ]);
+
+    await waitFor(() => expect(screen.getByText("other-admin@test.local")).toBeTruthy());
+
+    expect(actionsFor("member@test.local")).toEqual(["Regenerate link", "Revoke"]);
+    expect(actionsFor("own-admin@test.local")).toEqual(["Regenerate link", "Revoke"]);
+    expect(actionsFor("other-admin@test.local")).toEqual(["Revoke"]);
+    expect(actionsFor("owner@test.local")).toBeNull();
+    expect(actionsFor("own-owner@test.local")).toEqual(["Revoke"]);
+  });
+
+  it("offers an owner every invitation, another owner's owner invitation included", async () => {
+    // Nobody ranks above an Owner to arbitrate. Without this a leaked Owner link sent by a co-Owner — or by an Owner
+    // who has since left — had nobody able to withdraw it.
+    renderAs(team("Owner", ["members.manage", "team.manage"]), [
+      invitation("co-owner-sent@test.local", "Owner", "u-owner"),
+      invitation("departed-sent@test.local", "Owner", "u-gone"),
+    ]);
+
+    await waitFor(() => expect(screen.getByText("departed-sent@test.local")).toBeTruthy());
+
+    expect(actionsFor("co-owner-sent@test.local")).toEqual(["Regenerate link", "Revoke"]);
+    expect(actionsFor("departed-sent@test.local")).toEqual(["Regenerate link", "Revoke"]);
   });
 
   it("offers no invite in a personal space", async () => {

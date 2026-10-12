@@ -143,6 +143,17 @@ public class TenantAccessDeniedMessageTests
         denial.Details["subjectRole"].ShouldBe("Owner");
     }
 
+    [Fact]
+    public void Managing_an_invitation_out_of_reach_names_both_roles()
+    {
+        var denial = new InvitationOutranksActorException(TeamRole.Admin, TeamRole.Owner);
+
+        // Not "someone else's": a sender demoted since may hold an invitation above them now.
+        denial.ClientMessage.ShouldBe("Your role on this team is Admin, so you can't change this Owner invitation.");
+        denial.Details!["yourRole"].ShouldBe("Admin");
+        denial.Details["invitationRole"].ShouldBe("Owner");
+    }
+
     /// <summary>The diagnostic message keeps both ids — masking the client must not have masked the log.</summary>
     [Fact]
     public void The_log_still_names_the_user_and_the_team()

@@ -65,6 +65,7 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
         var team = await LoadInvitableTeamAsync(teamId, cancellationToken).ConfigureAwait(false);
 
         await EnsureGranterOutranksAsync(teamId, role, cancellationToken).ConfigureAwait(false);
+        await EnsureAddressIsAnEmailAsync(normalized, cancellationToken).ConfigureAwait(false);
         await EnsureNotAlreadyMemberAsync(team, normalized, cancellationToken).ConfigureAwait(false);
         await EnsureNoPendingInvitationAsync(teamId, normalized, cancellationToken).ConfigureAwait(false);
 
@@ -101,6 +102,7 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
                 Email = i.Email,
                 Role = i.Role,
                 InvitedByName = i.InvitedBy.Name,
+                InvitedByUserId = i.InvitedByUserId,
                 ExpiresAt = i.ExpiresAt,
                 IsExpired = i.ExpiresAt <= now,
             })
@@ -110,6 +112,8 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
     public async Task RevokeAsync(Guid invitationId, CancellationToken cancellationToken)
     {
         var invitation = await LoadPendingForTeamAsync(invitationId, cancellationToken).ConfigureAwait(false);
+
+        await EnsureMayRevokeAsync(invitation, cancellationToken).ConfigureAwait(false);
 
         invitation.Status = InvitationStatus.Revoked;
 
@@ -123,6 +127,8 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
     public async Task<CreateInvitationResult> RegenerateAsync(Guid invitationId, CancellationToken cancellationToken)
     {
         var invitation = await LoadPendingForTeamAsync(invitationId, cancellationToken).ConfigureAwait(false);
+
+        await EnsureMayRegenerateAsync(invitation, cancellationToken).ConfigureAwait(false);
 
         var token = MintToken();
         invitation.TokenHash = HashToken(token);
@@ -147,7 +153,7 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
             Role = invitation.Role,
             Email = invitation.Email,
             ExpiresAt = invitation.ExpiresAt,
-            AccountExists = await FindUserByEmailAsync(invitation.Email, cancellationToken).ConfigureAwait(false) != null,
+            ForSignedInAccount = await FindCallerAtAddressAsync(invitation, cancellationToken).ConfigureAwait(false) != null,
         };
     }
 
@@ -181,27 +187,47 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
 
     // ── Accepter ───────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Who accepts: the caller, when they are signed in as an account at the invited address; otherwise a new account,
+    /// and only at an address no live account holds in any letter case.
+    ///
+    /// <para>Everything a new account needs is checked BEFORE the address is looked up. Any account can open a workspace
+    /// and mint an invitation for an address of its choosing, so a refusal that differed by whether the address had an
+    /// account — "sign in first" for one, "password too short" for the other — answered that question for a malformed
+    /// body with no side effect. Now a malformed body, or a name already taken, gets the same answer either way; only a
+    /// well-formed accept tells the cases apart, and where there is no account it creates one and spends the
+    /// invitation.</para>
+    /// </summary>
     private async Task<User> ResolveAccepterAsync(TeamInvitation invitation, string? name, string? password, CancellationToken cancellationToken)
     {
-        var existing = await FindUserByEmailAsync(invitation.Email, cancellationToken).ConfigureAwait(false);
+        var caller = await FindCallerAtAddressAsync(invitation, cancellationToken).ConfigureAwait(false);
 
-        if (existing == null) return await CreateAccepterAsync(invitation.Email, name, password, cancellationToken).ConfigureAwait(false);
+        if (caller != null) return caller;
 
-        // The address has an account, so the account must prove itself. Without this, anyone holding
-        // the link could set a password on someone else's account by "accepting" as them.
-        var signedInId = _currentUser.Id ?? throw new InvitationRequiresSignInException();
+        var displayName = ValidateNewAccount(name, password);
 
-        if (signedInId != existing.Id) throw new InvitationEmailMismatchException();
+        await EnsureDisplayNameUnclaimedAsync(displayName, cancellationToken).ConfigureAwait(false);
+        await EnsureAddressUnheldAsync(invitation.Email, cancellationToken).ConfigureAwait(false);
 
-        return existing;
+        return await CreateAccepterAsync(invitation.Email, displayName, password!, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task<User> CreateAccepterAsync(string email, string? name, string? password, CancellationToken cancellationToken)
+    /// <summary>The trimmed display name of the account an accept would create, or <see cref="ArgumentException"/> / <see cref="DisplayNameLooksLikeEmailException"/> on input no account could be created from.</summary>
+    private static string ValidateNewAccount(string? name, string? password)
     {
         if (string.IsNullOrWhiteSpace(name)) throw new ArgumentException("A name is required to create an account.", nameof(name));
         if (string.IsNullOrEmpty(password) || password.Length < UserService.MinPasswordLength) throw new ArgumentException($"Password must be at least {UserService.MinPasswordLength} characters.", nameof(password));
 
-        var user = new User { Id = Guid.NewGuid(), Email = email, Name = name.Trim(), PasswordHash = _hasher.Hash(password) };
+        var displayName = name.Trim();
+
+        if (SignInIdentifier.LooksLikeEmail(displayName)) throw new DisplayNameLooksLikeEmailException();
+
+        return displayName;
+    }
+
+    private async Task<User> CreateAccepterAsync(string email, string displayName, string password, CancellationToken cancellationToken)
+    {
+        var user = new User { Id = Guid.NewGuid(), Email = email, Name = displayName, PasswordHash = _hasher.Hash(password) };
 
         _db.User.Add(user);
         // Its own workspace, from the one place that knows what a team needs in order to exist —
@@ -255,9 +281,90 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
         if (TeamRoleRank.Of(role) > TeamRoleRank.Of(granter)) throw new InvitationRoleExceedsGranterException(role, granter);
     }
 
+    /// <summary>
+    /// Withdrawing a grant raises nobody, so it reaches every invitation up to the caller's own rank, and every one the
+    /// caller sent (<see cref="TeamRoleRank.MayRevokeInvitation"/>) — including one whose sender has since left, been
+    /// demoted or handed the team on, which no one else could otherwise kill.
+    /// </summary>
+    private async Task EnsureMayRevokeAsync(TeamInvitation invitation, CancellationToken cancellationToken)
+    {
+        var actor = await _membership.ResolveRoleAsync(invitation.TeamId, cancellationToken).ConfigureAwait(false);
+
+        if (!TeamRoleRank.MayRevokeInvitation(actor, invitation.Role, isOwn: invitation.InvitedByUserId == RequireUser()))
+            throw new InvitationOutranksActorException(actor, invitation.Role);
+    }
+
+    /// <summary>
+    /// An invitation is the role it grants, waiting to be accepted, and regenerating one hands the caller a working link
+    /// to it — so it is acting at that role (<see cref="TeamRoleRank.MayRegenerateInvitation"/>). Without this an Admin
+    /// regenerated a pending Owner invitation, accepted it with an account of their own, and was Owner a minute later.
+    /// </summary>
+    private async Task EnsureMayRegenerateAsync(TeamInvitation invitation, CancellationToken cancellationToken)
+    {
+        var actor = await _membership.ResolveRoleAsync(invitation.TeamId, cancellationToken).ConfigureAwait(false);
+
+        if (!TeamRoleRank.MayRegenerateInvitation(actor, invitation.Role, isOwn: invitation.InvitedByUserId == RequireUser()))
+            throw new InvitationOutranksActorException(actor, invitation.Role);
+    }
+
+    /// <summary>
+    /// An invitation address is a sign-in identifier, and '@' is what keeps addresses apart from display names — sign-in
+    /// looks an identifier without one up as a name. Any text used to be accepted, so an account that could open a
+    /// workspace invited <c>admin</c>, accepted it, and held an address that answered for the seeded admin's name.
+    ///
+    /// <para>An '@'-less address a live account already holds stays invitable. Earlier versions created such accounts,
+    /// and an invitation is the only way into a team, so refusing them shut those accounts out of every other team. The
+    /// takeover needs a NEW account at the address, and accepting never creates one at a held address — only the holder,
+    /// signed in, may accept (<see cref="EnsureAddressUnheldAsync"/>).</para>
+    /// </summary>
+    private async Task EnsureAddressIsAnEmailAsync(string address, CancellationToken cancellationToken)
+    {
+        if (SignInIdentifier.LooksLikeEmail(address)) return;
+
+        if (await AccountAddress.IsHeldAsync(_db.User, address, cancellationToken).ConfigureAwait(false)) return;
+
+        throw new InvitationAddressNotAnEmailException();
+    }
+
+    /// <summary>
+    /// A display name is a sign-in identifier, so a new one must name nobody else: one another live account already
+    /// signs in with — as its name or its address — would make that identifier resolve to nobody, which was enough to
+    /// lock someone out of sign-in from any other tenant.
+    /// </summary>
+    private async Task EnsureDisplayNameUnclaimedAsync(string displayName, CancellationToken cancellationToken)
+    {
+        var key = SignInIdentifier.Normalize(displayName);
+
+        var claimed = await _db.User.AsNoTracking()
+            .AnyAsync(u => u.DeletedDate == null && (u.Name.ToLower() == key || u.Email.ToLower() == key), cancellationToken)
+            .ConfigureAwait(false);
+
+        if (claimed) throw new DisplayNameTakenException();
+    }
+
+    /// <summary>
+    /// The address has an account, so that account must prove itself by being the one signed in. Without this, anyone
+    /// holding the link could set a password on someone else's account by "accepting" as them.
+    ///
+    /// <para>"Has an account" is in ANY letter case. That makes this the application's own refusal to create a second
+    /// live account at an address — it does not rely on migration 0245's index, which a deployment that already had
+    /// such a pair runs without.</para>
+    /// </summary>
+    private async Task EnsureAddressUnheldAsync(string address, CancellationToken cancellationToken)
+    {
+        if (!await AccountAddress.IsHeldAsync(_db.User, address, cancellationToken).ConfigureAwait(false)) return;
+
+        throw _currentUser.Id == null ? new InvitationRequiresSignInException() : new InvitationEmailMismatchException();
+    }
+
+    /// <summary>
+    /// Resolved by the same rule sign-in uses, so an address two live accounts hold in different case (a deployment
+    /// that predates migration 0245) names the one spelled exactly as invited, or nobody — never an exception. Whoever
+    /// accepts is checked again by id.
+    /// </summary>
     private async Task EnsureNotAlreadyMemberAsync(Team team, string email, CancellationToken cancellationToken)
     {
-        var existing = await FindUserByEmailAsync(email, cancellationToken).ConfigureAwait(false);
+        var existing = await AccountAddress.ResolveAsync(_db.User, email, cancellationToken).ConfigureAwait(false);
 
         if (existing == null) return;
 
@@ -308,8 +415,16 @@ public sealed class TeamInvitationService : ITeamInvitationService, IScopedDepen
             ?? throw new InvitationNotUsableException();
     }
 
-    private async Task<User?> FindUserByEmailAsync(string email, CancellationToken cancellationToken) =>
-        await _db.User.SingleOrDefaultAsync(u => u.Email.ToLower() == email && u.DeletedDate == null, cancellationToken).ConfigureAwait(false);
+    /// <summary>
+    /// The caller's own account, when they are signed in as an account at this invitation's address (in any letter
+    /// case) — a fact about the caller, never about the address.
+    /// </summary>
+    private async Task<User?> FindCallerAtAddressAsync(TeamInvitation invitation, CancellationToken cancellationToken)
+    {
+        if (_currentUser.Id is not { } callerId) return null;
+
+        return await _db.User.SingleOrDefaultAsync(u => u.Id == callerId && u.DeletedDate == null && u.Email.ToLower() == invitation.Email, cancellationToken).ConfigureAwait(false);
+    }
 
     // ── Token ──────────────────────────────────────────────────────────────────────
 

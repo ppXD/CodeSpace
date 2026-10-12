@@ -7,6 +7,7 @@ import type { RepositorySummary } from "@/api/types";
 import { useProject, useProjects } from "@/hooks/use-projects";
 import { useCredentials, useProviderInstances } from "@/hooks/use-credentials";
 import { useRepositories, useUnbindRepository } from "@/hooks/use-repositories";
+import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { useConfirm } from "@/components/dialog";
 import { AddRepoModal } from "@/_imported/ai-code-space/add-repo-modal";
 import { ConnectRemoteModal } from "@/_imported/ai-code-space/connect-remote-modal";
@@ -91,6 +92,8 @@ function ProjectDetailPage() {
   const [connectOpen, setConnectOpen] = useState(false);
   const [moveTarget, setMoveTarget] = useState<RepositorySummary | null>(null);
   const unbind = useUnbindRepository();
+  // Adding (a bind), moving and removing (an unbind) a repository each take repos.manage — absent rather than refused.
+  const mayManageRepos = useTeamPermissions().can(TeamPermissions.ReposManage);
   const confirm = useConfirm();
 
   const setTab = (next: ProjectTab) =>
@@ -192,9 +195,11 @@ function ProjectDetailPage() {
             <button className="btn" onClick={() => setConnectOpen(true)}>
               <Ic.Link size={14} /> Connect remote
             </button>
-            <button className="btn btn-primary" onClick={() => setAddRepoOpen(true)}>
-              <Ic.Plus size={14} /> Add repository
-            </button>
+            {mayManageRepos && (
+              <button className="btn btn-primary" onClick={() => setAddRepoOpen(true)}>
+                <Ic.Plus size={14} /> Add repository
+              </button>
+            )}
           </div>
 
           <div className="ct-body">
@@ -211,9 +216,11 @@ function ProjectDetailPage() {
               <div className="ct-empty">
                 <div className="ct-empty-h">No repositories in this project yet</div>
                 <div className="ct-empty-p">
-                  Click <strong>+ Add repository</strong> above to pick from your provider's
-                  accessible repositories. Multi-select supported — every selected repo
-                  will be bound to this project.
+                  {mayManageRepos
+                    ? <>Click <strong>+ Add repository</strong> above to pick from your provider's
+                      accessible repositories. Multi-select supported — every selected repo
+                      will be bound to this project.</>
+                    : "Adding repositories isn't something your role can do. Ask a team Admin or the Owner."}
                 </div>
               </div>
             )}
@@ -268,16 +275,20 @@ function ProjectDetailPage() {
                             <button title="Open in provider" onClick={e => { e.stopPropagation(); window.open(r.webUrl, "_blank", "noopener"); }}>
                               <Ic.ArrowOut size={13} />
                             </button>
-                            <button title="Move to another project" onClick={e => { e.stopPropagation(); setMoveTarget(r); }}>
-                              <Ic.Folder size={13} />
-                            </button>
-                            <button
-                              title="Remove from this project"
-                              onClick={e => { e.stopPropagation(); void askUnbind(r); }}
-                              disabled={unbind.isPending && unbind.variables?.repositoryId === r.id}
-                            >
-                              <Ic.X size={13} />
-                            </button>
+                            {mayManageRepos && (
+                              <button title="Move to another project" onClick={e => { e.stopPropagation(); setMoveTarget(r); }}>
+                                <Ic.Folder size={13} />
+                              </button>
+                            )}
+                            {mayManageRepos && (
+                              <button
+                                title="Remove from this project"
+                                onClick={e => { e.stopPropagation(); void askUnbind(r); }}
+                                disabled={unbind.isPending && unbind.variables?.repositoryId === r.id}
+                              >
+                                <Ic.X size={13} />
+                              </button>
+                            )}
                           </span>
                         </td>
                       </tr>

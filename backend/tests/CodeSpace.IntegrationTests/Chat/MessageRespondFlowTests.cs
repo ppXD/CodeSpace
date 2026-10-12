@@ -309,7 +309,7 @@ public class MessageRespondFlowTests
 
         var cardId = await PostQuorumCardAsync(channelId, token, count: 2);
 
-        var member2 = await SeedUserAsync();
+        var member2 = await SeedTeamMemberAsync(teamId);
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IConversationService>().AddMemberAsync(teamId, ownerId, channelId, member2, default);
 
@@ -336,7 +336,7 @@ public class MessageRespondFlowTests
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var channelId = await SeedChannelAsync(teamId, ownerId);
 
-        var member2 = await SeedUserAsync();
+        var member2 = await SeedTeamMemberAsync(teamId);
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IConversationService>().AddMemberAsync(teamId, ownerId, channelId, member2, default);
 
@@ -410,7 +410,7 @@ public class MessageRespondFlowTests
     {
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var channelId = await SeedChannelAsync(teamId, ownerId);
-        var member2 = await SeedUserAsync();
+        var member2 = await SeedTeamMemberAsync(teamId);
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IConversationService>().AddMemberAsync(teamId, ownerId, channelId, member2, default);
 
@@ -454,7 +454,7 @@ public class MessageRespondFlowTests
     {
         var (teamId, ownerId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var channelId = await SeedChannelAsync(teamId, ownerId);
-        var member2 = await SeedUserAsync();
+        var member2 = await SeedTeamMemberAsync(teamId);
         using (var scope = _fixture.BeginScope())
             await scope.Resolve<IConversationService>().AddMemberAsync(teamId, ownerId, channelId, member2, default);
 
@@ -664,6 +664,18 @@ public class MessageRespondFlowTests
     {
         using var scope = _fixture.BeginScope();
         await scope.Resolve<IMessageInteractionService>().RespondAsync(teamId, messageId, responseKey, actorUserId, comment, null, default);
+    }
+
+    /// <summary>An account in the team — the only kind a conversation in that team may hold.</summary>
+    private async Task<Guid> SeedTeamMemberAsync(Guid teamId)
+    {
+        var userId = await SeedUserAsync();
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Member });
+        await db.SaveChangesAsync();
+        return userId;
     }
 
     private async Task<Guid> SeedUserAsync()

@@ -15,7 +15,7 @@ describe("invite acceptance", () => {
     role: "Member",
     email: "maya@team.dev",
     expiresAt: new Date(Date.now() + 6 * 86_400_000).toISOString(),
-    accountExists: false,
+    forSignedInAccount: false,
   };
 
   afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); });
@@ -33,13 +33,25 @@ describe("invite acceptance", () => {
     expect(screen.getByText(/maya@team\.dev/)).toBeTruthy();
   });
 
-  it("asks an existing account to join rather than to set a password", async () => {
-    stubFetch({ "/api/invitations/": { ...preview, accountExists: true } });
+  it("asks the invited account, signed in, to join rather than to set a password", async () => {
+    stubFetch({ "/api/invitations/": { ...preview, forSignedInAccount: true } });
 
     await renderRoute("/invite/good-token");
 
     await waitFor(() => expect(screen.getByText("Join the team")).toBeTruthy());
     expect(screen.queryByText("Set a password")).toBeNull();
+  });
+
+  it("offers everyone else the create form with a way to sign in instead", async () => {
+    // The preview no longer says whether the address has an account, so a visitor who already has one is
+    // pointed at sign-in from the same form rather than being told up front.
+    stubFetch({ "/api/invitations/": preview });
+
+    await renderRoute("/invite/good-token");
+
+    await waitFor(() => expect(screen.getByText("Create your account")).toBeTruthy());
+    expect(screen.getByText("Set a password")).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Sign in" }).getAttribute("href")).toBe("/signin");
   });
 
   it("explains a dead token in place instead of bouncing to sign-in", async () => {

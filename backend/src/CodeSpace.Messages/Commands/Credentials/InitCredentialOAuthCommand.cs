@@ -24,7 +24,11 @@ public sealed record InitCredentialOAuthCommand : ICommand<InitCredentialOAuthRe
     /// </summary>
     public Guid? IntendedOwnerUserId { get; init; }
 
-    /// <summary>Where to redirect the browser after success. Opaque to the backend; passed through verbatim with query params appended.</summary>
+    /// <summary>
+    /// Where to redirect the browser after success, with query params appended. Must be a path on this site
+    /// (a single leading '/') or an address on the deployment's public origin; anything else is refused here,
+    /// before a flow starts, and checked again at the callback.
+    /// </summary>
     public string? ReturnUrl { get; init; }
 
     /// <summary>Override the provider_instance's default scope list. Usually null.</summary>
@@ -35,4 +39,16 @@ public sealed record InitCredentialOAuthResult
 {
     public required Uri AuthorizeUrl { get; init; }
     public required string State { get; init; }
+
+    /// <summary>The nonce that binds this flow to the starting browser. The controller sets it as an HttpOnly cookie and never returns it in a body.</summary>
+    public required string BrowserNonce { get; init; }
+
+    /// <summary>How long the flow stays completable — the binding cookie expires with it.</summary>
+    public required TimeSpan Lifetime { get; init; }
+
+    /// <summary>
+    /// The path the binding cookie is scoped to: the callback's own, as the browser is sent to it (<c>OAuth:CallbackUrl</c>,
+    /// so it holds behind a path-rewriting proxy). Carried here so the controller needs nothing but the mediator.
+    /// </summary>
+    public required string BrowserNonceCookiePath { get; init; }
 }

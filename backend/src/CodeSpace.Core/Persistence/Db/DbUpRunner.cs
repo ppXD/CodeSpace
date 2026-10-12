@@ -95,7 +95,8 @@ public class DbUpRunner
     {
         var assemblyLocation = Path.GetDirectoryName(Assembly.GetExecutingAssembly().Location) ?? string.Empty;
 
-        return DeployChanges.To.PostgresqlDatabase(_connectionString)
+        // A migration's RAISE WARNING printed under the script that raised it, not only in the server's own log.
+        return DeployChanges.To.PostgresqlDatabase(new WarningForwardingConnectionManager(_connectionString))
             .WithScriptsFromFileSystem(
                 Path.Combine(assemblyLocation, ScriptFolder),
                 new FileSystemScriptOptions { IncludeSubDirectories = true })

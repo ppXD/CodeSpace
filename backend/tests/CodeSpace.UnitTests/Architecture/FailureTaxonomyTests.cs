@@ -99,6 +99,11 @@ public class FailureTaxonomyTests
         FailureCodes.InvitationEmailMismatch.ShouldBe("invitation_email_mismatch");
         FailureCodes.InvitationRequiresSignIn.ShouldBe("invitation_requires_sign_in");
         FailureCodes.InvitationRoleExceedsGranter.ShouldBe("invitation_role_exceeds_granter");
+        FailureCodes.InvitationOutranksActor.ShouldBe("invitation_outranks_actor");
+        FailureCodes.InvitationAddressNotAnEmail.ShouldBe("invitation_address_not_an_email");
+        FailureCodes.DisplayNameLooksLikeEmail.ShouldBe("display_name_looks_like_email");
+        FailureCodes.DisplayNameTaken.ShouldBe("display_name_taken");
+        FailureCodes.ConversationParticipantNotInTeam.ShouldBe("conversation_participant_not_in_team");
         FailureCodes.PersonalTeamNotInvitable.ShouldBe("personal_team_not_invitable");
         FailureCodes.InvitationAlreadyPending.ShouldBe("invitation_already_pending");
         FailureCodes.AlreadyTeamMember.ShouldBe("already_team_member");

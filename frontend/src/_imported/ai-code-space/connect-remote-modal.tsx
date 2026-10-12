@@ -294,7 +294,12 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
   // before it can be submitted, so a member who cannot add a provider would type one into a request
   // that was never going to land. Asked as a permission — the server's matrix stays the only copy of
   // which role holds it.
-  const mayAddProvider = useTeamPermissions().can(TeamPermissions.ReposManage);
+  const { can } = useTeamPermissions();
+  const mayAddProvider = can(TeamPermissions.ReposManage);
+  // Team tokens are nobody's own, so adding or revoking one takes credentials.manage, and so does starting an OAuth
+  // connect (the server's init declares it) — unlike Disconnect on the Personal tab, which only ever lists the
+  // caller's own credentials, and "Use a token", which links a personal token: both stay theirs on membership alone.
+  const mayManageCredentials = can(TeamPermissions.CredentialsManage);
   return (
     <>
       <div className="mdl-head">
@@ -351,10 +356,10 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
                     isConnecting={connectingId === instance.id}
                     revokingId={revokingId}
                     errorMsg={errors[instance.id]}
-                    onConnect={onConnect}
+                    onConnect={mayManageCredentials ? onConnect : null}
                     onConnectPat={onConnectPat}
                     onDisconnect={onDisconnect}
-                    onEdit={onEditProvider}
+                    onEdit={mayAddProvider ? onEditProvider : null}
                   />
                 ))}
               </div>
@@ -371,8 +376,8 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
                       theme={PROVIDER_THEME[instance.provider]}
                       creds={teamServiceCreds.filter(c => c.providerInstanceId === instance.id)}
                       revokingId={revokingId}
-                      onAdd={onAddTeamToken}
-                      onRevoke={onRevokeTeamCred}
+                      onAdd={mayManageCredentials ? onAddTeamToken : null}
+                      onRevoke={mayManageCredentials ? onRevokeTeamCred : null}
                     />
                   ))}
                 </div>
@@ -402,10 +407,12 @@ interface ProviderRowProps {
   isConnecting: boolean;
   revokingId: string | null;
   errorMsg: string | undefined;
-  onConnect: (instance: ProviderInstanceSummary) => void;
+  /** Null when the caller may not start an OAuth connect — the button is absent rather than present-and-refused. */
+  onConnect: ((instance: ProviderInstanceSummary) => void) | null;
   onConnectPat: (instance: ProviderInstanceSummary) => void;
   onDisconnect: (credential: CredentialSummary) => void;
-  onEdit: (instance: ProviderInstanceSummary) => void;
+  /** Null when the caller may not edit or remove the provider — its menu and "Configure OAuth" are absent. */
+  onEdit: ((instance: ProviderInstanceSummary) => void) | null;
 }
 
 function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, errorMsg, onConnect, onConnectPat, onDisconnect, onEdit }: ProviderRowProps) {
@@ -415,10 +422,11 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
 
   // Connect affordances for the methods NOT yet linked. OAuth needs a configured app; a personal
   // token is always available; a provider with no OAuth app instead offers "Configure OAuth".
-  const canConnectOAuth = instance.oauthEnabled && !hasOAuth;
+  const connectOAuth = instance.oauthEnabled && !hasOAuth ? onConnect : null;
   const canConnectPat = !hasPat;
   const needsOAuthSetup = !instance.oauthEnabled;
-  const showConnect = canConnectOAuth || canConnectPat || needsOAuthSetup;
+  const configureOAuth = needsOAuthSetup ? onEdit : null;
+  const showConnect = connectOAuth != null || canConnectPat || configureOAuth != null;
 
   return (
     <div className="cn-row">
@@ -444,7 +452,7 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
             <span title={instance.baseUrl}>{instance.baseUrl}</span>
           </div>
         </div>
-        <ProviderRowMenu instance={instance} hasCredential={connected} onEdit={onEdit} />
+        {onEdit && <ProviderRowMenu instance={instance} hasCredential={connected} onEdit={onEdit} />}
       </div>
 
       {/* What you HAVE — one uniform row per linked credential, labelled by method, each independently revocable. */}
@@ -472,8 +480,8 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
         <div className="cn-connect">
           {!connected && <span className="cn-connect-hint">{purposeFor(instance.provider, instance.oauthEnabled)}</span>}
           <div className="cn-connect-btns">
-            {canConnectOAuth && (
-              <button className={connected ? "btn" : "btn btn-primary"} onClick={() => onConnect(instance)} disabled={isConnecting}>
+            {connectOAuth && (
+              <button className={connected ? "btn" : "btn btn-primary"} onClick={() => connectOAuth(instance)} disabled={isConnecting}>
                 {isConnecting ? <><Ic.Clock size={13} /> Connecting…</> : <><Ic.Link size={13} /> Connect with OAuth</>}
               </button>
             )}
@@ -482,8 +490,8 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
                 <Ic.Key size={13} /> Use a token
               </button>
             )}
-            {needsOAuthSetup && (
-              <button className="btn btn-ghost" onClick={() => onEdit(instance)} title="Set up an OAuth app for one-click sign-in">
+            {configureOAuth && (
+              <button className="btn btn-ghost" onClick={() => configureOAuth(instance)} title="Set up an OAuth app for one-click sign-in">
                 Configure OAuth
               </button>
             )}
@@ -508,8 +516,10 @@ function TeamProviderGroup({ instance, theme, creds, revokingId, onAdd, onRevoke
   theme: { initials: string; label: string };
   creds: CredentialSummary[];
   revokingId: string | null;
-  onAdd: (instance: ProviderInstanceSummary) => void;
-  onRevoke: (credential: CredentialSummary) => void;
+  /** Null when the caller may not add team tokens — the button is absent rather than present-and-refused. */
+  onAdd: ((instance: ProviderInstanceSummary) => void) | null;
+  /** Null when the caller may not revoke team tokens — the button is absent rather than present-and-refused. */
+  onRevoke: ((credential: CredentialSummary) => void) | null;
 }) {
   const supportsTeamToken = providerSupportsTeamServiceCredential(instance.provider);
 
@@ -527,14 +537,16 @@ function TeamProviderGroup({ instance, theme, creds, revokingId, onAdd, onRevoke
           <div key={c.id} className="cn-tg-cred">
             <Ic.Key size={12} />
             <span className="cn-tg-cred-name" title={c.displayName}>{c.displayName}</span>
-            <button className="btn btn-ghost" onClick={() => onRevoke(c)} disabled={revokingId === c.id}>
-              {revokingId === c.id ? "Revoking…" : "Revoke"}
-            </button>
+            {onRevoke && (
+              <button className="btn btn-ghost" onClick={() => onRevoke(c)} disabled={revokingId === c.id}>
+                {revokingId === c.id ? "Revoking…" : "Revoke"}
+              </button>
+            )}
           </div>
         ))}
 
         {supportsTeamToken ? (
-          <button className="btn btn-ghost cn-tg-add" onClick={() => onAdd(instance)}><Ic.Plus size={13} /> Add team token</button>
+          onAdd && <button className="btn btn-ghost cn-tg-add" onClick={() => onAdd(instance)}><Ic.Plus size={13} /> Add team token</button>
         ) : (
           <div className="cn-tg-note">Team tokens use a {theme.label} App — coming soon. For now, members connect personally on the Personal tab.</div>
         )}

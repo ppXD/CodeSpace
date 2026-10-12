@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Providers.Identity;
+using CodeSpace.Core.Settings.Application;
 using CodeSpace.Core.Settings.OAuth;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Credentials;
@@ -30,8 +31,9 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
     private readonly IUserProviderIdentityService _identityService;
     private readonly ICredentialSuccessionService _succession;
     private readonly OAuthCallbackUrlSetting _callbackUrlSetting;
+    private readonly PublicBaseUrlSetting _publicBaseUrl;
 
-    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, ICredentialSuccessionService succession, OAuthCallbackUrlSetting callbackUrlSetting)
+    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, ICredentialSuccessionService succession, OAuthCallbackUrlSetting callbackUrlSetting, PublicBaseUrlSetting publicBaseUrl)
     {
         _db = db;
         _oauthClients = oauthClients;
@@ -44,14 +46,18 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         _identityService = identityService;
         _succession = succession;
         _callbackUrlSetting = callbackUrlSetting;
+        _publicBaseUrl = publicBaseUrl;
     }
 
     public async Task<InitCredentialOAuthResult> InitAsync(Guid providerInstanceId, string displayName, Guid? intendedOwnerUserId, string? returnUrl, IReadOnlyList<string>? scopes, CancellationToken cancellationToken)
     {
+        EnsureReturnUrlAllowed(returnUrl);
+
         var instance = await LoadOwnedInstanceAsync(providerInstanceId, cancellationToken).ConfigureAwait(false);
         var (clientId, _) = ReadOAuthClientCredentials(instance);
 
         var pkce = _pkce.Generate();
+        var browserNonce = OAuthBrowserNonce.Mint();
 
         var pending = await _stateStore.CreateAsync(new OAuthPendingStateInput
         {
@@ -62,6 +68,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
             IntendedDisplayName = displayName,
             IntendedOwnerUserId = intendedOwnerUserId ?? _currentUser.Id!.Value,
             ReturnUrl = returnUrl,
+            BrowserNonceHash = OAuthBrowserNonce.Hash(browserNonce),
             RequestedScopes = scopes ?? instance.OauthDefaultScopes,
             Ttl = StateTtl
         }, cancellationToken).ConfigureAwait(false);
@@ -78,12 +85,12 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
             Scopes = pending.RequestedScopes
         });
 
-        return new InitCredentialOAuthResult { AuthorizeUrl = authorizeUrl, State = pending.State };
+        return new InitCredentialOAuthResult { AuthorizeUrl = authorizeUrl, State = pending.State, BrowserNonce = browserNonce, Lifetime = StateTtl, BrowserNonceCookiePath = ResolveCallbackUri().AbsolutePath };
     }
 
-    public async Task<CompleteCredentialOAuthResult> CompleteAsync(string state, string code, CancellationToken cancellationToken)
+    public async Task<CompleteCredentialOAuthResult> CompleteAsync(string state, string code, string? browserNonce, CancellationToken cancellationToken)
     {
-        var pending = await ConsumeStateAsync(state, cancellationToken).ConfigureAwait(false);
+        var pending = await ConsumeStateAsync(state, browserNonce, cancellationToken).ConfigureAwait(false);
         var instance = await LoadInstanceAsync(pending.ProviderInstanceId, cancellationToken).ConfigureAwait(false);
         var (clientId, clientSecret) = ReadOAuthClientCredentials(instance);
 
@@ -99,8 +106,22 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         {
             CredentialId = credential.Id,
             TeamId = pending.TeamId,
-            ReturnUrl = pending.ReturnUrl ?? "/"
+            // Checked again rather than trusted from init: the public origin can change while a connect is pending.
+            ReturnUrl = OAuthReturnUrl.AllowedOrFallback(pending.ReturnUrl, _publicBaseUrl.Value),
+            BrowserNonceCookiePath = ResolveCallbackUri().AbsolutePath
         };
+    }
+
+    /// <summary>
+    /// Refused before a flow starts, so a connect can never be set up to end on someone else's page. The address
+    /// comes from whoever starts the connect, and the browser that follows it has just come from a consent screen
+    /// that made the whole trip look legitimate.
+    /// </summary>
+    private void EnsureReturnUrlAllowed(string? returnUrl)
+    {
+        if (returnUrl == null || OAuthReturnUrl.IsAllowed(returnUrl, _publicBaseUrl.Value)) return;
+
+        throw new ArgumentException("returnUrl must be a path on this site or an address on its public origin.", nameof(returnUrl));
     }
 
     /// <summary>
@@ -133,14 +154,23 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
 
     // Complete-internals (callback runs anonymous, no current-team check).
 
-    private async Task<OAuthPendingState> ConsumeStateAsync(string state, CancellationToken cancellationToken)
+    /// <summary>
+    /// Consumes the state only together with the nonce of the browser that started the flow. A callback from any
+    /// other browser — the person an authorize link was forwarded to, or nobody at all — matches no row, so nothing
+    /// is consumed, exchanged or persisted and the starting browser can still finish. One message for every refusal:
+    /// telling "wrong browser" from "no such state" would only confirm which states are live.
+    /// </summary>
+    private async Task<OAuthPendingState> ConsumeStateAsync(string state, string? browserNonce, CancellationToken cancellationToken)
     {
-        var row = await _stateStore.ConsumeAsync(state, cancellationToken).ConfigureAwait(false);
+        if (string.IsNullOrEmpty(browserNonce))
+            throw UnusableState();
 
-        if (row == null) throw new OAuthCallbackException("state token missing, expired, or already consumed");
+        var row = await _stateStore.ConsumeAsync(state, OAuthBrowserNonce.Hash(browserNonce), cancellationToken).ConfigureAwait(false);
 
-        return row;
+        return row ?? throw UnusableState();
     }
+
+    private static OAuthCallbackException UnusableState() => new("state token missing, expired, already consumed, or not started in this browser");
 
     private async Task<ProviderInstance> LoadInstanceAsync(Guid id, CancellationToken cancellationToken) =>
         await _db.ProviderInstance.FirstOrDefaultAsync(p => p.Id == id && p.DeletedDate == null, cancellationToken).ConfigureAwait(false)

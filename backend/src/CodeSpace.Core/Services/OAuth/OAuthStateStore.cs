@@ -25,6 +25,7 @@ public sealed class OAuthStateStore : IOAuthStateStore, IScopedDependency
             IntendedDisplayName = input.IntendedDisplayName,
             IntendedOwnerUserId = input.IntendedOwnerUserId,
             ReturnUrl = input.ReturnUrl,
+            BrowserNonceHash = input.BrowserNonceHash,
             RequestedScopes = input.RequestedScopes?.ToList(),
             ExpiresDate = _clock.GetUtcNow() + input.Ttl
         };
@@ -33,9 +34,9 @@ public sealed class OAuthStateStore : IOAuthStateStore, IScopedDependency
         return row;
     }
 
-    public async Task<OAuthPendingState?> ConsumeAsync(string state, CancellationToken cancellationToken)
+    public async Task<OAuthPendingState?> ConsumeAsync(string state, string browserNonceHash, CancellationToken cancellationToken)
     {
-        var row = await _db.OAuthPendingState.FirstOrDefaultAsync(r => r.State == state, cancellationToken).ConfigureAwait(false);
+        var row = await _db.OAuthPendingState.FirstOrDefaultAsync(r => r.State == state && r.BrowserNonceHash == browserNonceHash, cancellationToken).ConfigureAwait(false);
 
         if (row == null) return null;
 

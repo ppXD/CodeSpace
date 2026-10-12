@@ -54,7 +54,7 @@ function AcceptForm({ token, invitation }: { token: string; invitation: Invitati
   const [password, setPassword] = useState("");
 
   const accept = useMutation({
-    mutationFn: () => invitationsApi.accept(token, invitation.accountExists ? {} : { name: name.trim(), password }),
+    mutationFn: () => invitationsApi.accept(token, invitation.forSignedInAccount ? {} : { name: name.trim(), password }),
     onSuccess: async (response) => {
       storeJwt(response.token);
 
@@ -70,7 +70,7 @@ function AcceptForm({ token, invitation }: { token: string; invitation: Invitati
   });
 
   const passwordTooShort = password.length > 0 && password.length < MIN_PASSWORD_LENGTH;
-  const ready = invitation.accountExists || (name.trim().length > 0 && password.length >= MIN_PASSWORD_LENGTH);
+  const ready = invitation.forSignedInAccount || (name.trim().length > 0 && password.length >= MIN_PASSWORD_LENGTH);
 
   const errorMessage =
     accept.error instanceof ApiError ? accept.error.message
@@ -95,11 +95,11 @@ function AcceptForm({ token, invitation }: { token: string; invitation: Invitati
         </>
       }
     >
-      <h1 className="auth-title">{invitation.accountExists ? "Join the team" : "Create your account"}</h1>
+      <h1 className="auth-title">{invitation.forSignedInAccount ? "Join the team" : "Create your account"}</h1>
       <p className="auth-lede">Joining as {invitation.email}</p>
 
       <form className="auth-form" onSubmit={submit}>
-        {!invitation.accountExists && (
+        {!invitation.forSignedInAccount && (
           <>
             <label className="auth-field">
               <span className="auth-label">Your name</span>
@@ -139,9 +139,9 @@ function AcceptForm({ token, invitation }: { token: string; invitation: Invitati
       </form>
 
       <p className="auth-note">
-        {invitation.accountExists
-          ? <>This address already has an account. <Link to="/signin">Sign in</Link> if you'd rather join from there.</>
-          : <>You'll also get a personal workspace of your own, separate from this team.</>}
+        {invitation.forSignedInAccount
+          ? <>You're signed in as this address, so joining adds the team to your account.</>
+          : <>Already have an account at this address? <Link to="/signin">Sign in</Link>, then open this link again. Otherwise you'll also get a personal workspace of your own, separate from this team.</>}
       </p>
     </AuthShell>
   );

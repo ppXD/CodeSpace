@@ -6,6 +6,7 @@ import type { CredentialSummary, ProviderInstanceSummary, ProviderKind, Reposito
 import { useAlert, useConfirm } from "@/components/dialog";
 import { useCredentials, useProviderInstances } from "@/hooks/use-credentials";
 import { useRelinkRepositoryCredential, useRepositories, useUnbindRepository } from "@/hooks/use-repositories";
+import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { credentialOwnershipLabel } from "@/lib/credentialOrdering";
 
 import { AddRepoModal } from "./add-repo-modal";
@@ -91,6 +92,9 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
   const credentials = useCredentials();
   const unbind = useUnbindRepository();
   const confirm = useConfirm();
+  // Adding (a bind), unbinding and re-linking a repository all take repos.manage on the server. Without it the
+  // controls are absent rather than present-and-refused; the Error badge still says the repository needs a credential.
+  const mayManageRepos = useTeamPermissions().can(TeamPermissions.ReposManage);
 
   const instanceById = useMemo(() => new Map((instances.data ?? []).map(i => [i.id, i])), [instances.data]);
   const credentialById = useMemo(() => new Map((credentials.data ?? []).map(c => [c.id, c])), [credentials.data]);
@@ -157,9 +161,11 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
             <button className="btn" onClick={() => setConnectOpen(true)}>
               <Ic.Link size={14} /> Connect remote
             </button>
-            <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
-              <Ic.Plus size={14} /> Add repository
-            </button>
+            {mayManageRepos && (
+              <button className="btn btn-primary" onClick={() => setAddOpen(true)}>
+                <Ic.Plus size={14} /> Add repository
+              </button>
+            )}
           </div>
         </div>
         <div className="ct-tabs">
@@ -245,7 +251,7 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
                           {/* Error-state CTA — always visible (not hover-only) because a broken
                               repo needs a clear, discoverable fix. The action sits on the row's
                               second line so it can't be missed even at a glance. */}
-                          {r.status === "Error" && (
+                          {r.status === "Error" && mayManageRepos && (
                             <RepoCredentialIssueAction
                               repository={r}
                               allCredentials={allCredentials}
@@ -276,13 +282,15 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
                         <button title="Open in provider" onClick={e => { e.stopPropagation(); window.open(r.webUrl, "_blank", "noopener"); }}>
                           <Ic.ArrowOut size={14} />
                         </button>
-                        <button
-                          title="Unbind"
-                          onClick={e => { e.stopPropagation(); void askUnbind(r); }}
-                          disabled={unbind.isPending && unbind.variables?.repositoryId === r.id}
-                        >
-                          <Ic.X size={14} />
-                        </button>
+                        {mayManageRepos && (
+                          <button
+                            title="Unbind"
+                            onClick={e => { e.stopPropagation(); void askUnbind(r); }}
+                            disabled={unbind.isPending && unbind.variables?.repositoryId === r.id}
+                          >
+                            <Ic.X size={14} />
+                          </button>
+                        )}
                       </span>
                     </td>
                   </tr>
