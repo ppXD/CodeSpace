@@ -206,8 +206,12 @@ public sealed partial class AgentRunService : IAgentRunService, IRunningAgentCan
     // Withdraws a cancelled run's brokered model credential before its process is killed. Optional like _completeness
     // — a deployment (or a hand-built double) with no broker simply has nothing to withdraw.
     private readonly Credentials.IModelCredentialBroker? _credentialBroker;
+    // Seals a task that embeds workflow secrets (AgentTaskSecrets) — task_jsonb masked, the exact copy encrypted. Optional
+    // like the two above: a hand-built double that never stages such a task does not have to know about it, and one that
+    // does without a sealer is refused rather than persisted in the clear.
+    private readonly Workflows.Runtime.WorkflowSensitivePayloadSealer? _sealer;
 
-    public AgentRunService(CodeSpaceDbContext db, AgentRunRuntimeServices runtime, ExecutionAuthorityService authority, ILogger<AgentRunService> logger, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null)
+    public AgentRunService(CodeSpaceDbContext db, AgentRunRuntimeServices runtime, ExecutionAuthorityService authority, ILogger<AgentRunService> logger, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null, Workflows.Runtime.WorkflowSensitivePayloadSealer? sealer = null)
     {
         _db = db;
         _admissionController = runtime.Admission;
@@ -222,6 +226,7 @@ public sealed partial class AgentRunService : IAgentRunService, IRunningAgentCan
         _logger = logger;
         _completeness = completeness;
         _credentialBroker = credentialBroker;
+        _sealer = sealer;
     }
 
     public async Task<AgentRun> CreateAsync(AgentTask task, Guid teamId, Guid? workflowRunId, string? nodeId, string iterationKey = "", CancellationToken cancellationToken = default)
@@ -239,6 +244,12 @@ public sealed partial class AgentRunService : IAgentRunService, IRunningAgentCan
 
     private async Task<AgentRun> PersistCreatedAsync(AgentRunCreation creation, CancellationToken cancellationToken)
     {
+        // A task staged while a workflow node executes (a supervisor's spawn, a plan reviewer) embeds that node scope's
+        // secrets exactly like one the engine stages for agent.run — the node's ambient capture redactor IS its scope's
+        // persistence redactor — so it is masked the same way whichever caller created it.
+        var task = AgentTaskSecrets.Embed(creation.Task, Workflows.Llm.LlmCallContext.Current?.CaptureRedactor);
+        var sealedTask = AgentTaskSecrets.Seal(task, _sealer);
+
         var run = new AgentRun
         {
             Id = creation.RunId,
@@ -254,8 +265,10 @@ public sealed partial class AgentRunService : IAgentRunService, IRunningAgentCan
             // The task envelope is NOT all our own words: the P5-2 retry path folds the prior attempt's acceptance
             // check output — a raw subprocess tail — into task.Goal, so the incident's own retry can arrive here
             // carrying the very byte that killed the first attempt. Sanitized at THIS seam rather than at the splice
-            // because this is where the bytes meet the column.
-            TaskJson = PersistedText.SanitizeJson(JsonSerializer.Serialize(creation.Task, AgentJson.Options))!,
+            // because this is where the bytes meet the column (AgentTaskSecrets.Seal). A task that embeds workflow
+            // secrets lands MASKED here; the executor launches from the sealed exact copy beside it.
+            TaskJson = sealedTask.PublicJson,
+            SealedTaskCiphertext = sealedTask.Ciphertext,
         };
 
         _db.AgentRun.Add(run);
@@ -263,7 +276,10 @@ public sealed partial class AgentRunService : IAgentRunService, IRunningAgentCan
 
         _logger.LogInformation("Agent run created. RunId={RunId} Harness={Harness} TeamId={TeamId}", run.Id, run.Harness, creation.TeamId);
 
-        await StakeWorkflowAgentObligationsAsync(creation.Task, creation.TeamId, creation.WorkflowRunId, creation.NodeId, creation.IterationKey, cancellationToken).ConfigureAwait(false);
+        // Staked from the PERSISTED task: the completion composer re-derives the contract hash from task_jsonb, so a
+        // goal masked there must be the goal hashed here or the two would never agree.
+        var stakedTask = sealedTask.Ciphertext is null ? task : JsonSerializer.Deserialize<AgentTask>(sealedTask.PublicJson, AgentJson.Options)!;
+        await StakeWorkflowAgentObligationsAsync(stakedTask, creation.TeamId, creation.WorkflowRunId, creation.NodeId, creation.IterationKey, cancellationToken).ConfigureAwait(false);
 
         return run;
     }

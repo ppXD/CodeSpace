@@ -20,12 +20,26 @@ public sealed class PersistenceSecretRedactor
 
     public static PersistenceSecretRedactor FromScope(NodeRunScope scope)
     {
-        var secrets = new List<string>();
+        var secrets = new List<string>(scope.InheritedSecretValues);
         foreach (var path in scope.SecretPaths)
         {
             if (TryResolve(scope, path, out var value)) CollectScalarValues(value, secrets);
         }
         return new PersistenceSecretRedactor(secrets);
+    }
+
+    /// <summary>
+    /// The secret values that occur anywhere in <paramref name="value"/> — inside a string or a property name, or as an
+    /// exact non-string scalar: precisely the ones <see cref="Redact(JsonElement)"/> would mask. A payload that crosses
+    /// into another run (an agent's task, a child's inputs) carries exactly these, so the receiving run treats as
+    /// secret what it was handed and nothing more of this scope.
+    /// </summary>
+    public IReadOnlyList<string> FoundIn(JsonElement value)
+    {
+        var texts = new List<string>();
+        var scalars = new HashSet<string>(StringComparer.Ordinal);
+        CollectTexts(value, texts, scalars);
+        return _secrets.Where(secret => scalars.Contains(secret) || texts.Any(text => text.Contains(secret, StringComparison.Ordinal))).ToArray();
     }
 
     public PersistenceRedaction<string?> Redact(string? value)
@@ -94,6 +108,31 @@ public sealed class PersistenceSecretRedactor
                 {
                     value.WriteTo(writer);
                 }
+                break;
+        }
+    }
+
+    private static void CollectTexts(JsonElement value, ICollection<string> texts, ISet<string> scalars)
+    {
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Object:
+                foreach (var property in value.EnumerateObject())
+                {
+                    texts.Add(property.Name);
+                    CollectTexts(property.Value, texts, scalars);
+                }
+                break;
+            case JsonValueKind.Array:
+                foreach (var item in value.EnumerateArray()) CollectTexts(item, texts, scalars);
+                break;
+            case JsonValueKind.String:
+                texts.Add(value.GetString() ?? "");
+                break;
+            case JsonValueKind.Number:
+            case JsonValueKind.True:
+            case JsonValueKind.False:
+                scalars.Add(value.GetRawText());
                 break;
         }
     }

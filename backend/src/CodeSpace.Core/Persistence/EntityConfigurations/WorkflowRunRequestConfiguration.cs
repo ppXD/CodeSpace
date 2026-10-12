@@ -17,6 +17,7 @@ public class WorkflowRunRequestConfiguration : IEntityTypeConfiguration<Workflow
         builder.Property(r => r.ActivationSnapshotJson).HasColumnName("activation_snapshot_json").HasColumnType("jsonb");
         builder.Property(r => r.RawHeadersRedactedJson).HasColumnName("raw_headers_redacted_json").HasColumnType("jsonb");
         builder.Property(r => r.NormalizedPayloadJson).HasColumnName("normalized_payload_json").HasColumnType("jsonb");
+        builder.Property(r => r.SealedPayloadCiphertext).HasColumnName("sealed_payload_ciphertext");
         builder.Property(r => r.RequestMetadataJson).HasColumnName("request_metadata_json").HasColumnType("jsonb");
         builder.Property(r => r.VerificationResultJson).HasColumnName("verification_result_json").HasColumnType("jsonb");
     }

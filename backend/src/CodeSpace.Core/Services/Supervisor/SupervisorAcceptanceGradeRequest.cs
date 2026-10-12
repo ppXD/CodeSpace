@@ -16,6 +16,9 @@ public sealed record RepositoryAcceptanceGradeRequest
 
     /// <summary>The producing run's sandbox posture the grade runs under. Required so no lane can forget it; null grades with network off under the Confined tier's ceilings.</summary>
     public required AcceptanceGradingPosture? Posture { get; init; }
+
+    /// <summary>The exact workflow-secret values the producing run's task embeds (<c>AgentTask.WorkflowSecrets</c>). An authored acceptance argv can carry one, and the grade's evidence repeats the argv and the check's output, so everything the grade persists masks them. The check itself runs with the exact argv. Null masks nothing.</summary>
+    public IReadOnlyList<string>? WorkflowSecrets { get; init; }
 }
 
 /// <summary>A delayed captured-deliverable acceptance grade with the producer identity that authored the files.</summary>
@@ -46,6 +49,9 @@ public sealed record PatchAcceptanceGradeRequest
 
     /// <summary>The producing run's sandbox posture the grade runs under. Required so no lane can forget it; null grades with network off under the Confined tier's ceilings.</summary>
     public required AcceptanceGradingPosture? Posture { get; init; }
+
+    /// <summary>The exact workflow-secret values the producing run's task embeds (<c>AgentTask.WorkflowSecrets</c>). An authored acceptance argv can carry one, and the grade's evidence repeats the argv and the check's output, so everything the grade persists masks them. The check itself runs with the exact argv. Null masks nothing.</summary>
+    public IReadOnlyList<string>? WorkflowSecrets { get; init; }
 }
 
 /// <summary>A baseline grade of a unit's base tree, under the SAME posture as the candidate it is compared against, so the differential measures the work and not two different sandboxes.</summary>
@@ -71,4 +77,7 @@ public sealed record DirectoryAcceptanceGradeRequest
 
     /// <summary>The producing run's sandbox posture the grade runs under. Required so no lane can forget it; null grades with network off under the Confined tier's ceilings.</summary>
     public required AcceptanceGradingPosture? Posture { get; init; }
+
+    /// <summary>The exact workflow-secret values the producing run's task embeds (<c>AgentTask.WorkflowSecrets</c>). An authored acceptance argv can carry one, and the grade's evidence repeats the argv and the check's output, so everything the grade persists masks them. The check itself runs with the exact argv. Null masks nothing.</summary>
+    public IReadOnlyList<string>? WorkflowSecrets { get; init; }
 }

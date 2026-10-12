@@ -193,10 +193,19 @@ public sealed partial class RealSupervisorActionExecutor : ISupervisorActionExec
             WorkflowRunId = context.SupervisorRunId,
             OriginKind = WorkPlanOrigins.Supervisor,
             OriginKey = $"{(string.IsNullOrEmpty(context.NodeId) ? "sup" : context.NodeId)}#turn{context.TurnNumber}",
-            Goal = string.IsNullOrWhiteSpace(plan.Goal) ? context.Goal : plan.Goal,
+            Goal = MaskedForDisplay(string.IsNullOrWhiteSpace(plan.Goal) ? context.Goal : plan.Goal),
             Items = plan.Subtasks.Select(WorkPlanItem.From).ToList(),
         }, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The plan row is a projection Viewers read, never an execution input (the turn executes from its tape), and its
+    /// goal is the supervisor's RESOLVED config goal — or the model restating it — so a <c>{{team.X}}</c> in it is masked
+    /// with the node scope's secrets (the ambient capture redactor every model call of this turn is recorded under)
+    /// before it lands. Outside a node scope there is nothing to mask with, and the goal is stored as given.
+    /// </summary>
+    private static string MaskedForDisplay(string goal) =>
+        LlmCallContext.Current?.CaptureRedactor?.Redact(goal).Value ?? goal;
 
     /// <summary>A terminal stop records its outcome marker; the turn service finishes the loop (this never re-suspends).</summary>
     private static SupervisorExecution ExecuteStop(SupervisorDecision decision)

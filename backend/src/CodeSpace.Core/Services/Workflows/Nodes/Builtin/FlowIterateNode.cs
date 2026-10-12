@@ -156,6 +156,7 @@ public sealed class FlowIterateNode : INodeRuntime
             Sys = outer.Sys,
             Projects = outer.Projects,
             SecretPaths = outer.SecretPaths,
+            InheritedSecretValues = outer.InheritedSecretValues,
             Iteration = iteration
         };
 

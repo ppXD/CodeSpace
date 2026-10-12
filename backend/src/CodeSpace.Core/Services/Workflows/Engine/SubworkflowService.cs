@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -21,12 +22,13 @@ public interface ISubworkflowService
 {
     /// <summary>
     /// Create (but do NOT dispatch) a child run of <paramref name="childWorkflowId"/> with
-    /// <paramref name="inputsJson"/> as its normalized payload, linked to <paramref name="parent"/>
+    /// <paramref name="inputs"/> as its normalized payload — the public copy in the request's payload column, the
+    /// sealed exact copy (when a parent secret was masked) beside it — linked to <paramref name="parent"/>
     /// via <c>parent_run_id</c>. Returns the new child run id. Throws
     /// <see cref="SubworkflowStartException"/> when the child can't be started (not found / not in
     /// the parent's team / no published version / nesting too deep).
     /// </summary>
-    Task<Guid> StageChildRunAsync(WorkflowRun parent, Guid childWorkflowId, int? version, string inputsJson, CancellationToken cancellationToken);
+    Task<Guid> StageChildRunAsync(WorkflowRun parent, Guid childWorkflowId, int? version, SealedPayload inputs, CancellationToken cancellationToken);
 
     /// <summary>Dispatch a previously-staged child run (Pending → Enqueued → engine). Called once the parent is committed Suspended.</summary>
     Task DispatchChildRunAsync(Guid childRunId, CancellationToken cancellationToken);
@@ -64,7 +66,7 @@ public sealed class SubworkflowService : ISubworkflowService, IScopedDependency
         _logger = logger;
     }
 
-    public async Task<Guid> StageChildRunAsync(WorkflowRun parent, Guid childWorkflowId, int? version, string inputsJson, CancellationToken cancellationToken)
+    public async Task<Guid> StageChildRunAsync(WorkflowRun parent, Guid childWorkflowId, int? version, SealedPayload inputs, CancellationToken cancellationToken)
     {
         var child = await _db.Workflow.AsNoTracking()
             .Where(w => w.Id == childWorkflowId && w.TeamId == parent.TeamId && w.DeletedDate == null)
@@ -89,7 +91,8 @@ public sealed class SubworkflowService : ISubworkflowService, IScopedDependency
             // The originating actor travels down the chain so the child's audit trail attributes
             // back to the human who started the root run (System actor + the root user's id).
             ActorId = parent.CreatedBy == Guid.Empty ? null : parent.CreatedBy,
-            NormalizedPayloadJson = string.IsNullOrWhiteSpace(inputsJson) ? "{}" : inputsJson,
+            NormalizedPayloadJson = string.IsNullOrWhiteSpace(inputs.PublicJson) ? "{}" : inputs.PublicJson,
+            SealedPayloadCiphertext = inputs.Ciphertext,
             ParentRunId = parent.Id,
             CreatedBy = parent.CreatedBy,
         }, cancellationToken).ConfigureAwait(false);

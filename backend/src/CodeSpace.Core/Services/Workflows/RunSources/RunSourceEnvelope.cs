@@ -40,6 +40,9 @@ public sealed record RunSourceEnvelope
     /// <summary>The normalised payload the engine sees as <c>{{trigger.*}}</c>. Must be valid JSON.</summary>
     public required string NormalizedPayloadJson { get; init; }
 
+    /// <summary>The sealed exact copy of <see cref="NormalizedPayloadJson"/> when that column holds a masked one — a <c>flow.subworkflow</c> child whose inputs carried a parent secret, or a fork of such a run. Null: the payload is itself exact.</summary>
+    public string? SealedPayloadCiphertext { get; init; }
+
     /// <summary>Audit/audit-write user id stamped on the run row. Same as ActorId for user-driven runs; <c>SystemUsers.SeederId</c> for system-driven.</summary>
     public required Guid CreatedBy { get; init; }
 

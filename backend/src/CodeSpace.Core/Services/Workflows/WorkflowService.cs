@@ -625,6 +625,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 ActorType = WorkflowRunActorTypes.User,
                 ActorId = actorUserId,
                 NormalizedPayloadJson = original.RunRequest?.NormalizedPayloadJson ?? "{}",
+                // A fork re-runs with the original's EXACT inputs: a sealed child payload carries its sealed copy over,
+                // never the masked column alone (which would hand the fork [REDACTED] where the secret was).
+                SealedPayloadCiphertext = original.RunRequest?.SealedPayloadCiphertext,
                 CreatedBy = actorUserId,
                 CausationRequestId = original.RunRequestId,
                 ParentRunId = original.Id,

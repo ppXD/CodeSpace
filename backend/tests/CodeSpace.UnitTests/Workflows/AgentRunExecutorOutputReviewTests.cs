@@ -237,6 +237,75 @@ public sealed partial class AgentRunExecutorOutputReviewTests
     }
 
     [Theory]
+    [InlineData(true)]    // the task embeds a workflow secret → the critic's capture masks it
+    [InlineData(false)]   // it embeds none → no capture redactor, byte-identical to before
+    public async Task The_agent_critic_scope_masks_the_workflow_secrets_the_reviewed_goal_embeds(bool embedsSecret)
+    {
+        // The critic's prompt carries the producer's goal, and this scope is pushed by the executor OUTSIDE any node, so
+        // it does not inherit the node scope's capture redactor the engine gives every node's model calls — without its
+        // own, interaction.started would freeze a goal-borne {{team.X}} into the ledger.
+        const string secret = "CANARY-critic-6a0f3d92";
+        var (runId, executor, _, critic) = NewExecutor(new CriticVerdict { Mode = ReviewMode.Gate, Approved = true });
+        var task = GatedTask with { Goal = $"deploy with {secret}", WorkflowSecrets = embedsSecret ? [secret] : null };
+
+        await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), task, SucceededWithChanges(), Run(runId, workflowRunId: Guid.NewGuid(), nodeId: "agent"), CancellationToken.None);
+
+        var redactor = critic.ObservedScope!.CaptureRedactor;
+
+        if (embedsSecret) redactor!.Redact($"goal: deploy with {secret}").Value.ShouldBe("goal: deploy with [REDACTED]");
+        else redactor.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(true)]    // approved: the review.completed beat still carries the verdict's words
+    [InlineData(false)]   // flagged: the beat, the warning event and the result's ReviewFeedback all carry them
+    public async Task A_model_verdict_quoting_the_goals_secret_reaches_every_sink_masked(bool approve)
+    {
+        // The critic is shown the EXACT goal and a model restates the task it judges. Its capture is masked by the
+        // critic scope, but the verdict outlives that scope: the executor writes its words into the ledger beat, the
+        // flagged warning and the result after the scope is gone.
+        const string secret = "CANARY-verdict-3b1e7c55";
+        var quote = $"call the staging API with {secret}";
+        var issues = approve ? Array.Empty<CriticIssue>() : new[] { new CriticIssue { Text = $"never sent {secret}", Evidence = quote, Severity = CriticSeverity.Blocker } };
+        var verdict = new CriticVerdict { Mode = ReviewMode.Gate, Approved = approve, Rationale = $"The task was: \"{quote}\".", Issues = issues, ReviewerModel = "stub-reviewer" };
+        var (runId, executor, runs, _, _, ledger) = NewExecutorWithStore(verdict);
+        var task = GatedTask with { Goal = quote, WorkflowSecrets = [secret] };
+
+        var reviewed = await executor.ReviewOutputIfEnabledAsync(new(runId, runId, 1), task, SucceededWithChanges(), Run(runId, workflowRunId: Guid.NewGuid(), nodeId: "agent"), CancellationToken.None);
+
+        reviewed.OutputReview.ShouldBe(approve ? OutputReviewState.Approved : OutputReviewState.Flagged, "fixture check: the verdict was reached and applied");
+        var beat = ledger.Records.ShouldHaveSingleItem().Payload;
+        var sinks = string.Join("\n", runs.AppendedEvents.Select(e => e.Text).Append(beat).Append(reviewed.ReviewFeedback ?? ""));
+        sinks.ShouldContain("The task was:", customMessage: "the verdict's words still reach every sink — masked, not dropped");
+        sinks.ShouldContain(CodeSpace.Core.Services.Workflows.Runtime.PersistenceSecretRedactor.Marker);
+        sinks.ShouldNotContain(secret);
+
+        if (!approve) runs.AppendedEvents.ShouldHaveSingleItem().Text.ShouldContain($"never sent {CodeSpace.Core.Services.Workflows.Runtime.PersistenceSecretRedactor.Marker}");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_verdict_is_masked_only_by_the_secrets_its_task_embeds(bool embedsSecret)
+    {
+        const string secret = "CANARY-critique-90d1aa2e";
+        var verdict = new CriticVerdict { Mode = ReviewMode.Improve, Rationale = $"r {secret}", Critique = $"c {secret}", Issues = new[] { new CriticIssue { Text = $"t {secret}", Evidence = $"e {secret}" } } };
+
+        var masked = AgentRunExecutor.MaskedVerdict(verdict, GatedTask with { WorkflowSecrets = embedsSecret ? [secret] : null });
+
+        if (!embedsSecret)
+        {
+            masked.ShouldBeSameAs(verdict, "a task embedding no secret keeps its verdict byte-identical");
+            return;
+        }
+
+        masked.Rationale.ShouldBe("r [REDACTED]");
+        masked.Critique.ShouldBe("c [REDACTED]", "an Improve round feeds the critique back, and a flagged result persists it");
+        masked.Issues.ShouldHaveSingleItem().ToString().ShouldBe("t [REDACTED] (evidence: e [REDACTED])");
+        masked.Mode.ShouldBe(ReviewMode.Improve);
+    }
+
+    [Theory]
     [InlineData(7, 7)]          // the launch stamped a $7 ceiling on the RUN → the critic is admitted against THAT
     [InlineData(null, null)]    // no route ⇒ the run declares no ceiling ⇒ Unbudgeted, which still records
     public async Task The_output_critic_is_admitted_against_the_RUN_cap_never_the_agent_tasks_own(int? runCapUsd, int? expectedCapUsd)

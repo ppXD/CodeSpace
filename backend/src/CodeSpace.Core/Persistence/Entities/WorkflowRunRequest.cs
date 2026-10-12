@@ -87,6 +87,13 @@ public class WorkflowRunRequest : IEntity<Guid>
     /// </summary>
     public string NormalizedPayloadJson { get; set; } = "{}";
 
+    /// <summary>
+    /// The exact payload, encrypted, when <see cref="NormalizedPayloadJson"/> had an inherited secret masked (0247 — a
+    /// <c>flow.subworkflow</c> child whose inputs resolved a parent secret). Carries those secret values too, so the run
+    /// keeps treating them as secrets. NULL means <see cref="NormalizedPayloadJson"/> is itself exact. Never projected.
+    /// </summary>
+    public string? SealedPayloadCiphertext { get; set; }
+
     /// <summary>IP, user-agent, schedule fire-time, etc. — anything that's about the request itself rather than its content.</summary>
     public string RequestMetadataJson { get; set; } = "{}";
 

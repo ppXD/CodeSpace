@@ -298,6 +298,17 @@ public sealed record AgentTask
     /// </summary>
     public IReadOnlyDictionary<string, string> Environment { get; init; } = new Dictionary<string, string>();
 
+    /// <summary>
+    /// The resolved workflow secret values this task's text embeds — a goal that referenced <c>{{team.X}}</c>, a child
+    /// of a parent that handed one down. <b>In-memory only, never serialized</b>: whoever stages the task fills it from
+    /// the scope that resolved it; the agent-run store masks exactly these values in the persisted <c>task_jsonb</c>
+    /// and keeps the exact task, with them, in the encrypted sealed column; the executor opens that copy and folds
+    /// them into the run's redactor, so nothing the agent echoes freezes them into its log or result. Null — every
+    /// task with no secret in it — changes nothing.
+    /// </summary>
+    [JsonIgnore]
+    public IReadOnlyList<string>? WorkflowSecrets { get; init; }
+
     /// <summary>Wall-clock cap for the whole agent run, in seconds. Default 3600 (1h). <c>null</c> ⇒ NO wall-clock (unbounded) — the run is then bounded only by the stall watchdog (no-progress) + the cost cap; use for a genuinely long task. Never defaulted to null: an absent value falls back to the bounded default, so only an EXPLICIT null (the operator's "no timeout" choice) is unbounded.</summary>
     public int? TimeoutSeconds { get; init; } = 3600;
 
