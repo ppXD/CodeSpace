@@ -16,8 +16,10 @@ public interface IActorIdentityResolver
 {
     /// <summary>
     /// The user's live, usable identity on the instance, or null. "Usable" = the identity is not
-    /// soft-deleted AND its linked credential is present and Active — so a revoked / expired / removed
-    /// credential resolves to null exactly like "never linked".
+    /// soft-deleted, its linked credential is present and Active, AND the user still has standing in the
+    /// live team that owns the instance — a membership row there, or the instance Admin role — so a
+    /// revoked / expired / removed credential, or a person who left the team, resolves to null exactly
+    /// like "never linked".
     /// </summary>
     Task<UserProviderIdentity?> ResolveAsync(Guid actorUserId, Guid providerInstanceId, CancellationToken cancellationToken);
 

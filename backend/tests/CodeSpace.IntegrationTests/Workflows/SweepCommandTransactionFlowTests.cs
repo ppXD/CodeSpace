@@ -139,6 +139,7 @@ public class SweepCommandTransactionFlowTests
     [InlineData(typeof(ReconcileStuckWebhookRegistrationsCommand))]
     [InlineData(typeof(RepairDisconnectedCredentialBindingsCommand))]
     [InlineData(typeof(ResumeAbandonedArtifactTransfersCommand))]
+    [InlineData(typeof(RetireDepartedMembersCredentialsCommand))]
     [InlineData(typeof(SweepBudgetSettlementCommand))]
     [InlineData(typeof(SweepCompletionShadowCommand))]
     [InlineData(typeof(TierStaleModelCapabilitiesCommand))]

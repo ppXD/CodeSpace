@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Providers.Modules;
 using CodeSpace.Core.Services.Providers.Scopes;
+using CodeSpace.Core.Services.Teams;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Dtos.Credentials;
@@ -22,6 +23,7 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
     private readonly IPayloadEncryptor _encryptor;
     private readonly ICredentialPayloadSerializer _serializer;
     private readonly IOAuthClientRegistry _oauthClients;
@@ -29,12 +31,15 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
     private readonly IProviderModuleCatalog _modules;
     private readonly IScopeChecker _scopeChecker;
     private readonly ICredentialSuccessionService _succession;
+    private readonly ICredentialRevocationService _revocation;
+    private readonly ITeamMemberService _members;
     private readonly ILogger<CredentialService> _logger;
 
-    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthClientRegistry oauthClients, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ILogger<CredentialService> logger)
+    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthClientRegistry oauthClients, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ITeamMemberService members, ILogger<CredentialService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
+        _currentUser = currentUser;
         _encryptor = encryptor;
         _serializer = serializer;
         _oauthClients = oauthClients;
@@ -42,6 +47,8 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         _modules = modules;
         _scopeChecker = scopeChecker;
         _succession = succession;
+        _revocation = revocation;
+        _members = members;
         _logger = logger;
     }
 
@@ -149,6 +156,10 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         // another team's instances.
         await EnsureProviderInstanceInTeamAsync(input.ProviderInstanceId, teamId, cancellationToken).ConfigureAwait(false);
 
+        var ownerUserId = OwnerOf(input);
+
+        await EnsureOwnerWithinReachAsync(ownerUserId, cancellationToken).ConfigureAwait(false);
+
         var json = _serializer.Serialize(input.Payload);
         var encrypted = _encryptor.Encrypt(json);
 
@@ -157,8 +168,7 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
             Id = Guid.NewGuid(),
             TeamId = teamId,
             ProviderInstanceId = input.ProviderInstanceId,
-            // A team-service credential belongs to the team, not a person — never carry an owner.
-            OwnerUserId = input.Ownership == CredentialOwnership.TeamService ? null : input.OwnerUserId,
+            OwnerUserId = ownerUserId,
             Ownership = input.Ownership,
             AuthType = input.Payload.Type,
             DisplayName = input.DisplayName,
@@ -193,8 +203,7 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
             MarkRevokedLocally(credential, providerError);
         }
 
-        var affectedRepoCount = await MarkDependentRepositoriesUnauthorisedAsync(credential.Id, cancellationToken).ConfigureAwait(false);
-        await SoftDeleteDependentIdentitiesAsync(credential.Id, cancellationToken).ConfigureAwait(false);
+        var affectedRepoCount = await _revocation.CascadeAsync(credential.Id, cancellationToken).ConfigureAwait(false);
 
         return new RevokeCredentialResult
         {
@@ -229,6 +238,25 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
             .AnyAsync(p => p.Id == providerInstanceId && p.TeamId == teamId && p.DeletedDate == null, cancellationToken).ConfigureAwait(false);
 
         if (!inTeam) throw new KeyNotFoundException($"Provider instance {providerInstanceId} not found.");
+    }
+
+    /// <summary>
+    /// A team-service credential belongs to the team, not a person — it never carries an owner, whatever it was handed. A
+    /// personal one always does: the person named, or the caller when nobody is, as an OAuth connect already defaults it.
+    /// An owner-less personal token was nobody's to retire when the person who added it left.
+    /// </summary>
+    private Guid? OwnerOf(AddCredentialInput input) => input.Ownership == CredentialOwnership.TeamService ? null : input.OwnerUserId ?? _currentUser.Id;
+
+    /// <summary>
+    /// Naming an owner is acting on that person: the team lists the token as theirs and its bindings follow their next
+    /// connect. So the owner must have standing in this team — a member, or an instance Admin — and the caller must be them
+    /// or outrank them; an unknown id and one from another team fail alike, before the foreign key could tell them apart.
+    /// </summary>
+    private async Task EnsureOwnerWithinReachAsync(Guid? ownerUserId, CancellationToken cancellationToken)
+    {
+        if (ownerUserId is not Guid ownerId) return;
+
+        await _members.EnsureMayActOnAsync(ownerId, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<Credential> LoadCredentialAsync(Guid id, CancellationToken cancellationToken) =>
@@ -311,49 +339,5 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         credential.Status = CredentialStatus.Revoked;
         credential.LastError = providerError;
         credential.LastValidatedDate = null;
-    }
-
-    /// <summary>
-    /// Repositories bound through this credential lose their auth source the moment it's
-    /// revoked. We DON'T cascade-delete them (too destructive — disconnect is often part of
-    /// token rotation, and the user expects to come back), but we DO flip status to
-    /// <see cref="RepositoryStatus.Error"/> with a concrete remediation message so the UI
-    /// can show "Needs new credential" instead of pretending the repo is still healthy.
-    ///
-    /// Webhook ingestion is deliberately untouched — webhooks authenticate via the secret we
-    /// registered, not via the OAuth token. Events keep flowing in, and once the user
-    /// re-links to a new credential the repo is fully healthy again with no event gap.
-    /// </summary>
-    private async Task<int> MarkDependentRepositoriesUnauthorisedAsync(Guid credentialId, CancellationToken cancellationToken)
-    {
-        var affected = await _db.Repository
-            .Where(r => r.CredentialId == credentialId && r.DeletedDate == null && r.Status != RepositoryStatus.Error)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        foreach (var repo in affected)
-        {
-            repo.Status = RepositoryStatus.Error;
-            repo.LastError = "Credential disconnected. Re-link this repository to an active credential of the same provider, or unbind it.";
-        }
-
-        return affected.Count;
-    }
-
-    /// <summary>
-    /// A <see cref="UserProviderIdentity"/> (Model B act-as-user link) is unusable without its backing
-    /// credential, so revoking the credential — e.g. Disconnect on the Personal tab — must soft-delete the
-    /// linked identity too. Otherwise the Connected Identities surface keeps showing a dead link, out of
-    /// sync with the Personal tab. This mirrors what <c>UserProviderIdentityService.UnlinkAsync</c> does
-    /// from the identity side; tracked + saved by the same unit of work as the revoke, and idempotent
-    /// (no live identity ⇒ no-op) so the always-run cascade is safe on an already-revoked credential.
-    /// </summary>
-    private async Task SoftDeleteDependentIdentitiesAsync(Guid credentialId, CancellationToken cancellationToken)
-    {
-        var identities = await _db.UserProviderIdentity
-            .Where(i => i.CredentialId == credentialId && i.DeletedDate == null)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        var now = DateTimeOffset.UtcNow;
-        foreach (var identity in identities) identity.DeletedDate = now;
     }
 }

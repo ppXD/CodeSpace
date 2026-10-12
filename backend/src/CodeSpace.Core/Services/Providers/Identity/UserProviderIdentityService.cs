@@ -1,9 +1,11 @@
+using CodeSpace.Core.Authorization;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Teams;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
@@ -20,8 +22,10 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
     private readonly ICredentialPayloadSerializer _serializer;
     private readonly IProviderRegistry _registry;
     private readonly ICredentialSuccessionService _succession;
+    private readonly ICredentialRevocationService _revocation;
+    private readonly ITeamMemberService _members;
 
-    public UserProviderIdentityService(CodeSpaceDbContext db, ICurrentUser currentUser, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IProviderRegistry registry, ICredentialSuccessionService succession)
+    public UserProviderIdentityService(CodeSpaceDbContext db, ICurrentUser currentUser, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IProviderRegistry registry, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ITeamMemberService members)
     {
         _db = db;
         _currentUser = currentUser;
@@ -30,6 +34,8 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
         _serializer = serializer;
         _registry = registry;
         _succession = succession;
+        _revocation = revocation;
+        _members = members;
     }
 
     public async Task<UserProviderIdentitySummary> LinkByPatAsync(Guid providerInstanceId, string accessToken, CancellationToken cancellationToken)
@@ -43,6 +49,8 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
 
         var credential = BuildPersonalCredential(instance, userId, teamId, accessToken);
         var profile = await ProbeOrThrowAsync(instance, credential, cancellationToken).ConfigureAwait(false);
+
+        await HoldCallerInTeamAsync(userId, teamId, cancellationToken).ConfigureAwait(false);
 
         credential.DisplayName = $"{instance.Provider} · {profile.AuthenticatedUserName}";
 
@@ -94,20 +102,20 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
 
         if (identity == null) return;
 
-        var now = DateTimeOffset.UtcNow;
-        identity.DeletedDate = now;
+        identity.DeletedDate = DateTimeOffset.UtcNow;
 
-        // Clear the token material + soft-delete the backing credential — an unlinked identity must
-        // leave nothing usable at rest.
-        identity.Credential.DeletedDate = now;
-        identity.Credential.Status = CredentialStatus.Revoked;
-        identity.Credential.EncryptedPayload = string.Empty;
+        // Retire the backing credential through the same cascade a Disconnect runs — an unlinked identity must leave
+        // nothing usable at rest, and a repository bound through its token must say it needs a new one rather than
+        // stay Active on a blanked payload. Still the caller's own token, from whichever team they ask.
+        await _revocation.RetireAsync(identity.Credential, cancellationToken).ConfigureAwait(false);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
     }
 
     public async Task EnsureIdentityForCredentialAsync(ProviderInstance instance, Credential credential, Guid userId, CancellationToken cancellationToken)
     {
+        if (!ConnectedBy(credential, userId)) return;
+
         var profile = await ProbeOrThrowAsync(instance, credential, cancellationToken).ConfigureAwait(false);
 
         var existing = await _db.UserProviderIdentity
@@ -128,6 +136,26 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
         var identity = BuildIdentity(userId, instance.Id, credential.Id, profile);
         await _db.UserProviderIdentity.AddAsync(identity, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The request was let in on the caller's standing, but the provider check runs between that and the insert, and the
+    /// caller can leave — or be removed — during it. Asked again and, for a member, held until this link commits: a
+    /// departure that already committed refuses the link, one that starts now waits and then retires the new token with
+    /// the rest of theirs. A personal token in a team is lent by someone who stands in it — a member, or an instance Admin,
+    /// who stands in every team (<see cref="TeamStanding"/>).
+    /// </summary>
+    private async Task HoldCallerInTeamAsync(Guid userId, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (!await _members.HoldMembershipAsync(teamId, userId, cancellationToken).ConfigureAwait(false))
+            throw new TenantAccessDeniedException(userId, teamId, "user is not a member of this team");
+    }
+
+    /// <summary>
+    /// An identity says "this provider account speaks for this person", and only the person can say that — by connecting
+    /// the account themselves. A token someone else connected in their name is whatever account THAT caller signed into
+    /// at the provider; linking it would let them choose who the person's writes are attributed to.
+    /// </summary>
+    private static bool ConnectedBy(Credential credential, Guid userId) => credential.CreatedBy == userId;
 
     private async Task<ProviderInstance> LoadInstanceAsync(Guid providerInstanceId, Guid teamId, CancellationToken cancellationToken) =>
         await _db.ProviderInstance

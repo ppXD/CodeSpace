@@ -22,7 +22,7 @@ public interface IUserProviderIdentityService
     /// <summary>The caller's live linked identities (one per provider instance), newest first.</summary>
     Task<IReadOnlyList<UserProviderIdentitySummary>> ListMineAsync(CancellationToken cancellationToken);
 
-    /// <summary>Unlink one of the caller's identities (soft-delete the identity + its credential). No-op if already gone.</summary>
+    /// <summary>Unlink one of the caller's identities: soft-delete it and retire its credential, cascading to the repositories bound through it. No-op if already gone.</summary>
     Task UnlinkAsync(Guid identityId, CancellationToken cancellationToken);
 
     /// <summary>
@@ -30,8 +30,10 @@ public interface IUserProviderIdentityService
     /// backed by an ALREADY-created credential (the OAuth-complete path — the credential is built by
     /// the OAuth flow, not here). Probes the credential for the provider user, then either re-points
     /// the user's existing live identity to this credential or creates a new one. NON-destructive: it
-    /// never revokes another credential (unlike the PAT replace-in-place path). The caller persists —
-    /// no SaveChanges here. Throws if the probe fails (caller decides whether that's fatal).
+    /// never revokes another credential (unlike the PAT replace-in-place path). Does nothing unless
+    /// <paramref name="userId"/> is who connected the credential — nobody links an identity for someone
+    /// else. The caller persists — no SaveChanges here. Throws if the probe fails (caller decides whether
+    /// that's fatal).
     /// </summary>
     Task EnsureIdentityForCredentialAsync(ProviderInstance instance, Credential credential, Guid userId, CancellationToken cancellationToken);
 }

@@ -1,0 +1,176 @@
+using CodeSpace.Core.Authorization;
+using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
+
+namespace CodeSpace.Core.Services.Credentials;
+
+public sealed class CredentialRevocationService : ICredentialRevocationService, IScopedDependency
+{
+    private readonly CodeSpaceDbContext _db;
+    private readonly ILogger<CredentialRevocationService> _logger;
+
+    public CredentialRevocationService(CodeSpaceDbContext db, ILogger<CredentialRevocationService> logger)
+    {
+        _db = db;
+        _logger = logger;
+    }
+
+    public async Task<int> CascadeAsync(Guid credentialId, CancellationToken cancellationToken)
+    {
+        var affectedRepoCount = await MarkDependentRepositoriesUnauthorisedAsync(credentialId, cancellationToken).ConfigureAwait(false);
+
+        await SoftDeleteDependentIdentitiesAsync(credentialId, cancellationToken).ConfigureAwait(false);
+
+        return affectedRepoCount;
+    }
+
+    public async Task<int> RetireAsync(Credential credential, CancellationToken cancellationToken)
+    {
+        MarkRetired(credential);
+
+        return await CascadeAsync(credential.Id, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// The sweep's own rule, narrowed to one person in one team, so a departure and the sweep can never disagree on what
+    /// goes. Every Personal credential the person lent the team goes, the already-disconnected ones included: the repair
+    /// sweep moves a disconnected credential's bindings to its owner's newest live one, so a single live token left behind
+    /// would hand the team back everything bound through the others. With none left, and no way to connect a new one in
+    /// the name of someone without standing in the team, nothing bound through them follows anywhere. A team-service
+    /// credential is the team's and survives membership changes — it is written owner-less, and is never retired here.
+    /// </summary>
+    public async Task RetireDepartedInTeamAsync(Guid teamId, Guid userId, CancellationToken cancellationToken)
+    {
+        var departed = await Departed()
+            .Where(c => c.TeamId == teamId && (c.OwnerUserId ?? c.CreatedBy) == userId)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var credential in departed) await RetireAsync(credential, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<int> RetireDepartedAsync(int batchSize, CancellationToken cancellationToken)
+    {
+        var departedIds = await LoadDepartedIdsAsync(batchSize, cancellationToken).ConfigureAwait(false);
+
+        var retired = 0;
+
+        foreach (var credentialId in departedIds)
+        {
+            try
+            {
+                if (await RetireDepartedOneAsync(credentialId, cancellationToken).ConfigureAwait(false)) retired++;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                _logger.LogWarning(ex, "Retiring credential {CredentialId}, whose person is no longer in its team, failed; the pass continues — the credential stays a candidate", credentialId);
+            }
+        }
+
+        return retired;
+    }
+
+    private async Task<List<Guid>> LoadDepartedIdsAsync(int batchSize, CancellationToken cancellationToken) =>
+        await Departed().AsNoTracking().OrderBy(c => c.Id).Select(c => c.Id).Take(batchSize).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>
+    /// Re-read under the candidate rule and retired on its own save, so one failure undoes no other. A person who rejoined
+    /// since the candidate list was read keeps the token.
+    /// </summary>
+    private async Task<bool> RetireDepartedOneAsync(Guid credentialId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var credential = await Departed().SingleOrDefaultAsync(c => c.Id == credentialId, cancellationToken).ConfigureAwait(false);
+
+            if (credential == null) return false;
+
+            var brokenRepositoryCount = await RetireAsync(credential, cancellationToken).ConfigureAwait(false);
+
+            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+
+            _logger.LogInformation("Retired credential {CredentialId} in team {TeamId}: its person is no longer a member; {RepositoryCount} repositories bound through it now need a new credential", credential.Id, credential.TeamId, brokenRepositoryCount);
+
+            return true;
+        }
+        finally
+        {
+            _db.ChangeTracker.Clear();
+        }
+    }
+
+    /// <summary>
+    /// Live Personal credentials whose person has no standing in the credential's team (<see cref="TeamStanding"/>): no
+    /// membership row there, and not an instance Admin. The person is the owner, or — for a token stored without one, as
+    /// adding a token without naming an owner did before the owner defaulted to the caller — whoever added it.
+    ///
+    /// <para>Only a person with an account. An owner always has one (the column is a foreign key); a creator stamp is not
+    /// one — it can be empty, or name nobody when a script wrote the row — and then nothing says who lent the token or
+    /// whether they left. That token is kept: retiring it would break every repository bound through it on a guess. A
+    /// soft-deleted account is still somebody, and goes like anyone else without standing.</para>
+    /// </summary>
+    private IQueryable<Credential> Departed() =>
+        _db.Credential
+            .Where(c => c.Ownership == CredentialOwnership.Personal && c.DeletedDate == null)
+            .Where(c => _db.User.IgnoreQueryFilters().Any(u => u.Id == (c.OwnerUserId ?? c.CreatedBy)))
+            .Where(ExpressionPredicate.Not(TeamStanding.Of<Credential>(_db, c => c.TeamId, c => c.OwnerUserId ?? c.CreatedBy)));
+
+    /// <summary>
+    /// Clear the token material — nothing in CodeSpace can present it once it is gone — and take the row out of the
+    /// team's credential list. A row retired earlier keeps the date it was first retired on.
+    /// </summary>
+    private static void MarkRetired(Credential credential)
+    {
+        credential.EncryptedPayload = string.Empty;
+        credential.Status = CredentialStatus.Revoked;
+        credential.LastValidatedDate = null;
+        credential.DeletedDate ??= DateTimeOffset.UtcNow;
+    }
+
+    /// <summary>
+    /// Repositories bound through this credential lose their auth source the moment it's
+    /// revoked. We DON'T cascade-delete them (too destructive — disconnect is often part of
+    /// token rotation, and the user expects to come back), but we DO flip status to
+    /// <see cref="RepositoryStatus.Error"/> with a concrete remediation message so the UI
+    /// can show "Needs new credential" instead of pretending the repo is still healthy.
+    ///
+    /// Webhook ingestion is deliberately untouched — webhooks authenticate via the secret we
+    /// registered, not via the OAuth token. Events keep flowing in, and once the user
+    /// re-links to a new credential the repo is fully healthy again with no event gap.
+    /// </summary>
+    private async Task<int> MarkDependentRepositoriesUnauthorisedAsync(Guid credentialId, CancellationToken cancellationToken)
+    {
+        var affected = await _db.Repository
+            .Where(r => r.CredentialId == credentialId && r.DeletedDate == null && r.Status != RepositoryStatus.Error)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        foreach (var repo in affected)
+        {
+            repo.Status = RepositoryStatus.Error;
+            repo.LastError = "Credential disconnected. Re-link this repository to an active credential of the same provider, or unbind it.";
+        }
+
+        return affected.Count;
+    }
+
+    /// <summary>
+    /// A <see cref="UserProviderIdentity"/> (Model B act-as-user link) is unusable without its backing
+    /// credential, so revoking the credential — e.g. Disconnect on the Personal tab — must soft-delete the
+    /// linked identity too. Otherwise the Connected Identities surface keeps showing a dead link, out of
+    /// sync with the Personal tab. Tracked + saved by the same unit of work as the revoke, and idempotent
+    /// (no live identity ⇒ no-op) so the always-run cascade is safe on an already-revoked credential.
+    /// </summary>
+    private async Task SoftDeleteDependentIdentitiesAsync(Guid credentialId, CancellationToken cancellationToken)
+    {
+        var identities = await _db.UserProviderIdentity
+            .Where(i => i.CredentialId == credentialId && i.DeletedDate == null)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        var now = DateTimeOffset.UtcNow;
+        foreach (var identity in identities) identity.DeletedDate = now;
+    }
+}

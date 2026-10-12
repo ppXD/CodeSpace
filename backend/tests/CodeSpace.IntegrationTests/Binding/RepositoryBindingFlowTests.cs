@@ -317,9 +317,13 @@ public class RepositoryBindingFlowTests
     {
         var teamId = await SeedTeamAsync().ConfigureAwait(false);
         var providerInstanceId = await SeedProviderInstanceAsync(teamId).ConfigureAwait(false);
+        var adminId = await SeedInstanceAdminAsync().ConfigureAwait(false);
 
+        // An instance Admin from outside the team: they stand in every team as an Owner does, so the token is theirs to
+        // lend. A real account holding the role, because the caller becomes the token's owner, and both the owner column's
+        // foreign key and the standing check read that account from the database.
         Guid credentialId;
-        using (var scope = _fixture.BeginScopeAs(Guid.NewGuid(), teamId, Roles.Admin))
+        using (var scope = _fixture.BeginScopeAs(adminId, teamId, Roles.Admin))
         {
             var mediator = scope.Resolve<IMediator>();
             credentialId = await mediator.Send(new AddCredentialCommand
@@ -338,6 +342,7 @@ public class RepositoryBindingFlowTests
         var credential = await db.Credential.AsNoTracking().SingleAsync(c => c.Id == credentialId).ConfigureAwait(false);
         credential.AuthType.ShouldBe(AuthType.Pat);
         credential.Ownership.ShouldBe(CredentialOwnership.Personal, customMessage: "An ordinary add (no Ownership set) must default to Personal — adding the field is non-breaking.");
+        credential.OwnerUserId.ShouldBe(adminId, customMessage: "a personal token added without naming an owner is the caller's own");
         credential.EncryptedPayload.ShouldNotContain("secret-token-xxx", customMessage: "payload must not be stored in plaintext");
 
         var decryptedJson = encryptor.Decrypt(credential.EncryptedPayload);
@@ -404,6 +409,20 @@ public class RepositoryBindingFlowTests
         await db.SaveChangesAsync().ConfigureAwait(false);
 
         return team.Id;
+    }
+
+    /// <summary>An account holding the instance Admin role through a <c>role_user</c> row, and no membership anywhere.</summary>
+    private async Task<Guid> SeedInstanceAdminAsync()
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var admin = new User { Id = Guid.NewGuid(), Email = $"instance-admin-{Guid.NewGuid():N}@binding.test", Name = $"instance-admin-{Guid.NewGuid():N}" };
+
+        db.User.Add(admin);
+        db.RoleUser.Add(new RoleUser { Id = Guid.NewGuid(), RoleId = await db.Role.Where(r => r.Name == Roles.Admin).Select(r => r.Id).SingleAsync().ConfigureAwait(false), UserId = admin.Id });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return admin.Id;
     }
 
     private async Task<Guid> SeedProviderInstanceAsync(Guid teamId)

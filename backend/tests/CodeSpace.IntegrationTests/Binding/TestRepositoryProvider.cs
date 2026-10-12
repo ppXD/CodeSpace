@@ -122,6 +122,9 @@ public sealed class TestPullRequestOpenCapture
 
     public OpenPullRequestInput? Last { get { lock (_lock) { return _calls.LastOrDefault(); } } }
 
+    /// <summary>Every call so far, oldest first — for asserting a write NEVER reached the provider, which the latest call alone cannot show once another test has opened one.</summary>
+    public IReadOnlyList<OpenPullRequestInput> All { get { lock (_lock) { return _calls.ToList(); } } }
+
     public void Record(OpenPullRequestInput input)
     {
         lock (_lock) { _calls.Add(input); }
