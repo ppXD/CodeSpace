@@ -262,11 +262,21 @@ public sealed class AgentRunLogCaptureBridgeTests
 
         var session = await bridge.OpenAsync(Request(source, 1, Guid.NewGuid()), CancellationToken.None);
         var observing = session.ObserveAsync((_, _) => Task.FromResult(expected), CancellationToken.None);
-        var spent = await AdvanceUntilAsync(clock, observing, "the provider never completes, so only the finalization budget can end this drain — it did not");
+        logs.BlockedAppendCancelled.IsCompleted.ShouldBeFalse("the blocked call was cancelled before the clock moved, so something other than the finalization budget ended it");
+
+        // The ceiling is read where the bridge ENFORCES it — the instant it cancels the call the provider is blocked on,
+        // which the fake sees inside the Advance that crosses it — and not where the drain finishes unwinding from that
+        // cancellation. The unwind completes on another thread, paced by the scheduler, while this loop moves the clock
+        // on the wall's cadence: measured to the drain's completion, a runner that was slow to unwind turned its own
+        // latency into virtual time the drain never spent, and a bound of a few steps failed at random under load.
+        var spent = await AdvanceUntilAsync(clock, logs.BlockedAppendCancelled, "the provider never completes, so only the finalization budget can end this drain — it never cancelled the call the provider was blocked on");
+
+        // From here nothing moves the clock, so a drain that went on to wait for anything else on it would never return.
+        await WaitAsync(() => observing.IsCompleted, "the drain never returned after its budget cancelled the blocked call, and the clock is no longer moving — it is waiting on something other than the budget");
         var observed = await observing;
 
         spent.ShouldBeGreaterThanOrEqualTo(TimeSpan.FromMilliseconds(150), "the drain gave the provider its whole budget before giving up");
-        spent.ShouldBeLessThan(TimeSpan.FromMilliseconds(150) + AdvanceStep * 4, "ONE total finalization budget bounds a provider that never completes — N segments must not multiply it. The slack is a few advance steps, not a second budget: doubling the ceiling would still fail this.");
+        spent.ShouldBeLessThan(TimeSpan.FromMilliseconds(150) + AdvanceStep, "ONE total finalization budget bounds a provider that never completes — N segments must not multiply it. The slack is the clock's one step, not a second budget: doubling the ceiling would still fail this.");
         observed.ShouldBeSameAs(expected);
         logs.Heads.ShouldAllBe(head => head.Metadata.State == AgentRunLogStreamState.Open && head.CaptureFinalizedAt == null, "timeout remains durably reconcilable Open state, never incomplete-but-Completed");
         logs.ObservedOperationTimeout.ShouldBe(TimeSpan.FromMilliseconds(40));
@@ -601,11 +611,15 @@ public sealed class AgentRunLogCaptureBridgeTests
     {
         private readonly object _gate = new();
         private readonly Dictionary<string, StreamHead> _streams = new(StringComparer.Ordinal);
+        private readonly TaskCompletionSource _blockedAppendCancelled = new(TaskCreationOptions.RunContinuationsAsynchronously);
         public long CurrentFence { get; set; }
         public bool RejectAllOpens { get; set; }
         public bool FailAppend { get; set; }
         public AgentRunLogProblem? RejectAppendWith { get; init; }
         public bool BlockAppend { get; set; }
+
+        /// <summary>Completes, inside the call that cancels it, the moment the bridge cancels the append <see cref="BlockAppend"/> is holding — the bridge's own word that its ceiling expired, readable with nothing left to unwind.</summary>
+        public Task BlockedAppendCancelled => _blockedAppendCancelled.Task;
         public int RetryableAppendFailures { get; set; }
         public bool ConcurrentFailCaptureOnce { get; set; }
         public TimeSpan? ObservedOperationTimeout { get; private set; }
@@ -688,8 +702,13 @@ public sealed class AgentRunLogCaptureBridgeTests
             }
         }
 
-        private static async Task<AgentRunLogAppendResult> BlockAppendAsync(CancellationToken cancellationToken)
+        private async Task<AgentRunLogAppendResult> BlockAppendAsync(CancellationToken cancellationToken)
         {
+            // Never disposed, on purpose. Callbacks run newest-first and the delay below is newer than this one, so it is
+            // cancelled first and the call unwinds on another thread while the cancelling thread is still on its way here;
+            // a registration disposed there is unregistered before it runs, and the one signal this method exists to raise
+            // is lost.
+            _ = cancellationToken.Register(() => _blockedAppendCancelled.TrySetResult());
             await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
             throw new UnreachableException();
         }
