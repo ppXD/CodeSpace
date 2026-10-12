@@ -25,6 +25,9 @@ public class CodexHarnessTests
     /// <summary>The override every run whose workspace is <c>/tmp/ws</c> carries, so the target repository's own <c>.codex</c> config never loads.</summary>
     private const string WorkspaceDistrust = "projects={\"/tmp/ws\"={trust_level=\"untrusted\"}}";
 
+    /// <summary>The override every run carries, so the CLI loads none of the skills it bundles.</summary>
+    private const string BundledSkillsOff = "skills.bundled.enabled=false";
+
     private static AgentTask Task(string goal = "Fix the failing billing tests", string? model = "gpt-5.3-codex", AgentWriteScope scope = AgentWriteScope.Workspace) => new()
     {
         Goal = goal,
@@ -331,7 +334,7 @@ public class CodexHarnessTests
         var spec = Harness.BuildInvocation(Task());
 
         spec.Command.ShouldBe("codex");
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" });
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-c", BundledSkillsOff, "-" });
         spec.WorkingDirectory.ShouldBe("/tmp/ws");
         spec.TimeoutSeconds.ShouldBe(900);
     }
@@ -353,8 +356,8 @@ public class CodexHarnessTests
     }
 
     [Theory]
-    [InlineData(null, new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[\"/tmp/ws/api\",\"/tmp/ws/web\"]", "-c", WorkspaceDistrust, "-" })]
-    [InlineData("thr-resume-1", new[] { "exec", "resume", "thr-resume-1", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-c", "sandbox_workspace_write.writable_roots=[\"/tmp/ws/api\",\"/tmp/ws/web\"]", "-c", WorkspaceDistrust, "-" })]
+    [InlineData(null, new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", "sandbox_workspace_write.writable_roots=[\"/tmp/ws/api\",\"/tmp/ws/web\"]", "-c", WorkspaceDistrust, "-c", BundledSkillsOff, "-" })]
+    [InlineData("thr-resume-1", new[] { "exec", "resume", "thr-resume-1", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-c", "sandbox_workspace_write.writable_roots=[\"/tmp/ws/api\",\"/tmp/ws/web\"]", "-c", WorkspaceDistrust, "-c", BundledSkillsOff, "-" })]
     public void A_run_at_a_workspace_root_names_each_repository_below_it_as_a_writable_root_of_its_own(string? resumeFromSessionId, string[] expected)
     {
         // Codex's workspace-write sandbox keeps .git, .codex and .agents read-only only at the top of each writable root.
@@ -415,6 +418,63 @@ public class CodexHarnessTests
         args.Count(a => a == WorkspaceDistrust).ShouldBe(1);
         args[^1].ShouldBe("-", "the stdin positional stays last");
     }
+
+    /// <summary>Every shape of run that loads its repository's instructions, and with them its skills.</summary>
+    public static TheoryData<string, AgentTask> EveryRepositoryLoadingShape()
+    {
+        var shapes = EveryRunShape();
+
+        shapes.Add("multi-repo", Task() with { WorkspaceRepositoryDirectories = ["/tmp/ws/api", "/tmp/ws/web"] });
+        shapes.Add("no workspace", Task() with { WorkspaceDirectory = null });
+        shapes.Add("persona skills", Task() with { Skills = [new AgentSkill { Slug = "tdd", Description = "Use when implementing.", Body = "Write the test first." }] });
+
+        return shapes;
+    }
+
+    public static TheoryData<string, AgentTask> EverySkillLoadingShape()
+    {
+        var shapes = EveryRepositoryLoadingShape();
+
+        shapes.Add("review", Task(scope: AgentWriteScope.ReadOnly) with { ExcludeRepositoryInstructions = true });
+
+        return shapes;
+    }
+
+    [Theory]
+    [MemberData(nameof(EverySkillLoadingShape))]
+    public void Every_run_loads_none_of_the_skills_the_cli_bundles(string shape, AgentTask task)
+    {
+        // The pinned 0.142.2 installs skills of its own under CODEX_HOME/skills/.system on every start and lists them, and
+        // a `$name` anywhere in the goal — mid-word, after a backslash, in backticks, or as `[$name](path)` — makes it inline
+        // that SKILL.md into the turn before the model acts. `exec` hands the goal over as one text input, which the CLI
+        // always scans, and no switch turns the scan off, so what a goal can name is narrowed instead: the bundled skills
+        // are not loaded at all (GoalChannelE2ETests.CodexSkills). A flag, so it sits before the stdin `-`.
+        var args = Harness.BuildInvocation(task).Args.ToList();
+        var at = args.IndexOf(BundledSkillsOff);
+
+        at.ShouldBeGreaterThan(0, $"a {shape} run must load none of the CLI's bundled skills");
+        args[at - 1].ShouldBe("-c", "the exclusion rides as a config override, which `exec` and `exec resume` both accept");
+        args.Count(a => a == BundledSkillsOff).ShouldBe(1);
+        args[^1].ShouldBe("-", "the stdin positional stays last");
+    }
+
+    [Theory]
+    [MemberData(nameof(EveryRepositoryLoadingShape))]
+    public void The_bundled_skill_exclusion_is_the_only_skill_setting_a_run_carries(string shape, AgentTask task)
+    {
+        // The persona's skills are the platform's own, projected under CODEX_HOME/skills/<slug>, and a run that loads its
+        // repository's AGENTS.md loads its skills too, as before. A name rule or the instructions switch would take the
+        // persona's away from the model as well, so the one skill setting such a run carries is the bundled set. A
+        // reviewer, which loads no repository instructions, also switches off its checkout's skills by path
+        // (CodexRepositorySkillsTests).
+        Harness.BuildInvocation(task).Args.Where(a => a.StartsWith("skills.", StringComparison.Ordinal)).ShouldBe([BundledSkillsOff], $"{shape}: only the CLI's own skills are switched off");
+    }
+
+    [Fact]
+    public void NoBundledSkillsOverride_is_pinned() =>
+        // Rule 8: the key is the CLI's (codex-rs SkillsConfig.bundled.enabled, 0.142.2). A spelling the CLI does not know
+        // is ignored, and every bundled skill would load again with nothing failing.
+        CodexHarness.NoBundledSkillsOverride.ShouldBe(BundledSkillsOff);
 
     [Theory]
     [InlineData(null)]
@@ -483,7 +543,7 @@ public class CodexHarnessTests
         // while -c is accepted on it and sandbox_mode is the config key the flag maps to. The Goal stays last.
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = "thr-resume-1" });
 
-        spec.Args.ShouldBe(new[] { "exec", "resume", "thr-resume-1", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-c", WorkspaceDistrust, "-" });
+        spec.Args.ShouldBe(new[] { "exec", "resume", "thr-resume-1", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "-c", "sandbox_mode=workspace-write", "-c", WorkspaceDistrust, "-c", BundledSkillsOff, "-" });
     }
 
     [Fact]
@@ -535,7 +595,7 @@ public class CodexHarnessTests
         var spec = Harness.BuildInvocation(Task() with { ResumeFromSessionId = null });
 
         spec.Args.ShouldNotContain("resume");
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" });
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-c", BundledSkillsOff, "-" });
     }
 
     [Fact]
@@ -606,7 +666,7 @@ public class CodexHarnessTests
     {
         var spec = Harness.BuildInvocation(Task(model: model));
 
-        spec.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" },
+        spec.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-c", BundledSkillsOff, "-" },
             customMessage: "a blank model must omit --model entirely (not emit `--model \"\"`, which Codex rejects) so the CLI uses its default");
     }
 
@@ -618,7 +678,7 @@ public class CodexHarnessTests
         var withTools = Harness.BuildInvocation(Task() with { Tools = new[] { "Read", "Grep" } });
 
         withTools.Args.ShouldNotContain("--allowed-tools");
-        withTools.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-" },
+        withTools.Args.ShouldBe(new[] { "exec", "--json", "--skip-git-repo-check", "--model", "gpt-5.3-codex", "--sandbox", "workspace-write", "-c", WorkspaceDistrust, "-c", BundledSkillsOff, "-" },
             customMessage: "a tools list must not change the Codex invocation — it has no faithful projection there");
     }
 
