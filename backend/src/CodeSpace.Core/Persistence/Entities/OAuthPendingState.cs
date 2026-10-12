@@ -17,6 +17,13 @@ public class OAuthPendingState : IAuditable
     public string IntendedDisplayName { get; set; } = default!;
     public Guid? IntendedOwnerUserId { get; set; }
     public string? ReturnUrl { get; set; }
+
+    /// <summary>
+    /// SHA-256 of the nonce the starting browser holds in its binding cookie. The callback must present that nonce,
+    /// so only the browser that started a connect can finish it. Null only on a row a previous version wrote, which
+    /// therefore can never be completed (migration 0246).
+    /// </summary>
+    public string? BrowserNonceHash { get; set; }
     public List<string>? RequestedScopes { get; set; }
     public DateTimeOffset ExpiresDate { get; set; }
 

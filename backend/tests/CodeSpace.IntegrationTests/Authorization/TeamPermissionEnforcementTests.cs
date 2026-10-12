@@ -2,15 +2,21 @@ using Autofac;
 using CodeSpace.Core.Authorization;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Credentials;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Commands.Decisions;
 using CodeSpace.Messages.Commands.ModelCredentials;
+using CodeSpace.Messages.Commands.Repositories;
 using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Workflows;
 using MediatR;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Authorization;
@@ -149,6 +155,64 @@ public class TeamPermissionEnforcementTests
         ex.Reason.ShouldContain(TeamPermissions.WorkflowsWrite);
     }
 
+    public enum ResourceWrite { RevokeCredential, UnbindRepository, RelinkRepositoryCredential, TestRepositoryBinding }
+
+    public static IEnumerable<object[]> ResourceWritesByRole() =>
+        from write in Enum.GetValues<ResourceWrite>()
+        from role in new[] { TeamRole.Viewer, TeamRole.Member, TeamRole.Admin, TeamRole.Owner }
+        select new object[] { write, role, TeamRoleRank.Of(role) < TeamRoleRank.Admin };
+
+    /// <summary>
+    /// Writes addressed by a credential or repository id carried only their resource marker, which checks the
+    /// resource's team and the caller's membership — no role. A Viewer, refused when ADDING a credential, could
+    /// revoke the Owner's, re-point or unbind a repository, and spend its credential on a provider probe. Real rows
+    /// are seeded so the allow path reaches past every gate rather than failing on a missing resource.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(ResourceWritesByRole))]
+    public async Task Resource_keyed_credential_and_repository_writes_are_denied_below_Admin(ResourceWrite write, TeamRole role, bool denied)
+    {
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var bound = await SeedBoundRepositoryAsync(team).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(team.UserFor(role), team.TeamId);
+        var mediator = scope.Resolve<IMediator>();
+        var thrown = await Record.ExceptionAsync(() => SendAsync(mediator, write, bound)).ConfigureAwait(false);
+
+        AssertDenial(thrown, denied, role, write == ResourceWrite.RevokeCredential ? TeamPermissions.CredentialsManage : TeamPermissions.ReposManage);
+    }
+
+    public enum CredentialHolder { Caller, Teammate, Team }
+
+    public static IEnumerable<object[]> RevokesByRoleAndHolder() =>
+        from role in new[] { TeamRole.Viewer, TeamRole.Member, TeamRole.Admin, TeamRole.Owner }
+        from holder in Enum.GetValues<CredentialHolder>()
+        select new object[] { role, holder, TeamRoleRank.Of(role) < TeamRoleRank.Admin && holder != CredentialHolder.Caller };
+
+    /// <summary>
+    /// Any member can link a personal provider token of their own, so any member must be able to disconnect it again.
+    /// Gating revoke on credentials.manage outright closed the Viewer-revokes-the-Owner's-credential hole and, with it,
+    /// took that away from every Member and Viewer; a teammate's credential and the team's own still take Admin.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(RevokesByRoleAndHolder))]
+    public async Task Below_Admin_only_the_callers_own_personal_credential_can_be_revoked(TeamRole role, CredentialHolder holder, bool denied)
+    {
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var caller = team.UserFor(role);
+        var teammate = role == TeamRole.Owner ? team.Admin : team.Owner;
+        var credentialId = await SeedCredentialAsync(team.TeamId, holder switch { CredentialHolder.Caller => caller, CredentialHolder.Teammate => teammate, _ => null }).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(caller, team.TeamId);
+        var thrown = await Record.ExceptionAsync(() => scope.Resolve<IMediator>().Send(new RevokeCredentialCommand { CredentialId = credentialId })).ConfigureAwait(false);
+
+        AssertDenial(thrown, denied, role, TeamPermissions.CredentialsManage);
+        if (denied) return;
+
+        thrown.ShouldBeNull();
+        (await LoadCredentialStatusAsync(credentialId).ConfigureAwait(false)).ShouldBe(CredentialStatus.Revoked);
+    }
+
     [Fact]
     public async Task The_global_Admin_role_still_bypasses()
     {
@@ -192,6 +256,63 @@ public class TeamPermissionEnforcementTests
         thrown.ShouldNotBeOfType<TenantAccessDeniedException>($"{role} holds '{permission}' and must clear the authorization gate");
     }
 
+    private static Task SendAsync(IMediator mediator, ResourceWrite write, BoundRepository bound) => write switch
+    {
+        ResourceWrite.RevokeCredential => mediator.Send(new RevokeCredentialCommand { CredentialId = bound.SpareCredentialId }),
+        ResourceWrite.UnbindRepository => mediator.Send(new UnbindRepositoryCommand { RepositoryId = bound.RepositoryId }),
+        ResourceWrite.RelinkRepositoryCredential => mediator.Send(new RelinkRepositoryCredentialCommand { RepositoryId = bound.RepositoryId, NewCredentialId = bound.SpareCredentialId }),
+        _ => mediator.Send(new TestRepositoryBindingCommand { RepositoryId = bound.RepositoryId }),
+    };
+
+    private sealed record BoundRepository(Guid RepositoryId, Guid SpareCredentialId);
+
+    /// <summary>A repository the Owner bound through one credential, plus a second credential of theirs on the same instance.</summary>
+    private async Task<BoundRepository> SeedBoundRepositoryAsync(SeededTeam team)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var encryptor = scope.Resolve<IPayloadEncryptor>();
+        var serializer = scope.Resolve<ICredentialPayloadSerializer>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+
+        var instance = new ProviderInstance { Id = Guid.NewGuid(), TeamId = team.TeamId, Provider = ProviderKind.Git, DisplayName = "Git", BaseUrl = $"https://git-{suffix}.local" };
+        var bound = new Credential { Id = Guid.NewGuid(), TeamId = team.TeamId, ProviderInstanceId = instance.Id, OwnerUserId = team.Owner, AuthType = AuthType.Pat, DisplayName = "bound", EncryptedPayload = encryptor.Encrypt(serializer.Serialize(new PatPayload { Token = "pat-bound" })), Status = CredentialStatus.Active };
+        var spare = new Credential { Id = Guid.NewGuid(), TeamId = team.TeamId, ProviderInstanceId = instance.Id, OwnerUserId = team.Owner, AuthType = AuthType.Pat, DisplayName = "spare", EncryptedPayload = encryptor.Encrypt(serializer.Serialize(new PatPayload { Token = "pat-spare" })), Status = CredentialStatus.Active };
+        var repository = new Repository { Id = Guid.NewGuid(), TeamId = team.TeamId, ProviderInstanceId = instance.Id, CredentialId = bound.Id, ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = $"api-{suffix}", FullPath = $"acme/api-{suffix}", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = $"https://git-{suffix}.local/acme/api", Status = RepositoryStatus.Active };
+
+        db.ProviderInstance.Add(instance);
+        db.Credential.AddRange(bound, spare);
+        db.Repository.Add(repository);
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return new BoundRepository(repository.Id, spare.Id);
+    }
+
+    /// <summary>A PAT on a fresh instance: Personal and owned by <paramref name="ownerUserId"/>, or the team's own service credential when it is null.</summary>
+    private async Task<Guid> SeedCredentialAsync(Guid teamId, Guid? ownerUserId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var payload = scope.Resolve<IPayloadEncryptor>().Encrypt(scope.Resolve<ICredentialPayloadSerializer>().Serialize(new PatPayload { Token = "pat-revocable" }));
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+
+        var instance = new ProviderInstance { Id = Guid.NewGuid(), TeamId = teamId, Provider = ProviderKind.Git, DisplayName = "Git", BaseUrl = $"https://git-{suffix}.local" };
+        var credential = new Credential { Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instance.Id, OwnerUserId = ownerUserId, Ownership = ownerUserId == null ? CredentialOwnership.TeamService : CredentialOwnership.Personal, AuthType = AuthType.Pat, DisplayName = "revocable", EncryptedPayload = payload, Status = CredentialStatus.Active };
+
+        db.ProviderInstance.Add(instance);
+        db.Credential.Add(credential);
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return credential.Id;
+    }
+
+    private async Task<CredentialStatus> LoadCredentialStatusAsync(Guid credentialId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().Credential.AsNoTracking().Where(c => c.Id == credentialId).Select(c => c.Status).SingleAsync().ConfigureAwait(false);
+    }
+
     private async Task<SeededTeam> SeedTeamAsync()
     {
         using var scope = _fixture.BeginScope();
@@ -199,7 +320,7 @@ public class TeamPermissionEnforcementTests
 
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"owner-{suffix}@x", Name = "owner" };
-        var admin = new User { Id = Guid.NewGuid(), Email = $"admin-{suffix}@x", Name = "admin" };
+        var admin = new User { Id = Guid.NewGuid(), Email = $"admin-{suffix}@x", Name = $"admin-{suffix}" };
         var member = new User { Id = Guid.NewGuid(), Email = $"member-{suffix}@x", Name = "member" };
         var viewer = new User { Id = Guid.NewGuid(), Email = $"viewer-{suffix}@x", Name = "viewer" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"t-{suffix}", Name = "Team" };

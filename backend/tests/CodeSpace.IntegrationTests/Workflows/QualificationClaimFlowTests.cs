@@ -4,6 +4,8 @@ using CodeSpace.Core.Services.Completion;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Contracts;
+using CodeSpace.Messages.Queries.Agents;
+using MediatR;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -78,6 +80,52 @@ public class QualificationClaimFlowTests
         board.Rows.Select(r => (r.Mode, r.CapabilityKey)).ShouldBeUnique();
         board.Rows.ShouldContain(r => r.Mode == RunModeKeys.Supervisor && r.CapabilityKey == CapabilityKeys.GitBranch);
         board.Rows.ShouldAllBe(r => r.Mode != RunModeKeys.Generic, "the unregistered generic mode has no conformance story and must never appear on the claim board");
+    }
+
+    [Fact]
+    public async Task Through_the_mediator_a_reader_outside_the_paying_team_never_sees_a_paying_teams_identifiers()
+    {
+        // Every row, not just one: whichever receipts the shared ledger holds, none of their paying teams or model
+        // credentials may reach a reader whose team paid for none of them.
+        var payingTeam = Guid.NewGuid();
+        await SeedPaidReceiptAsync(payingTeam).ConfigureAwait(false);
+        var (outsiderTeam, outsider) = await WorkflowsTestSeed.SeedTeamAsync(_fixture).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(outsider, outsiderTeam);
+        var board = await scope.Resolve<IMediator>().Send(new GetQualificationClaimsQuery()).ConfigureAwait(false);
+
+        board.Rows.ShouldAllBe(r => r.Cohort == null || r.Cohort.TeamId == null, "a paying team's id reaches only that team");
+        board.Rows.ShouldAllBe(r => r.Seal == null || r.Seal.VerifierBundle == null || (r.Seal.VerifierBundle.ModelCredentialId == null && r.Seal.VerifierBundle.ModelCredentialModelId == null), "and so do its model-credential ids");
+        board.Rows.ShouldContain(r => r.Mode == RunModeKeys.SingleAgent && r.CapabilityKey == CapabilityKeys.InlineAnswer && r.Performance == PerformanceQualification.Sealed, "the standing itself still reads");
+    }
+
+    [Fact]
+    public async Task Through_the_mediator_the_paying_team_reads_its_own_receipt_whole()
+    {
+        var (payingTeam, payer) = await WorkflowsTestSeed.SeedTeamAsync(_fixture).ConfigureAwait(false);
+        var receipt = await SeedPaidReceiptAsync(payingTeam).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(payer, payingTeam);
+        var board = await scope.Resolve<IMediator>().Send(new GetQualificationClaimsQuery()).ConfigureAwait(false);
+
+        var row = board.Rows.Single(r => r.Mode == RunModeKeys.SingleAgent && r.CapabilityKey == CapabilityKeys.InlineAnswer);
+        row.ReceiptId.ShouldBe(receipt.Id, "the latest sealed receipt backs the pair");
+        row.Cohort.ShouldNotBeNull().TeamId.ShouldBe(payingTeam);
+        row.Seal.ShouldNotBeNull().VerifierBundle.ShouldNotBeNull().ModelCredentialId.ShouldNotBeNull();
+    }
+
+    /// <summary>Minted the way QualificationRunner mints a round: the cohort names the team that paid, and the verifier bundle names its model credential.</summary>
+    private async Task<QualificationReceipt> SeedPaidReceiptAsync(Guid payingTeam)
+    {
+        using var scope = _fixture.BeginScope();
+        var receipt = Receipt(RunModeKeys.SingleAgent, PerformanceQualification.Sealed);
+        receipt.CapabilityKey = CapabilityKeys.InlineAnswer;
+        receipt.VerifierBundleJson = $$"""{"harness":"codex-cli","model":"team-private-model","modelCredentialId":"{{Guid.NewGuid()}}","modelCredentialModelId":"{{Guid.NewGuid()}}"}""";
+        receipt.CohortJson = $$"""{"teamId":"{{payingTeam}}","mode":"{{RunModeKeys.SingleAgent}}","tier":"internal-qualification","completionPolicyVersion":2}""";
+
+        await scope.Resolve<IQualificationReceiptStore>().AppendAsync(receipt, CancellationToken.None).ConfigureAwait(false);
+
+        return receipt;
     }
 
     private static string UniqueMode() => "claim-" + Guid.NewGuid().ToString("N")[..8];

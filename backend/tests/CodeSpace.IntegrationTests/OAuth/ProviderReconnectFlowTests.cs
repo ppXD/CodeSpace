@@ -274,7 +274,7 @@ public sealed class ProviderReconnectFlowTests : IDisposable
 
         using var callback = Scope(world, userId: null);
 
-        return (await callback.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { State = init.State, Code = "code-from-provider" })).CredentialId;
+        return (await callback.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { State = init.State, Code = "code-from-provider", BrowserNonce = init.BrowserNonce })).CredentialId;
     }
 
     /// <summary>The Providers modal's "Use a token".</summary>

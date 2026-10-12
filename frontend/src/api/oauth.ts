@@ -77,9 +77,12 @@ export const oauthApi = {
     return fetchJson<CredentialSummary[]>(`/api/credentials${qs}`);
   },
 
+  // `credentials: "include"` so the browser keeps the HttpOnly nonce cookie the response sets even when the
+  // API is on another origin (VITE_API_URL). The callback only completes in the browser holding that cookie.
   initOAuth: (input: InitOAuthRequest) => fetchJson<InitOAuthResponse>("/api/credentials/oauth/init", {
     method: "POST",
     body: JSON.stringify(input),
+    credentials: "include",
   }),
 
   // Add a GitLab Group Access Token as a TEAM-SERVICE credential (owned by the team, not a person).

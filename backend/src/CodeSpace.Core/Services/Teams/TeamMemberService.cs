@@ -131,9 +131,8 @@ public sealed class TeamMemberService : ITeamMemberService, IScopedDependency
     /// </summary>
     private static void EnsureMayActOn(TeamRole actor, TeamRole subject, bool isSelf)
     {
-        if (TeamRoleRank.Of(subject) > TeamRoleRank.Of(actor)) throw new RoleOutranksActorException(actor, subject);
-
-        if (TeamRoleRank.Of(subject) == TeamRoleRank.Of(actor) && !isSelf) throw new RoleOutranksActorException(actor, subject);
+        if (!TeamRoleRank.Reaches(actor, subject, isOwn: isSelf))
+            throw new RoleOutranksActorException(actor, subject);
     }
 
     /// <summary>

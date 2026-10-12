@@ -12,10 +12,12 @@ public interface IOAuthStateStore
     Task<OAuthPendingState> CreateAsync(OAuthPendingStateInput input, CancellationToken cancellationToken);
 
     /// <summary>
-    /// Looks up + deletes the row in one logical step. Returns null if the row doesn't exist
-    /// or has expired (the expired row is also deleted as a cleanup hygiene).
+    /// Looks up + deletes the row in one logical step — but only the row whose state AND browser-nonce hash both
+    /// match. Returns null if no such row exists or it has expired (an expired match is also deleted as cleanup
+    /// hygiene). A state presented without its browser's nonce matches nothing, so it consumes nothing: the
+    /// browser that started the connect can still finish it.
     /// </summary>
-    Task<OAuthPendingState?> ConsumeAsync(string state, CancellationToken cancellationToken);
+    Task<OAuthPendingState?> ConsumeAsync(string state, string browserNonceHash, CancellationToken cancellationToken);
 }
 
 public sealed record OAuthPendingStateInput
@@ -27,6 +29,7 @@ public sealed record OAuthPendingStateInput
     public required string IntendedDisplayName { get; init; }
     public Guid? IntendedOwnerUserId { get; init; }
     public string? ReturnUrl { get; init; }
+    public required string BrowserNonceHash { get; init; }
     public IReadOnlyList<string>? RequestedScopes { get; init; }
     public required TimeSpan Ttl { get; init; }
 }

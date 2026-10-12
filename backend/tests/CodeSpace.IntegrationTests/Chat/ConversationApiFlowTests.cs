@@ -50,7 +50,7 @@ public class ConversationApiFlowTests
     public async Task OpenDirect_then_Get_returns_summary_for_a_member()
     {
         var (teamId, userA) = await SeedTeamAsync();
-        var userB = await SeedUserAsync();
+        var userB = await SeedTeamMemberAsync(teamId);
 
         Guid dmId;
         using (var scope = _fixture.BeginScopeAs(userA, teamId, Roles.Admin))
@@ -95,6 +95,18 @@ public class ConversationApiFlowTests
 
         await db.SaveChangesAsync();
         return (teamId, userId);
+    }
+
+    /// <summary>An account in the team — the only kind a conversation in that team may hold.</summary>
+    private async Task<Guid> SeedTeamMemberAsync(Guid teamId)
+    {
+        var userId = await SeedUserAsync();
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Member });
+        await db.SaveChangesAsync();
+        return userId;
     }
 
     private async Task<Guid> SeedUserAsync()

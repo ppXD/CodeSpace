@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 
@@ -13,9 +14,14 @@ namespace CodeSpace.Messages.Commands.Repositories;
 ///
 /// Webhook ingestion is unaffected — webhooks authenticate via the registered secret,
 /// not the credential — so this command only fixes the API-call path.
+///
+/// <para><see cref="TeamPermissions.ReposManage"/>: choosing which credential a repository speaks through is part of
+/// binding it. The repository marker alone let a Viewer point a repository at any credential in the team.</para>
 /// </summary>
-public sealed record RelinkRepositoryCredentialCommand : ICommand<Unit>, IRequireRepositoryAccess
+public sealed record RelinkRepositoryCredentialCommand : ICommand<Unit>, IRequireRepositoryAccess, IRequireTeamPermission
 {
+    public string RequiredPermission => TeamPermissions.ReposManage;
+
     /// <summary>Set by the controller from the route segment via `command with { RepositoryId = ... }`. Non-required so System.Text.Json doesn't 400-fail when the body omits it (URL is authoritative).</summary>
     public Guid RepositoryId { get; init; }
     public required Guid NewCredentialId { get; init; }

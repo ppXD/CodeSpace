@@ -328,7 +328,7 @@ public class TeamMemberManagementTests
 
         var suffix = Guid.NewGuid().ToString("N").Substring(0, 8);
         var owner = new User { Id = Guid.NewGuid(), Email = $"own-{suffix}@x", Name = "owner" };
-        var admin = new User { Id = Guid.NewGuid(), Email = $"adm-{suffix}@x", Name = "admin" };
+        var admin = new User { Id = Guid.NewGuid(), Email = $"adm-{suffix}@x", Name = $"admin-{suffix}" };
         var member = new User { Id = Guid.NewGuid(), Email = $"mem-{suffix}@x", Name = "member" };
         var viewer = new User { Id = Guid.NewGuid(), Email = $"vie-{suffix}@x", Name = "viewer" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"mem-{suffix}", Name = "Members" };

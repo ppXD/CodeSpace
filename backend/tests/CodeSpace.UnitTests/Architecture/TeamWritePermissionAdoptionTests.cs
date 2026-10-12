@@ -21,8 +21,9 @@ namespace CodeSpace.UnitTests.Architecture;
 public class TeamWritePermissionAdoptionTests
 {
     /// <summary>
-    /// Writes that touch only the row belonging to the caller. A Viewer performing one of these
-    /// changes nothing another member can observe, so gating them would deny people their own state.
+    /// Writes that touch only the row belonging to the caller, or act only as the caller's own
+    /// identity. A Viewer performing one of these changes nothing they could not change without
+    /// CodeSpace, so gating them would deny people their own state.
     /// </summary>
     private static readonly IReadOnlyDictionary<string, string> SelfServiceByDesign = new Dictionary<string, string>
     {
@@ -30,6 +31,7 @@ public class TeamWritePermissionAdoptionTests
         ["LinkProviderIdentityByPatCommand"] = "links the caller's own GitHub/GitLab account; the service scopes by ICurrentUser.Id, never by team.",
         ["UnlinkProviderIdentityCommand"] = "unlinks the caller's own provider identity, same scoping.",
         ["LeaveTeamCommand"] = "removes the caller's own membership row; a Viewer who cannot leave a team has been locked in.",
+        ["SubmitPullRequestReviewCommand"] = "posts a review only AS the caller's own linked provider identity — the handler always supplies the caller as the actor, so the provider's permission for that person is the gate, and they could post the same review from the provider's own page.",
     };
 
     [Fact]
@@ -37,6 +39,7 @@ public class TeamWritePermissionAdoptionTests
     {
         var ungated = TeamWriteCommands()
             .Where(t => !typeof(IRequireTeamPermission).IsAssignableFrom(t))
+            .Where(t => !typeof(IRequireCredentialManagement).IsAssignableFrom(t))
             .Where(t => !SelfServiceByDesign.ContainsKey(t.Name))
             .Select(t => t.FullName!)
             .OrderBy(n => n, StringComparer.Ordinal)
@@ -46,6 +49,33 @@ public class TeamWritePermissionAdoptionTests
             "these team-scoped writes are gated by membership alone, so any Viewer can perform them. Declare the " +
             "permission from TeamPermissions that fits — or, if it mutates only the caller's own state, add it to " +
             "SelfServiceByDesign with the reason:\n  " + string.Join("\n  ", ungated));
+    }
+
+    [Theory]
+    [InlineData("UnbindRepositoryCommand", TeamPermissions.ReposManage)]
+    [InlineData("RelinkRepositoryCredentialCommand", TeamPermissions.ReposManage)]
+    [InlineData("TestRepositoryBindingCommand", TeamPermissions.ReposManage)]
+    public void A_write_addressed_by_a_resource_id_holds_the_bar_of_the_write_that_creates_it(string command, string permission)
+    {
+        // These carried only their resource marker, which proves team and membership and no role — so a Viewer
+        // could revoke the Owner's credential, re-point or unbind a repository, and spend its credential on a probe.
+        var type = TeamWriteCommands().SingleOrDefault(t => t.Name == command);
+
+        type.ShouldNotBeNull($"{command} is no longer seen as a team write — the scan below must keep covering resource-keyed commands");
+        typeof(IRequireTeamPermission).IsAssignableFrom(type!).ShouldBeTrue($"{command} must declare a team permission, not rely on its resource marker alone");
+        Probe(type!).RequiredPermission.ShouldBe(permission);
+    }
+
+    [Fact]
+    public void Revoking_a_credential_takes_credentials_manage_unless_it_is_the_callers_own_personal_one()
+    {
+        // The credential marker alone let a Viewer disconnect the Owner's credential. A plain CredentialsManage gate
+        // closed that and also stopped every member disconnecting the personal token they had linked themselves — so
+        // the gate is the management marker, whose behaviour lets only the owner of a Personal credential through.
+        var type = TeamWriteCommands().SingleOrDefault(t => t.Name == "RevokeCredentialCommand");
+
+        type.ShouldNotBeNull("RevokeCredentialCommand is no longer seen as a team write — the scan below must keep covering credential-keyed commands");
+        typeof(IRequireCredentialManagement).IsAssignableFrom(type!).ShouldBeTrue("revoking a credential must be gated by IRequireCredentialManagement, not by its resource marker alone");
     }
 
     [Fact]
@@ -101,11 +131,17 @@ public class TeamWritePermissionAdoptionTests
     private static IRequireTeamPermission Probe(Type type) =>
         (IRequireTeamPermission)System.Runtime.CompilerServices.RuntimeHelpers.GetUninitializedObject(type);
 
+    /// <summary>
+    /// Every command scoped to a team: by the team header, or by a team-owned resource it names. The
+    /// resource markers are part of the scan because they do not extend <see cref="IRequireTeamMembership"/>
+    /// — they check the resource's team and the caller's membership, and no role — so a write carrying only
+    /// one of them used to be invisible here while being exactly the write this test exists to catch.
+    /// </summary>
     private static IEnumerable<Type> TeamWriteCommands()
     {
         var types = typeof(TeamPermissions).Assembly.GetTypes()
             .Where(t => t.IsClass && !t.IsAbstract)
-            .Where(t => typeof(IRequireTeamMembership).IsAssignableFrom(t))
+            .Where(t => typeof(IRequireTeamMembership).IsAssignableFrom(t) || typeof(IRequireRepositoryAccess).IsAssignableFrom(t) || typeof(IRequireCredentialAccess).IsAssignableFrom(t))
             .Where(t => t.GetInterfaces().Any(i => i.IsGenericType && i.GetGenericTypeDefinition() == typeof(ICommand<>)))
             .ToList();
 

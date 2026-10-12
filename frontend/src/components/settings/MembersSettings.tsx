@@ -88,7 +88,7 @@ export function MembersSettings() {
               <div className="ct-empty-p">There is no public sign-up — an invite link is the only way in.</div>
             </div>
           )}
-          {(invitations.data ?? []).map((invitation) => <InvitationRow key={invitation.id} invitation={invitation} onIssued={setIssued} />)}
+          {(invitations.data ?? []).map((invitation) => <InvitationRow key={invitation.id} invitation={invitation} myRole={myRole} myId={me.data?.id ?? null} onIssued={setIssued} />)}
         </Section>
       )}
 
@@ -222,9 +222,23 @@ function MemberRow({ member, isMe, myRole, mayManage, mayTransfer, isLastOwner }
   );
 }
 
-function InvitationRow({ invitation, onIssued }: { invitation: TeamInvitationSummary; onIssued: (v: { email: string; result: CreateInvitationResult }) => void }) {
+function InvitationRow({ invitation, myRole, myId, onIssued }: {
+  invitation: TeamInvitationSummary;
+  myRole: TeamRole | null;
+  myId: string | null;
+  onIssued: (v: { email: string; result: CreateInvitationResult }) => void;
+}) {
   const { revokeInvitation, regenerateInvitation } = useTeamManagement();
   const confirm = useConfirm();
+
+  // The rules the server enforces, so neither action is offered only to answer 403. Revoking raises nobody, so it
+  // reaches every invitation up to your own role — whoever sent it, even someone who has since left — and any you
+  // sent. Regenerating hands you a working link to the role it grants, so it follows the member reach rule (below
+  // you, or at your own role when you sent it), except for an Owner: nobody ranks above an Owner, who may invite at
+  // Owner outright.
+  const isOwn = invitation.invitedByUserId === myId;
+  const mayRevoke = myRole != null && (ROLE_RANK[invitation.role] <= ROLE_RANK[myRole] || isOwn);
+  const mayRegenerate = myRole === "Owner" || (myRole != null && (ROLE_RANK[invitation.role] < ROLE_RANK[myRole] || (invitation.role === myRole && isOwn)));
 
   return (
     <div className="cn-row">
@@ -241,12 +255,12 @@ function InvitationRow({ invitation, onIssued }: { invitation: TeamInvitationSum
           ? <span className="cn-status cn-status-warn">expired</span>
           : <span className="cn-sub">expires {relativeDays(invitation.expiresAt)}</span>}
 
-        <RowMenu label={`Actions for ${invitation.email}`}>
+        {mayRevoke && <RowMenu label={`Actions for ${invitation.email}`}>
           {(close) => (
             <>
               {/* No "copy link": after creation there is nothing to copy — the server kept only a
                   hash. Saying so is what stops someone hunting for a link they think they mislaid. */}
-              <button
+              {mayRegenerate && <button
                 className="sb-pop-item"
                 disabled={regenerateInvitation.isPending}
                 onClick={async () => {
@@ -264,7 +278,7 @@ function InvitationRow({ invitation, onIssued }: { invitation: TeamInvitationSum
                 }}
               >
                 Regenerate link
-              </button>
+              </button>}
               <button
                 className="sb-pop-item sb-pop-menu-danger"
                 onClick={async () => {
@@ -283,7 +297,7 @@ function InvitationRow({ invitation, onIssued }: { invitation: TeamInvitationSum
               </button>
             </>
           )}
-        </RowMenu>
+        </RowMenu>}
       </div>
     </div>
   );

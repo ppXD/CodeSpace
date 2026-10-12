@@ -11,5 +11,5 @@ public sealed class CompleteCredentialOAuthCommandHandler : IRequestHandler<Comp
     public CompleteCredentialOAuthCommandHandler(IOAuthFlowService flow) { _flow = flow; }
 
     public async Task<CompleteCredentialOAuthResult> Handle(CompleteCredentialOAuthCommand request, CancellationToken cancellationToken) =>
-        await _flow.CompleteAsync(request.State, request.Code, cancellationToken).ConfigureAwait(false);
+        await _flow.CompleteAsync(request.State, request.Code, request.BrowserNonce, cancellationToken).ConfigureAwait(false);
 }

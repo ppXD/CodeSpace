@@ -5,6 +5,7 @@ using CodeSpace.Core.Services.Chat;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
@@ -95,7 +96,7 @@ public class ConversationServiceFlowTests
     public async Task GetOrCreateDirect_creates_dm_with_two_members_and_dm_key()
     {
         var (teamId, userA) = await SeedTeamAsync();
-        var userB = await SeedUserAsync();
+        var userB = await SeedTeamMemberAsync(teamId);
 
         Guid dmId;
         using (var scope = _fixture.BeginScope())
@@ -119,7 +120,7 @@ public class ConversationServiceFlowTests
     {
         // The singleton guarantee: (A,B) and (B,A), called repeatedly, all resolve to ONE DM.
         var (teamId, userA) = await SeedTeamAsync();
-        var userB = await SeedUserAsync();
+        var userB = await SeedTeamMemberAsync(teamId);
 
         Guid first, secondSameOrder, thirdReversed;
         using (var scope = _fixture.BeginScope())
@@ -176,7 +177,7 @@ public class ConversationServiceFlowTests
         // winner. Both must return the SAME id and exactly one DM row may exist — the race-safe
         // singleton guarantee exercised under genuine contention (not just sequential idempotence).
         var (teamId, userA) = await SeedTeamAsync();
-        var userB = await SeedUserAsync();
+        var userB = await SeedTeamMemberAsync(teamId);
 
         async Task<Guid> OpenAsync()
         {
@@ -200,7 +201,7 @@ public class ConversationServiceFlowTests
     public async Task CreateGroup_includes_actor_and_dedups_members()
     {
         var (teamId, actor) = await SeedTeamAsync();
-        var userB = await SeedUserAsync();
+        var userB = await SeedTeamMemberAsync(teamId);
 
         Guid groupId;
         using (var scope = _fixture.BeginScope())
@@ -236,7 +237,7 @@ public class ConversationServiceFlowTests
     public async Task ListForUser_returns_only_conversations_the_user_belongs_to()
     {
         var (teamId, userA) = await SeedTeamAsync();
-        var userB = await SeedUserAsync();
+        var userB = await SeedTeamMemberAsync(teamId);
 
         Guid joinedChannel, otherChannel;
         using (var scope = _fixture.BeginScope())
@@ -328,7 +329,7 @@ public class ConversationServiceFlowTests
     public async Task Get_read_cursor_is_per_caller_not_shared_across_members()
     {
         var (teamId, owner) = await SeedTeamAsync();
-        var other = await SeedUserAsync();
+        var other = await SeedTeamMemberAsync(teamId);
         var channelId = await SeedChannelAsync(teamId, owner, "general");
 
         using (var scope = _fixture.BeginScope())
@@ -360,7 +361,7 @@ public class ConversationServiceFlowTests
     public async Task AddMember_is_idempotent_and_resurrects_removed_member()
     {
         var (teamId, owner) = await SeedTeamAsync();
-        var newcomer = await SeedUserAsync();
+        var newcomer = await SeedTeamMemberAsync(teamId);
 
         Guid channelId;
         using (var scope = _fixture.BeginScope())
@@ -383,8 +384,8 @@ public class ConversationServiceFlowTests
     public async Task AddMember_to_direct_message_throws()
     {
         var (teamId, userA) = await SeedTeamAsync();
-        var userB = await SeedUserAsync();
-        var userC = await SeedUserAsync();
+        var userB = await SeedTeamMemberAsync(teamId);
+        var userC = await SeedTeamMemberAsync(teamId);
 
         Guid dmId;
         using (var scope = _fixture.BeginScope())
@@ -409,6 +410,48 @@ public class ConversationServiceFlowTests
         using var verify = _fixture.BeginScope();
         await Should.ThrowAsync<InvalidOperationException>(
             () => verify.Resolve<IConversationService>().AddMemberAsync(teamId, outsider, channelId, newcomer, default));
+    }
+
+    // ─── Participants come from the conversation's own team ─────────────────────────
+
+    public enum Participant { OfAnotherTeam, Nobody }
+
+    public enum Entry { Direct, Group, AddMember }
+
+    [Theory]
+    [InlineData(Entry.Direct, Participant.OfAnotherTeam)]
+    [InlineData(Entry.Direct, Participant.Nobody)]
+    [InlineData(Entry.Group, Participant.OfAnotherTeam)]
+    [InlineData(Entry.Group, Participant.Nobody)]
+    [InlineData(Entry.AddMember, Participant.OfAnotherTeam)]
+    [InlineData(Entry.AddMember, Participant.Nobody)]
+    public async Task A_conversation_never_takes_in_someone_outside_its_team(Entry entry, Participant participant)
+    {
+        // Another team's user and an id naming nobody used to be written as members — and the list's member count,
+        // which counts only rows whose user exists, then said which arbitrary ids were real. Both are refused alike.
+        var (teamId, actor) = await SeedTeamAsync();
+        var teammate = await SeedTeamMemberAsync(teamId);
+        var (_, foreigner) = await SeedTeamAsync();
+        var stranger = participant == Participant.OfAnotherTeam ? foreigner : Guid.NewGuid();
+        var channelId = await SeedChannelAsync(teamId, actor, $"c-{Guid.NewGuid():N}");
+
+        using var scope = _fixture.BeginScope();
+        var conversations = scope.Resolve<IConversationService>();
+
+        Func<Task> act = entry switch
+        {
+            Entry.Direct => () => conversations.GetOrCreateDirectAsync(teamId, actor, stranger, default),
+            Entry.Group => () => conversations.CreateGroupAsync(teamId, "g", new[] { teammate, stranger }, actor, default),
+            _ => () => conversations.AddMemberAsync(teamId, actor, channelId, stranger, default),
+        };
+
+        var refused = await act.ShouldThrowAsync<ConversationParticipantNotInTeamException>();
+        refused.Message.ShouldNotContain(stranger.ToString(), Case.Insensitive, "the refusal names nobody");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        (await db.ConversationMember.AsNoTracking().AnyAsync(m => m.UserId == stranger && m.TeamId == teamId)).ShouldBeFalse("nothing was written for the stranger");
+        (await db.Conversation.AsNoTracking().CountAsync(c => c.TeamId == teamId)).ShouldBe(1, "only the seeded channel exists — the refused open or group wrote no conversation");
     }
 
     // ─── Recent-conversations overview (last message + recency) ──────────────────────
@@ -500,7 +543,7 @@ public class ConversationServiceFlowTests
     public async Task ListForUser_flags_a_last_message_that_at_mentions_the_viewer()
     {
         var (teamId, owner) = await SeedTeamAsync();
-        var other = await SeedUserAsync();
+        var other = await SeedTeamMemberAsync(teamId);
         var channelId = await SeedChannelAsync(teamId, owner, "general");
 
         using (var scope = _fixture.BeginScope())
@@ -521,7 +564,7 @@ public class ConversationServiceFlowTests
     public async Task ListForUser_does_not_flag_a_last_message_that_mentions_someone_else()
     {
         var (teamId, owner) = await SeedTeamAsync();
-        var other = await SeedUserAsync();
+        var other = await SeedTeamMemberAsync(teamId);
         var channelId = await SeedChannelAsync(teamId, owner, "general");
 
         using (var scope = _fixture.BeginScope())
@@ -576,6 +619,18 @@ public class ConversationServiceFlowTests
 
         await db.SaveChangesAsync();
         return (teamId, userId);
+    }
+
+    /// <summary>An account in the team — the only kind a conversation in that team may hold.</summary>
+    private async Task<Guid> SeedTeamMemberAsync(Guid teamId)
+    {
+        var userId = await SeedUserAsync();
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Member });
+        await db.SaveChangesAsync();
+        return userId;
     }
 
     private async Task<Guid> SeedUserAsync()

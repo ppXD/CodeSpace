@@ -251,7 +251,7 @@ public class MessageServiceFlowTests
     public async Task Edit_by_non_author_throws()
     {
         var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
-        var other = await SeedUserAsync();
+        var other = await SeedTeamMemberAsync(teamId);
         await JoinAsync(teamId, ownerId, channelId, other);
 
         var msg = await PostAsync(teamId, ownerId, channelId, "owner's message");
@@ -296,7 +296,7 @@ public class MessageServiceFlowTests
     public async Task Delete_by_non_author_throws()
     {
         var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
-        var other = await SeedUserAsync();
+        var other = await SeedTeamMemberAsync(teamId);
         await JoinAsync(teamId, ownerId, channelId, other);
 
         var msg = await PostAsync(teamId, ownerId, channelId, "owner's message");
@@ -310,7 +310,7 @@ public class MessageServiceFlowTests
     public async Task Edit_by_a_removed_author_throws_even_though_they_are_the_author()
     {
         var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
-        var author = await SeedUserAsync();
+        var author = await SeedTeamMemberAsync(teamId);
         await JoinAsync(teamId, ownerId, channelId, author);
 
         var msg = await PostAsync(teamId, author, channelId, "author's message");
@@ -332,7 +332,7 @@ public class MessageServiceFlowTests
     public async Task Delete_by_a_removed_author_throws_even_though_they_are_the_author()
     {
         var (teamId, ownerId, channelId) = await SeedChannelWithOwnerAsync();
-        var author = await SeedUserAsync();
+        var author = await SeedTeamMemberAsync(teamId);
         await JoinAsync(teamId, ownerId, channelId, author);
 
         var msg = await PostAsync(teamId, author, channelId, "author's message");
@@ -601,6 +601,18 @@ public class MessageServiceFlowTests
 
         await db.SaveChangesAsync();
         return (teamId, userId);
+    }
+
+    /// <summary>An account in the team — the only kind a conversation in that team may hold.</summary>
+    private async Task<Guid> SeedTeamMemberAsync(Guid teamId)
+    {
+        var userId = await SeedUserAsync();
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Member });
+        await db.SaveChangesAsync();
+        return userId;
     }
 
     private async Task<Guid> SeedUserAsync()

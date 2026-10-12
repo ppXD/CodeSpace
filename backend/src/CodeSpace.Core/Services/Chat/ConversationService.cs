@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Dtos.Chat;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 
@@ -51,6 +52,8 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
     {
         if (actorUserId == otherUserId) throw new ArgumentException("Cannot open a direct message with yourself.", nameof(otherUserId));
 
+        await EnsureTeamMembersAsync(teamId, new[] { otherUserId }, cancellationToken).ConfigureAwait(false);
+
         var dmKey = BuildDmKey(actorUserId, otherUserId);
 
         var existingId = await FindDirectByKeyAsync(teamId, dmKey, cancellationToken).ConfigureAwait(false);
@@ -88,6 +91,8 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
         var members = DistinctMembersIncludingActor(memberUserIds, actorUserId);
 
         if (members.Count < 2) throw new ArgumentException("A group needs at least two distinct members.", nameof(memberUserIds));
+
+        await EnsureTeamMembersAsync(teamId, members.Where(id => id != actorUserId).ToList(), cancellationToken).ConfigureAwait(false);
 
         var conversation = new Conversation
         {
@@ -147,10 +152,31 @@ public sealed class ConversationService : IConversationService, IScopedDependenc
         var actorIsMember = await IsActiveMemberAsync(conversationId, actorUserId, cancellationToken).ConfigureAwait(false);
         if (!actorIsMember) throw new InvalidOperationException("Only a member can add others to this conversation.");
 
+        await EnsureTeamMembersAsync(teamId, new[] { newMemberUserId }, cancellationToken).ConfigureAwait(false);
+
         await UpsertMemberAsync(conversationId, teamId, newMemberUserId, cancellationToken).ConfigureAwait(false);
     }
 
     // ─── Private helpers ─────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A conversation in a team holds only people in that team. The ids come straight from the caller, and writing
+    /// them unchecked let a conversation hold another team's users and ids that named nobody — and the list's member
+    /// count, which counts only rows whose user exists, then said which arbitrary ids were real accounts. One refusal
+    /// for both cases, so the refusal is not that oracle either. The actor is not checked here: the request pipeline
+    /// already decided they may act in this team.
+    /// </summary>
+    private async Task EnsureTeamMembersAsync(Guid teamId, IReadOnlyCollection<Guid> userIds, CancellationToken cancellationToken)
+    {
+        var members = await _db.TeamMembership.AsNoTracking()
+            .Where(m => m.TeamId == teamId && userIds.Contains(m.UserId))
+            .Select(m => m.UserId)
+            .Distinct()
+            .CountAsync(cancellationToken).ConfigureAwait(false);
+
+        if (members != userIds.Distinct().Count())
+            throw new ConversationParticipantNotInTeamException();
+    }
 
     private async Task EnsureSlugFreeAsync(Guid teamId, string slug, CancellationToken cancellationToken)
     {

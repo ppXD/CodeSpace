@@ -15,9 +15,10 @@ namespace CodeSpace.Messages.Authorization;
 /// <para>READS ARE NOT IN THIS TABLE. Team membership alone is read access; only writes and actions
 /// declare a permission. That keeps adoption a write-side-only change — no query is touched.</para>
 ///
-/// <para>Adoption is INCOMPLETE. Most team writes still pass on membership alone, so Viewer is not yet
-/// a read-only role in practice; <c>TeamWritePermissionAdoptionTests</c> names every write that still
-/// is, and is the honest count of what this table does not yet govern.</para>
+/// <para>Every team write declares one of these, or is named in <c>TeamWritePermissionAdoptionTests</c>
+/// as acting only on the caller's own state. That test scans writes scoped by a team-owned resource id
+/// as well as by the team header — a resource marker proves membership and no role, so a write carrying
+/// only one is exactly the write this table must govern.</para>
 /// </summary>
 public static class TeamPermissionMatrix
 {

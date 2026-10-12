@@ -4,6 +4,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Services.Providers.Identity;
+using CodeSpace.Core.Settings.Application;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Constants;
@@ -17,8 +18,9 @@ namespace CodeSpace.IntegrationTests.OAuth;
 
 /// <summary>
 /// End-to-end OAuth flow: Init → state-stored → Complete (with stubbed token endpoint) →
-/// Credential row persisted, state consumed. Also pins replay rejection + cross-team
-/// rejection at the init boundary.
+/// Credential row persisted, state consumed. Also pins replay rejection, cross-team
+/// rejection at the init boundary, the binding of a flow to the browser that started it,
+/// and the return-address policy at both ends.
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
@@ -41,11 +43,12 @@ public class OAuthFlowTests
         });
 
         var mediator = scope.Resolve<IMediator>();
+        var returnUrl = $"{scope.Resolve<PublicBaseUrlSetting>().Value}/settings/credentials";
         var result = await mediator.Send(new InitCredentialOAuthCommand
         {
             ProviderInstanceId = instanceId,
             DisplayName = "Maya's GitLab",
-            ReturnUrl = "https://app.codespace.dev/settings/credentials"
+            ReturnUrl = returnUrl
         }).ConfigureAwait(false);
 
         result.State.ShouldNotBeNullOrEmpty();
@@ -62,8 +65,13 @@ public class OAuthFlowTests
         row.InitiatorUserId.ShouldBe(userId);
         row.IntendedDisplayName.ShouldBe("Maya's GitLab");
         row.IntendedOwnerUserId.ShouldBe(userId);
-        row.ReturnUrl.ShouldBe("https://app.codespace.dev/settings/credentials");
+        row.ReturnUrl.ShouldBe(returnUrl);
         row.CodeVerifier.ShouldNotBeNullOrEmpty();
+
+        // Only the hash of the starting browser's nonce is stored — a database read never yields a value that completes the flow.
+        result.BrowserNonce.ShouldNotBeNullOrEmpty();
+        row.BrowserNonceHash.ShouldNotBeNull().ShouldBe(OAuthBrowserNonce.Hash(result.BrowserNonce));
+        row.BrowserNonceHash.ShouldNotContain(result.BrowserNonce);
     }
 
     [Fact]
@@ -100,7 +108,8 @@ public class OAuthFlowTests
             completeResult = await mediator.Send(new CompleteCredentialOAuthCommand
             {
                 Code = "code-from-provider",
-                State = initResult.State
+                State = initResult.State,
+                BrowserNonce = initResult.BrowserNonce
             }).ConfigureAwait(false);
         }
 
@@ -177,15 +186,90 @@ public class OAuthFlowTests
         // First callback consumes the state.
         using (var scope = _fixture.BeginScope(b => b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance()))
         {
-            await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = "c1", State = initResult.State }).ConfigureAwait(false);
+            await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = "c1", State = initResult.State, BrowserNonce = initResult.BrowserNonce }).ConfigureAwait(false);
         }
 
         // Second callback with the same state must fail — proves one-time-use enforcement.
         using (var scope = _fixture.BeginScope(b => b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance()))
         {
-            var act = async () => await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = "c2", State = initResult.State }).ConfigureAwait(false);
+            var act = async () => await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = "c2", State = initResult.State, BrowserNonce = initResult.BrowserNonce }).ConfigureAwait(false);
             await act.ShouldThrowAsync<OAuthCallbackException>().ConfigureAwait(false);
         }
+    }
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("a-nonce-this-browser-never-received")]
+    public async Task Complete_from_a_browser_that_did_not_start_the_flow_consumes_nothing(string? browserNonce)
+    {
+        // The capture this pins: an admin of one team starts a connect on their own OAuth app and forwards the
+        // authorize link; whoever's browser finishes it used to hand that team their provider token. Without the
+        // starting browser's nonce, nothing is consumed, exchanged or persisted — and the starter can still finish.
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("victim-token"));
+        var initResult = await InitAsync(userId, teamId, instanceId, stub, returnUrl: null).ConfigureAwait(false);
+
+        using (var scope = _fixture.BeginScope(b => b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance()))
+        {
+            var act = async () => await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = "victim-code", State = initResult.State, BrowserNonce = browserNonce }).ConfigureAwait(false);
+
+            var refused = await act.ShouldThrowAsync<OAuthCallbackException>().ConfigureAwait(false);
+            refused.Reason.ShouldContain("not started in this browser");
+        }
+
+        stub.LastExchange.ShouldBeNull("the code must never reach the token endpoint");
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.Credential.AsNoTracking().AnyAsync(c => c.ProviderInstanceId == instanceId).ConfigureAwait(false)).ShouldBeFalse("no credential lands in the starter's team");
+            (await db.OAuthPendingState.AsNoTracking().AnyAsync(s => s.State == initResult.State).ConfigureAwait(false)).ShouldBeTrue("a refused callback consumes nothing");
+        }
+
+        using var starter = _fixture.BeginScope(b => b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance());
+        var completed = await starter.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = "own-code", State = initResult.State, BrowserNonce = initResult.BrowserNonce }).ConfigureAwait(false);
+        completed.TeamId.ShouldBe(teamId, "the browser that started the connect still finishes it");
+    }
+
+    [Theory]
+    [InlineData("https://attacker.example/landing")]
+    [InlineData("//attacker.example/x")]
+    [InlineData("javascript:alert(1)")]
+    public async Task Init_refuses_a_return_address_off_this_site_and_starts_nothing(string returnUrl)
+    {
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("at"));
+
+        var act = async () => await InitAsync(userId, teamId, instanceId, stub, returnUrl).ConfigureAwait(false);
+
+        var refused = await act.ShouldThrowAsync<ArgumentException>().ConfigureAwait(false);
+        refused.ParamName.ShouldBe("returnUrl");
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().OAuthPendingState.AsNoTracking().AnyAsync(s => s.ProviderInstanceId == instanceId).ConfigureAwait(false)).ShouldBeFalse("a refused start leaves no pending connect");
+    }
+
+    [Fact]
+    public async Task Complete_lands_on_root_when_a_pending_return_address_no_longer_passes()
+    {
+        // Checked again at the callback rather than trusted from init: a row can outlive a change to the public
+        // origin, and a row written before the policy existed carries whatever its starter sent.
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("at"));
+        var nonce = OAuthBrowserNonce.Mint();
+        var state = $"legacy-{Guid.NewGuid():N}";
+
+        using (var seed = _fixture.BeginScope())
+        {
+            var db = seed.Resolve<CodeSpaceDbContext>();
+            db.OAuthPendingState.Add(new OAuthPendingState { State = state, ProviderInstanceId = instanceId, TeamId = teamId, InitiatorUserId = userId, IntendedOwnerUserId = userId, CodeVerifier = "verifier", IntendedDisplayName = "legacy", ReturnUrl = "https://elsewhere.example/landing", BrowserNonceHash = OAuthBrowserNonce.Hash(nonce), ExpiresDate = DateTimeOffset.UtcNow.AddMinutes(5) });
+            await db.SaveChangesAsync().ConfigureAwait(false);
+        }
+
+        using var scope = _fixture.BeginScope(b => b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance());
+        var result = await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = "c", State = state, BrowserNonce = nonce }).ConfigureAwait(false);
+
+        result.ReturnUrl.ShouldBe(OAuthReturnUrl.Fallback);
     }
 
     [Fact]
@@ -296,6 +380,17 @@ public class OAuthFlowTests
         return (user.Id, team.Id, instance.Id);
     }
 
+    private async Task<InitCredentialOAuthResult> InitAsync(Guid userId, Guid teamId, Guid instanceId, StubOAuthClient stub, string? returnUrl)
+    {
+        using var scope = _fixture.BeginScope(b =>
+        {
+            RegisterTestUserAndTeam(b, userId, teamId);
+            b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance();
+        });
+
+        return await scope.Resolve<IMediator>().Send(new InitCredentialOAuthCommand { ProviderInstanceId = instanceId, DisplayName = "connect", ReturnUrl = returnUrl }).ConfigureAwait(false);
+    }
+
     private static void RegisterTestUserAndTeam(ContainerBuilder b, Guid userId, Guid teamId)
     {
         b.RegisterInstance(new Infrastructure.TestCurrentUser(userId, "tester", new[] { Roles.Admin })).As<CodeSpace.Core.Services.Identity.ICurrentUser>().SingleInstance();
@@ -343,7 +438,8 @@ public class OAuthFlowTests
         var result = await callbackScope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand
         {
             Code = "code-from-provider",
-            State = initResult.State
+            State = initResult.State,
+            BrowserNonce = initResult.BrowserNonce
         }).ConfigureAwait(false);
 
         return result.CredentialId;

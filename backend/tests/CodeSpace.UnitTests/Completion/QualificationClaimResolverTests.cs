@@ -66,6 +66,23 @@ public class QualificationClaimResolverTests
     }
 
     [Fact]
+    public void The_fold_keeps_the_paying_teams_identifiers_for_the_reader_projection_to_decide_on()
+    {
+        // The resolver is a pure fold over the ledger and reads the receipt whole; who may see the paying team is
+        // QualificationClaimBoardReader's question, asked per caller.
+        var payingTeam = Guid.NewGuid();
+        var credentialId = Guid.NewGuid();
+        var receipt = Receipt(PerformanceQualification.Sealed, daysAgo: 1);
+        receipt.VerifierBundleJson = $$"""{"harness":"codex-cli","model":"gpt-x","modelCredentialId":"{{credentialId}}"}""";
+        receipt.CohortJson = $$"""{"teamId":"{{payingTeam}}","mode":"supervisor","tier":"internal-qualification","completionPolicyVersion":2}""";
+
+        var claim = QualificationClaimResolver.Fold("supervisor", "git-branch", new[] { receipt });
+
+        claim.Cohort.ShouldNotBeNull().TeamId.ShouldBe(payingTeam);
+        claim.Seal.ShouldNotBeNull().VerifierBundle.ShouldNotBeNull().ModelCredentialId.ShouldBe(credentialId);
+    }
+
+    [Fact]
     public void Legacy_ad_hoc_json_reads_no_identity_never_a_half_filled_one()
     {
         var receipt = Receipt(PerformanceQualification.Sealed, daysAgo: 1);   // helper leaves both json columns at their "{}" default

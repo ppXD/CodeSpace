@@ -281,7 +281,7 @@ public class RepositoryRejectedDeliveryTests
         var db = scope.Resolve<CodeSpaceDbContext>();
 
         var suffix = Guid.NewGuid().ToString("N")[..8];
-        var admin = new User { Id = Guid.NewGuid(), Email = $"rej-adm-{suffix}@x", Name = "admin" };
+        var admin = new User { Id = Guid.NewGuid(), Email = $"rej-adm-{suffix}@x", Name = $"admin-{suffix}" };
         var team = new Team { Id = Guid.NewGuid(), Slug = $"rej-{suffix}", Name = "Rejected" };
 
         db.User.Add(admin);

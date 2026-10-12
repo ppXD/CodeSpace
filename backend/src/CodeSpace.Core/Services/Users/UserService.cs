@@ -124,18 +124,44 @@ public sealed class UserService : IUserService, IScopedDependency
     }
 
     /// <summary>
-    /// Accept either an email or a display name. Both sides lowered so we don't need CITEXT —
-    /// fine for small user tables; OrderBy(Id) makes collision-resolution deterministic. The
-    /// wrong-password check above still throws InvalidCredentials, so a colliding name can't
-    /// be used to enumerate a real user.
+    /// What a sign-in identifier names. Its shape decides which space it is looked up in, because the two spaces are
+    /// kept apart: an address must contain '@' (invitations refuse one without) and a display name may not
+    /// (<see cref="SignInIdentifier.LooksLikeEmail"/>).
+    ///
+    /// <list type="bullet">
+    /// <item>With '@' it is an address and only an address (<see cref="AccountAddress.ResolveAsync"/>): exact spelling
+    /// first, then ignoring case when one live account holds it. No display name is consulted, so no account can be
+    /// NAMED with someone's address and answer for it.</item>
+    /// <item>Without '@' it is a display name, matched ignoring case, and only when exactly one live account carries
+    /// it — a name two accounts share names neither. Only when NO account carries the name is it tried as an address,
+    /// for accounts invited at an '@'-less address before invitations refused one; a name always wins over such an
+    /// address, so one can never take a name's sign-in away from its holder.</item>
+    /// </list>
+    ///
+    /// <para>Anything ambiguous signs in nobody: "invalid credentials", the same answer as a wrong password.</para>
     /// </summary>
     private async Task<User?> LookupUserAsync(string identifier, CancellationToken cancellationToken)
     {
-        var normalized = identifier.Trim().ToLowerInvariant();
-        return await _db.User
-            .Where(u => u.DeletedDate == null && (u.Email.ToLower() == normalized || u.Name.ToLower() == normalized))
-            .OrderBy(u => u.Id)
-            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var trimmed = identifier.Trim();
+
+        if (SignInIdentifier.LooksLikeEmail(trimmed)) return await AccountAddress.ResolveAsync(_db.User, trimmed, cancellationToken).ConfigureAwait(false);
+
+        var carriers = await FindNameCarriersAsync(trimmed, cancellationToken).ConfigureAwait(false);
+
+        return carriers.Count switch
+        {
+            1 => carriers[0],
+            0 => await AccountAddress.ResolveAsync(_db.User, trimmed, cancellationToken).ConfigureAwait(false),
+            _ => null,
+        };
+    }
+
+    /// <summary>Up to two live accounts carrying this display name — enough to tell "one" from "ambiguous".</summary>
+    private async Task<List<User>> FindNameCarriersAsync(string name, CancellationToken cancellationToken)
+    {
+        var key = SignInIdentifier.Normalize(name);
+
+        return await _db.User.Where(u => u.DeletedDate == null && u.Name.ToLower() == key).Take(2).ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
     private static void EnsureNewPasswordValid(string newPassword, string currentPassword)

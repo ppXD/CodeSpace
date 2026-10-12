@@ -22,8 +22,15 @@ public sealed record InvitationPreview
 
     public required DateTimeOffset ExpiresAt { get; init; }
 
-    /// <summary>True when that address already has an account, so the page asks them to sign in rather than to set a password.</summary>
-    public required bool AccountExists { get; init; }
+    /// <summary>
+    /// True only when the request carries the session of the account this invitation is addressed to, so the page
+    /// asks that account to join rather than to set a password.
+    ///
+    /// <para>A fact about the caller, never about the address. It replaced a flag saying whether the address had an
+    /// account at all, which made this anonymous endpoint an existence oracle: any account that can open a workspace
+    /// could invite an arbitrary address and read the answer.</para>
+    /// </summary>
+    public required bool ForSignedInAccount { get; init; }
 }
 
 /// <summary>
@@ -44,6 +51,13 @@ public sealed record TeamInvitationSummary
     public required string Email { get; init; }
     public required TeamRole Role { get; init; }
     public required string InvitedByName { get; init; }
+
+    /// <summary>
+    /// Who sent it — the half of the reach rule a role cannot answer. An invitation at the caller's own role is theirs to
+    /// regenerate or revoke only if they sent it, so the members screen needs the sender to hide what would be refused.
+    /// </summary>
+    public required Guid InvitedByUserId { get; init; }
+
     public required DateTimeOffset ExpiresAt { get; init; }
     public required bool IsExpired { get; init; }
 }

@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Credentials;
@@ -9,8 +10,13 @@ namespace CodeSpace.Messages.Commands.Credentials;
 /// provider outcome, the local credential is marked Revoked and its encrypted payload
 /// cleared — once we drop the payload, nothing in CodeSpace can use the token even if the
 /// provider call failed.
+///
+/// <para><see cref="IRequireCredentialManagement"/>, not the bare credential marker: that one proves only that the
+/// credential is the caller's team's and that the caller is a member, so on its own any Viewer could disconnect any
+/// team credential — the Owner's included — and break every repository bound through it. Now a member disconnects
+/// only their own Personal credential; anything else takes <see cref="TeamPermissions.CredentialsManage"/>.</para>
 /// </summary>
-public sealed record RevokeCredentialCommand : ICommand<RevokeCredentialResult>, IRequireCredentialAccess
+public sealed record RevokeCredentialCommand : ICommand<RevokeCredentialResult>, IRequireCredentialManagement
 {
     public required Guid CredentialId { get; init; }
 }

@@ -1,5 +1,7 @@
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Constants;
+using DbUp;
 using Npgsql;
 using Shouldly;
 
@@ -55,6 +57,113 @@ public class DbUpRunnerTests
         await AdvisoryAsync(holder, "SELECT pg_advisory_unlock(@key)");
 
         await migration.WaitAsync(TimeSpan.FromSeconds(30));   // released → the waiter must now get through
+    }
+
+    /// <summary>
+    /// A migration that must not refuse — a refused migration is a deployment that does not start — reports what it
+    /// left for an operator with <c>RAISE WARNING</c>, and the operator reads the startup log, not the database
+    /// server's. Postgres hands the warning to the client as a notice, which nothing used to listen for: the run printed
+    /// "Upgrade successful" and nothing else. Driven through the production runner over a database genuinely at 0244
+    /// that holds a case-duplicate address pair, and asserted on what that runner itself printed.
+    /// </summary>
+    [Fact]
+    public async Task A_migration_warning_reaches_the_runners_own_log()
+    {
+        await using var database = await PreUpgradeDatabase.CreateAsync(_fixture.ConnectionString, firstPendingScript: "0245");
+        var suffix = Guid.NewGuid().ToString("N")[..10];
+        await database.InsertAccountAsync($"Dup.{suffix}@Corp.test");
+        await database.InsertAccountAsync($"dup.{suffix}@corp.test");
+
+        var printed = PrintedBy(() => new DbUpRunner(database.ConnectionString).Run());
+
+        printed.ShouldContain("WARNING: 0245: 1 address(es) are held by more than one live account", Case.Sensitive,
+            $"the 0245 warning must reach the runner's own output, where an operator reads the startup log. Printed:{Environment.NewLine}{printed}");
+        printed.ShouldContain("CREATE UNIQUE INDEX IF NOT EXISTS ux_app_user_email_lower", Case.Sensitive, "the hint — the statement to run once the duplicates are resolved — comes with it");
+        (await database.IndexExistsAsync("ux_app_user_email_lower")).ShouldBeFalse("precondition: over duplicates 0245 creates no index");
+    }
+
+    /// <summary>What the action wrote to the console — where the production runner logs, and where a container's log comes from.</summary>
+    private static string PrintedBy(Action action)
+    {
+        var original = Console.Out;
+        var captured = new StringWriter();
+
+        Console.SetOut(captured);
+
+        try { action(); }
+        finally { Console.SetOut(original); }
+
+        return captured.ToString();
+    }
+
+    /// <summary>
+    /// Its own database, migrated only up to (not including) <c>firstPendingScript</c> — so the runner meets exactly
+    /// the schema a deployment upgrading across that script meets. Dropped on dispose; the shared test database is
+    /// never touched.
+    /// </summary>
+    private sealed class PreUpgradeDatabase : IAsyncDisposable
+    {
+        private readonly string _name;
+
+        private PreUpgradeDatabase(string connectionString, string name) { ConnectionString = connectionString; _name = name; }
+
+        public string ConnectionString { get; }
+
+        public static async Task<PreUpgradeDatabase> CreateAsync(string sharedConnectionString, string firstPendingScript)
+        {
+            var name = $"codespace_dbup_log_{Guid.NewGuid():N}";
+            var database = new PreUpgradeDatabase(new NpgsqlConnectionStringBuilder(sharedConnectionString) { Database = name }.ConnectionString, name);
+
+            await database.AdminAsync($"CREATE DATABASE \"{name}\"");
+
+            try
+            {
+                var scripts = Path.Combine(Path.GetDirectoryName(typeof(DbUpRunner).Assembly.Location)!, DbUpRunner.ScriptFolder);
+                var upgrade = DeployChanges.To.PostgresqlDatabase(database.ConnectionString)
+                    .WithScriptsFromFileSystem(scripts, path => string.CompareOrdinal(Path.GetFileName(path)[..4], firstPendingScript) < 0)
+                    .WithVariablesDisabled().WithTransaction().LogToNowhere().Build().PerformUpgrade();
+
+                if (!upgrade.Successful) throw upgrade.Error;
+
+                return database;
+            }
+            catch
+            {
+                await database.DisposeAsync();
+                throw;
+            }
+        }
+
+        public async Task InsertAccountAsync(string email) =>
+            await ExecuteAsync($"INSERT INTO app_user (id, email, name, created_date, created_by, last_modified_date, last_modified_by) VALUES (gen_random_uuid(), '{email}', 'duplicate {Guid.NewGuid():N}', now(), '{SystemUsers.SeederId}', now(), '{SystemUsers.SeederId}')");
+
+        public async Task<bool> IndexExistsAsync(string indexName)
+        {
+            await using var connection = new NpgsqlConnection(ConnectionString);
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand("SELECT EXISTS (SELECT FROM pg_indexes WHERE schemaname = 'public' AND indexname = @i)", connection);
+            command.Parameters.AddWithValue("@i", indexName);
+
+            return (bool)(await command.ExecuteScalarAsync())!;
+        }
+
+        public async ValueTask DisposeAsync() => await AdminAsync($"DROP DATABASE IF EXISTS \"{_name}\" WITH (FORCE)");
+
+        private async Task ExecuteAsync(string sql)
+        {
+            await using var connection = new NpgsqlConnection(ConnectionString);
+            await connection.OpenAsync();
+            await using var command = new NpgsqlCommand(sql, connection);
+            await command.ExecuteNonQueryAsync();
+        }
+
+        private async Task AdminAsync(string sql)
+        {
+            await using var admin = new NpgsqlConnection(new NpgsqlConnectionStringBuilder(ConnectionString) { Database = "postgres" }.ConnectionString);
+            await admin.OpenAsync();
+            await using var command = new NpgsqlCommand(sql, admin);
+            await command.ExecuteNonQueryAsync();
+        }
     }
 
     private static async Task AdvisoryAsync(NpgsqlConnection connection, string sql)
