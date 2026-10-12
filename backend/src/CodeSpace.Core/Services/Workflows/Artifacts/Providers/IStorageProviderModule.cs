@@ -22,9 +22,18 @@ public interface IStorageProviderModule
     JsonElement SecretSchema { get; }
 
     /// <summary>
-    /// Project the non-secret configuration fields that identify the provider namespace. The control plane canonicalizes
-    /// and hashes this server-owned projection; clients can never submit a fingerprint. Providers with operational
-    /// tuning fields should override the conservative default so those fields do not create a new namespace identity.
+    /// Project the non-secret configuration onto the PHYSICAL namespace it reaches, spelled one way. The control plane
+    /// canonicalizes and hashes this server-owned projection into the revision's fingerprint (clients can never submit
+    /// one), and the retention reaper re-derives it from stored revisions to decide whether one object key is one
+    /// physical object across teams — unless the provider names that object itself
+    /// (<see cref="IStorageProviderPhysicalObjects"/>), because its keys can leave the namespace its root names.
+    ///
+    /// <para>So two configurations that reach the same namespace MUST project identically — a root with and without a
+    /// trailing separator, a host and its alias — and where a provider cannot tell, it projects them together: a
+    /// merged identity only keeps bytes, a split one lets one team's purge delete another's. A configuration that
+    /// reaches no namespace at all throws. Operational tuning fields belong outside the projection. The default is the
+    /// raw configuration, which is right only for a provider whose configuration has exactly one spelling; every
+    /// shipped module overrides it.</para>
     /// </summary>
     JsonElement GetNamespaceConfiguration(JsonElement nonSecretConfiguration) => nonSecretConfiguration.Clone();
 

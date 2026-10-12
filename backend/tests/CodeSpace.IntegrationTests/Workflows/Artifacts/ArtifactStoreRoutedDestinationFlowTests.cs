@@ -838,7 +838,7 @@ public sealed partial class ArtifactStoreRoutedDestinationFlowTests : IAsyncLife
             var routed = new ReferenceAfterClaimPurgeCoordinator(sweepScope.Resolve<IArtifactCasPurgeCoordinator>(),
                 token => ReferenceFromAgentRunAsync(agentRunId, artifactId, token));
             var reaper = new ArtifactRetentionReaper(sweepScope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), sweepScope.Resolve<IArtifactReferenceOracle>(),
-                sweepScope.Resolve<IArtifactBlobBackend>(), routed, NullLogger<ArtifactRetentionReaper>.Instance);
+                sweepScope.Resolve<IArtifactBlobBackend>(), routed, sweepScope.Resolve<IStorageProviderModuleCatalog>(), NullLogger<ArtifactRetentionReaper>.Instance);
             summary = await reaper.SweepAsync(CancellationToken.None);
         }
 
@@ -923,7 +923,7 @@ public sealed partial class ArtifactStoreRoutedDestinationFlowTests : IAsyncLife
         {
             var routed = new UncertainDeletePurgeCoordinator(uncertainScope.Resolve<IArtifactCasPurgeCoordinator>());
             var reaper = new ArtifactRetentionReaper(uncertainScope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), uncertainScope.Resolve<IArtifactReferenceOracle>(),
-                uncertainScope.Resolve<IArtifactBlobBackend>(), routed, NullLogger<ArtifactRetentionReaper>.Instance);
+                uncertainScope.Resolve<IArtifactBlobBackend>(), routed, uncertainScope.Resolve<IStorageProviderModuleCatalog>(), NullLogger<ArtifactRetentionReaper>.Instance);
             (await reaper.SweepAsync(CancellationToken.None)).Retried.ShouldBeGreaterThanOrEqualTo(1);
             routed.ReleaseCalls.ShouldBe(0, "an effect-uncertain result must never be relabeled Available");
         }
@@ -1549,7 +1549,7 @@ public sealed partial class ArtifactStoreRoutedDestinationFlowTests : IAsyncLife
     /// <summary>The shipped reaper over a substituted purge coordinator, with a short attempt budget so exhausting it is two sweeps rather than eight.</summary>
     private static ArtifactRetentionReaper BudgetedReaper(ILifetimeScope scope, IArtifactCasPurgeCoordinator routed, int attempts) =>
         new(new ArtifactRetentionReaperServices(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactReferenceOracle>(),
-                scope.Resolve<IArtifactBlobBackend>(), routed, NullLogger<ArtifactRetentionReaper>.Instance),
+                scope.Resolve<IArtifactBlobBackend>(), routed, scope.Resolve<IStorageProviderModuleCatalog>(), NullLogger<ArtifactRetentionReaper>.Instance),
             new ArtifactRetentionReaperOptions(BatchSize: 200, ClaimSize: 25, MaxAttempts: attempts, LeaseDuration: TimeSpan.FromSeconds(60),
                 OperationTimeout: TimeSpan.FromSeconds(15), RetryDelay: TimeSpan.FromMinutes(30)));
 

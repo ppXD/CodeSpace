@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Constants;
@@ -22,11 +23,13 @@ public sealed class AgentRunLogStorageReadiness : IAgentRunLogStorageReadiness
     internal const string DefaultProfileStableName = "codespace-agent-run-log-default";
     private readonly CodeSpaceDbContext _db;
     private readonly TimeProvider _clock;
+    private readonly IStorageProviderModuleCatalog _modules;
 
-    public AgentRunLogStorageReadiness(CodeSpaceDbContext db, TimeProvider clock)
+    public AgentRunLogStorageReadiness(CodeSpaceDbContext db, TimeProvider clock, IStorageProviderModuleCatalog modules)
     {
         _db = db;
         _clock = clock;
+        _modules = modules;
     }
 
     public async Task EnsureDefaultRouteAsync(Guid teamId, CancellationToken cancellationToken)
@@ -53,7 +56,7 @@ public sealed class AgentRunLogStorageReadiness : IAgentRunLogStorageReadiness
                 return;
             }
 
-            var profile = BuildProfile(teamId, canonicalConfig, _clock.GetUtcNow());
+            var profile = BuildProfile(teamId, canonicalConfig, NamespaceFingerprint(canonicalConfig), _clock.GetUtcNow());
             _db.StorageProfile.Add(profile);
             var route = BuildRoute(teamId, profile.Id, _clock.GetUtcNow());
             _db.StorageRoute.Add(route);
@@ -71,7 +74,14 @@ public sealed class AgentRunLogStorageReadiness : IAgentRunLogStorageReadiness
         }
     }
 
-    private static StorageProfile BuildProfile(Guid teamId, string canonicalConfig, DateTimeOffset now)
+    /// <summary>The same derivation admission uses, so this bootstrap's revision names its namespace exactly as a Settings-created one would.</summary>
+    private string NamespaceFingerprint(string canonicalConfig)
+    {
+        using var document = JsonDocument.Parse(canonicalConfig);
+        return StorageProfileRules.NamespaceFingerprint(_modules.Require(LocalRwxArtifactStorageDriverFactory.TypeKey), document.RootElement);
+    }
+
+    private static StorageProfile BuildProfile(Guid teamId, string canonicalConfig, string namespaceFingerprint, DateTimeOffset now)
     {
         var profile = new StorageProfile
         {
@@ -79,12 +89,11 @@ public sealed class AgentRunLogStorageReadiness : IAgentRunLogStorageReadiness
             State = StorageProfileState.Active, CreatedDate = now, CreatedBy = SystemUsers.SeederId,
             LastModifiedDate = now, LastModifiedBy = SystemUsers.SeederId,
         };
-        using var document = JsonDocument.Parse(canonicalConfig);
         profile.Revisions.Add(new StorageProfileRevision
         {
             Id = Guid.NewGuid(), TeamId = teamId, StorageProfileId = profile.Id, Revision = 1,
             ProviderTypeKey = LocalRwxArtifactStorageDriverFactory.TypeKey, NonSecretConfigJson = canonicalConfig,
-            CredentialRef = null, NamespaceFingerprint = StorageProfileRules.NamespaceFingerprint(LocalRwxArtifactStorageDriverFactory.TypeKey, document.RootElement),
+            CredentialRef = null, NamespaceFingerprint = namespaceFingerprint,
             CreatedDate = now, CreatedBy = SystemUsers.SeederId,
         });
         return profile;

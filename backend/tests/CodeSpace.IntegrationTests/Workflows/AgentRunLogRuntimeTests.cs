@@ -11,6 +11,7 @@ using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Commands.Storage;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Agents;
 using CodeSpace.Messages.Enums;
@@ -209,6 +210,40 @@ public sealed class AgentRunLogRuntimeTests
         revision.CredentialRef.ShouldBeNull();
         using var config = JsonDocument.Parse(revision.NonSecretConfigJson);
         config.RootElement.GetProperty("rootPath").GetString().ShouldBe(Path.GetFullPath(rootPath));
+    }
+
+    [Fact]
+    public async Task The_bootstrap_destination_names_its_namespace_exactly_as_settings_admission_names_that_directory()
+    {
+        // The bootstrap writes its revision without going through admission, so it must derive the namespace the way
+        // admission does. Reached through a link here, the deployment root's TEXT differs from the directory an operator
+        // types into Settings, while the directory itself is one: a fingerprint of the text would name two namespaces.
+        if (OperatingSystem.IsWindows()) return;
+
+        var world = await SeedWorldAsync();
+        var real = Directory.CreateDirectory(Path.Combine(Path.GetTempPath(), "codespace-agent-log-namespace", Guid.NewGuid().ToString("N"))).FullName;
+        var link = real + "-link";
+        Directory.CreateSymbolicLink(link, real);
+
+        try
+        {
+            using var settings = RuntimeSettings.Override(current => current with { ArtifactStoreDirectory = link, ArtifactLocalRwxShared = true });
+            using var scope = _fixture.BeginScope();
+
+            var bootstrap = (await scope.Resolve<IAgentRunLogStorageResolver>().ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBeOfType<AgentRunLogStorageResolution.Ready>();
+            using var typed = JsonDocument.Parse(JsonSerializer.Serialize(new { rootPath = real + "/" }));
+            var admitted = await scope.Resolve<IStorageProfileService>().CreateAsync(world.TeamId, world.ActorId, new CreateStorageProfileCommand { StableName = $"admitted-{Guid.NewGuid():N}", ProviderTypeKey = "local-rwx/v1", NonSecretConfig = typed.RootElement }, CancellationToken.None);
+
+            var bootstrapFingerprint = await scope.Resolve<CodeSpaceDbContext>().StorageProfileRevision.AsNoTracking()
+                .Where(value => value.StorageProfileId == bootstrap.StorageProfileId).Select(value => value.NamespaceFingerprint).SingleAsync();
+
+            bootstrapFingerprint.ShouldBe(admitted.Revisions.ShouldHaveSingleItem().NamespaceFingerprint, $"'{link}' and '{real}/' are one directory, so the bootstrap and admission must name one namespace");
+        }
+        finally
+        {
+            File.Delete(link);
+            Directory.Delete(real, recursive: true);
+        }
     }
 
     [Fact]

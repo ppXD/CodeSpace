@@ -269,10 +269,10 @@ public sealed class StorageProfileService : IStorageProfileService, IScopedDepen
         ExecuteRule(() => module.EnsureConfigurationReadable(canonicalElement));
 
         var normalizedCredentialRef = await ValidateCredentialAsync(teamId, module.TypeKey, credentialRef, cancellationToken).ConfigureAwait(false);
-        var namespaceConfig = module.GetNamespaceConfiguration(canonicalElement);
-        if (namespaceConfig.ValueKind != JsonValueKind.Object)
-            throw new InvalidOperationException($"Storage provider '{module.TypeKey}' namespace configuration projection must be a JSON object.");
-        var fingerprint = ExecuteRule(() => StorageProfileRules.NamespaceFingerprint(module.TypeKey, namespaceConfig));
+
+        // The fingerprint names the PHYSICAL namespace the provider says this configuration reaches, not its text, so two
+        // spellings of one destination store one fingerprint. The configuration itself is persisted as written.
+        var fingerprint = ExecuteRule(() => StorageProfileRules.NamespaceFingerprint(module, canonicalElement));
         return new PreparedRevision(module.TypeKey, canonicalConfig, normalizedCredentialRef, fingerprint);
     }
 

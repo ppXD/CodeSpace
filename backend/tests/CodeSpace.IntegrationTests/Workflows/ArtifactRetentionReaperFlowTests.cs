@@ -14,6 +14,7 @@ using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers;
 using System.Text.Json;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -29,7 +30,7 @@ namespace CodeSpace.IntegrationTests.Workflows;
 /// </summary>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public sealed class ArtifactRetentionReaperFlowTests
+public sealed partial class ArtifactRetentionReaperFlowTests
 {
     private readonly PostgresFixture _fixture;
 
@@ -670,7 +671,7 @@ public sealed class ArtifactRetentionReaperFlowTests
     {
         using var scope = _fixture.BeginScope();
         var reaper = new ArtifactRetentionReaper(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>(), scope.Resolve<IArtifactReferenceOracle>(),
-            new RefusingPurgeBackend(scope.Resolve<IArtifactBlobBackend>()), scope.Resolve<IArtifactCasPurgeCoordinator>(), NullLogger<ArtifactRetentionReaper>.Instance);
+            new RefusingPurgeBackend(scope.Resolve<IArtifactBlobBackend>()), scope.Resolve<IArtifactCasPurgeCoordinator>(), scope.Resolve<IStorageProviderModuleCatalog>(), NullLogger<ArtifactRetentionReaper>.Instance);
 
         return await reaper.SweepAsync(CancellationToken.None);
     }
