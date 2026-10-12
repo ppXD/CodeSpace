@@ -739,6 +739,52 @@ public partial class AgentRunExecutorTests
         (run.Error ?? "").ShouldNotContain(key);
     }
 
+    /// <summary>
+    /// A line longer than one 8 MiB read pass is delivered as a frame the reader CUT and its continuation, and each is
+    /// persisted on its own: a native record, a transcript line. A key the cut lands inside used to be stored as a head
+    /// in one record and a tail in the next — exact matching saw neither. The real executor, the real durable runner and
+    /// the production native-record plane; the harness drops non-JSON lines as the production CLI parsers do.
+    /// </summary>
+    [Fact]
+    public async Task A_model_key_split_by_the_read_pass_cut_of_a_long_line_leaves_no_fragment_in_native_records_or_the_transcript()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var key = "sk-split-" + string.Concat(Enumerable.Range(0, 32).Select(_ => "BCDFGHJKLMNPQRSTVWZ23456789"[Random.Shared.Next(27)]));
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, "scripted-provider", key);
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+
+        // The filler stops 12 bytes short of the 8 MiB pass, so the reader cuts the line 12 characters into the key —
+        // on stdout and, written again, on stderr. A short control line carries the key whole.
+        var script = $"line() {{ head -c {8 * 1024 * 1024 - 12} /dev/zero | tr '\\000' x; printf '%s\\n' \"$SCRIPTED_MODEL_KEY\"; }}; line; line >&2; printf 'short line %s\\n' \"$SCRIPTED_MODEL_KEY\"";
+        await ExecuteAsync(runId, new LongLineKeyEchoingHarness("scripted-provider", "SCRIPTED_MODEL_KEY", script), productionCapturePlanes: true);
+
+        using var scope = _fixture.BeginScope();
+        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, run.Error);
+
+        var records = await scope.Resolve<CodeSpaceDbContext>().WorkflowRunNativeRecord.AsNoTracking().Where(r => r.AgentRunId == runId).OrderBy(r => r.Channel).ThenBy(r => r.Ordinal).ToListAsync();
+        var cut = records.Single(r => r.Channel == NativeRecordChannel.Stdout && !r.IsFinal);
+        records.ShouldContain(r => r.Channel == NativeRecordChannel.Stderr && !r.IsFinal, "precondition: the diagnostics reader cut the long stderr line too");
+        records.ShouldAllBe(r => r.PayloadRefJson == null, "precondition: every payload is inline, where this test reads it");
+
+        records.Single(r => r.Channel == NativeRecordChannel.Stdout && r.Ordinal == cut.Ordinal + 1).InlinePayload.ShouldBe(SecretRedactor.Placeholder, "the key is masked whole in the record that continues the cut, not dropped");
+        foreach (var record in records) ShouldHoldNoFragmentOf(key, record.InlinePayload ?? "", $"native record {record.Channel} #{record.Ordinal}");
+
+        var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+        var transcript = result.TranscriptArtifactId is { } transcriptId ? System.Text.Encoding.UTF8.GetString((await scope.Resolve<IArtifactStore>().GetBytesAsync(teamId, transcriptId, CancellationToken.None))!.Bytes) : result.Transcript;
+        transcript.ShouldContain("\n" + SecretRedactor.Placeholder + "\nshort line " + SecretRedactor.Placeholder, Case.Sensitive);
+        ShouldHoldNoFragmentOf(key, transcript, "the transcript");
+    }
+
+    /// <summary>Any six consecutive characters of the key: the whole value, and the head or tail a cut would leave behind.</summary>
+    private static void ShouldHoldNoFragmentOf(string key, string text, string where)
+    {
+        for (var start = 0; start + 6 <= key.Length; start++)
+            text.Contains(key.Substring(start, 6), StringComparison.Ordinal).ShouldBeFalse($"{where} holds '{key.Substring(start, 6)}', a fragment of the model key");
+    }
+
     [Fact]
     public async Task Redacts_an_echoed_author_supplied_env_token_from_the_error_and_the_append_only_log()
     {
@@ -2271,6 +2317,24 @@ public partial class AgentRunExecutorTests
 
         public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) =>
             new Dictionary<string, string> { [_envVar] = credential.ApiKey ?? "" };
+    }
+
+    /// <summary>A projecting harness running a given script whose parser, like the production CLI parsers on a non-JSON line, makes an event of the short control line only.</summary>
+    private sealed class LongLineKeyEchoingHarness(string provider, string envVar, string script) : IAgentHarness, IModelCredentialProjector
+    {
+        public string Kind => "scripted-projector";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+
+        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", script }, WorkingDirectory = task.WorkspaceDirectory, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
+
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => rawLine.StartsWith("short line", StringComparison.Ordinal) ? new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = rawLine } } : Array.Empty<AgentEvent>();
+
+        public IAgentEventFolder CreateFolder() => new TestEventFolder((fold, exitCode) => new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = fold.LastText });
+
+        public IReadOnlyList<string> SupportedProviders => new[] { provider };
+
+        public IReadOnlyDictionary<string, string> ProjectToEnv(ResolvedModelCredential credential) => new Dictionary<string, string> { [envVar] = credential.ApiKey ?? "" };
     }
 
     /// <summary>A projecting harness whose script ECHOES its injected key to stdout, and whose events carry that line in BOTH Text and a structured Data payload — the leak the redactor must mask before the append-only log persists it.</summary>

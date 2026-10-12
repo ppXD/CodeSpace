@@ -160,8 +160,8 @@ public sealed class AgentRunCommandNode : INodeRuntime
         var maxOutputChars = TryReadPositiveInt(context, "maxOutputChars", out var cap) ? cap : 0;
         var captures = new[]
         {
-            new CommandOutputCapture("stdout", result.Stdout, OutputCap.Apply(result.Stdout, maxOutputChars), result.Observation?.Stdout),
-            new CommandOutputCapture("stderr", result.Stderr, OutputCap.Apply(result.Stderr, maxOutputChars), result.Observation?.Stderr),
+            CommandOutputCapture.Of("stdout", result.Stdout, result.Observation?.Stdout, maxOutputChars, context.PersistenceRedactor),
+            CommandOutputCapture.Of("stderr", result.Stderr, result.Observation?.Stderr, maxOutputChars, context.PersistenceRedactor),
         };
         var outputs = new Dictionary<string, JsonElement>
         {
@@ -192,7 +192,7 @@ public sealed class AgentRunCommandNode : INodeRuntime
         if ((!capture.Inline.Truncated && capture.Complete) || teamId is not { } tid || string.IsNullOrEmpty(capture.Text)) return null;
         try
         {
-            return await _artifacts.PutAsync(tid, Encoding.UTF8.GetBytes(capture.Text), "text/plain", cancellationToken).ConfigureAwait(false);
+            return await _artifacts.PutAsync(tid, Encoding.UTF8.GetBytes(capture.Redacted), "text/plain", cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -210,10 +210,31 @@ public sealed class AgentRunCommandNode : INodeRuntime
         catch (Exception ex) { context.Logger.LogWarning(ex, "Command output capture loss could not be recorded; the command outcome is unchanged"); }
     }
 
-    private sealed record CommandOutputCapture(string Name, string Text, OutputCap.Result Inline, SandboxStreamObservation? Observation)
+    /// <summary>One captured stream: the runner's text, that text redacted, and the inline value the node returns.</summary>
+    private sealed record CommandOutputCapture(string Name, string Text, string Redacted, OutputCap.Result Inline, SandboxStreamObservation? Observation)
     {
-        public bool Complete => Observation is null or { ReachedEndOfStream: true, CaptureComplete: true };
+        public bool Complete => IsComplete(Observation);
         public long ObservedBytes => Observation?.ObservedBytes ?? Encoding.UTF8.GetByteCount(Text);
+
+        /// <summary>
+        /// Redact first, then cut. A capture nothing cut keeps its runtime value: the engine masks it whole in node.completed
+        /// and keeps the real one in the encrypted sidecar for downstream nodes, resumes and reruns. Any cut — the inline cap,
+        /// or the runner's budget ending the capture mid-stream — is taken from the redacted text instead, because a cut
+        /// inside a secret leaves a fragment exact matching never recognises again. The artifact always holds the redacted
+        /// text: it has no sidecar, and every member downloads exactly what is stored.
+        /// </summary>
+        public static CommandOutputCapture Of(string name, string text, SandboxStreamObservation? observation, int maxOutputChars, PersistenceSecretRedactor redactor)
+        {
+            var complete = IsComplete(observation);
+            var redacted = (complete ? redactor.Redact(text) : redactor.RedactCut(text)).Value ?? "";
+            var inline = OutputCap.Apply(text, maxOutputChars);
+
+            if (inline.Truncated || !complete) inline = OutputCap.Apply(redacted, maxOutputChars);
+
+            return new CommandOutputCapture(name, text, redacted, inline, observation);
+        }
+
+        private static bool IsComplete(SandboxStreamObservation? observation) => observation is null or { ReachedEndOfStream: true, CaptureComplete: true };
     }
 
     private static bool TryReadNonEmpty(NodeRunContext context, string key, out string text)

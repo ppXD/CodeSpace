@@ -404,6 +404,76 @@ public class AgentRunCommandNodeTests
         result.Outputs.ContainsKey("stdoutCapturedArtifactId").ShouldBe(failure != "artifact");
     }
 
+    private const string Canary = "CANARY-run-command-5f0c2d7e9a1b";
+
+    /// <summary>
+    /// The cap used to cut the RAW capture and leave the engine to mask the excerpt: a head that ended inside a secret
+    /// kept its first characters, which exact matching never recognises again. The excerpt and the artifact (which has
+    /// no encrypted sidecar, so every member downloads exactly what is stored) are now cut from the redacted text.
+    /// </summary>
+    [Fact]
+    public async Task A_cap_that_lands_inside_a_secret_keeps_no_fragment_of_it_inline_or_in_the_artifact()
+    {
+        var team = Guid.NewGuid();
+        var stdout = "deploying with key=" + Canary + "\n" + new string('x', 4000);
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = stdout, Stderr = "" } };
+        var artifacts = new FakeArtifactStore();
+        var context = ContextWithSys(new() { ["command"] = JsonSerializer.SerializeToElement("sh"), ["maxOutputChars"] = JsonSerializer.SerializeToElement(40) }, new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(team) }) with { PersistenceRedactor = new PersistenceSecretRedactor([Canary]) };
+
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(context, CancellationToken.None);
+
+        var inline = result.Outputs["stdout"].GetString()!;
+        inline.ShouldStartWith("deploying with key=", customMessage: "the 26-character head ends 7 characters into where the secret was");
+        ShouldHoldNoFragmentOfTheCanary(inline, "the inline excerpt");
+        var artifact = System.Text.Encoding.UTF8.GetString(artifacts.Puts.ShouldHaveSingleItem().Bytes);
+        artifact.ShouldBe("deploying with key=" + PersistenceSecretRedactor.Marker + "\n" + new string('x', 4000), "the artifact is the whole capture, redacted");
+        result.Outputs.ContainsKey("stdoutArtifactId").ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task A_runner_capture_that_stopped_inside_a_secret_keeps_no_fragment_of_it()
+    {
+        var team = Guid.NewGuid();
+        var captured = new string('x', 100) + " key=" + Canary[..12];   // the runner's budget ended the capture 12 characters into the secret
+        var observed = new SandboxStreamObservation { ObservedBytes = 5000, ReachedEndOfStream = true, CaptureComplete = false };
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = captured, Stderr = "", Observation = new SandboxObservation { Stdout = observed } } };
+        var artifacts = new FakeArtifactStore();
+        var context = ContextWithSys(new() { ["command"] = JsonSerializer.SerializeToElement("sh") }, new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(team) }) with { PersistenceRedactor = new PersistenceSecretRedactor([Canary]) };
+
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(context, CancellationToken.None);
+
+        var inline = result.Outputs["stdout"].GetString()!;
+        inline.ShouldBe(new string('x', 100) + " key=" + PersistenceSecretRedactor.Marker);
+        ShouldHoldNoFragmentOfTheCanary(System.Text.Encoding.UTF8.GetString(artifacts.Puts.ShouldHaveSingleItem().Bytes), "the captured-excerpt artifact");
+        result.Outputs.ContainsKey("stdoutCapturedArtifactId").ShouldBeTrue();
+        result.Outputs["stdoutCapturedBytes"].GetInt64().ShouldBe(captured.Length, "the size reported is the runner's capture, not the masked copy");
+    }
+
+    /// <summary>
+    /// Nothing was cut, so the engine's exact match masks the whole value in node.completed and keeps the real one in the
+    /// encrypted sidecar. The node must not mask it first: a downstream node, a resume and a rerun read the runtime value.
+    /// </summary>
+    [Fact]
+    public async Task An_uncut_capture_keeps_its_runtime_value_for_the_engine_to_mask_at_persistence()
+    {
+        var stdout = "token=" + Canary;
+        var stub = new StubRunCommandService { Result = new() { Status = SandboxStatus.Success, ExitCode = 0, Stdout = stdout, Stderr = "" } };
+        var artifacts = new FakeArtifactStore();
+        var context = ContextWithSys(new() { ["command"] = JsonSerializer.SerializeToElement("sh") }, new() { [SystemScopeKeys.TeamId] = JsonSerializer.SerializeToElement(Guid.NewGuid()) }) with { PersistenceRedactor = new PersistenceSecretRedactor([Canary]) };
+
+        var result = await new AgentRunCommandNode(stub, artifacts).RunAsync(context, CancellationToken.None);
+
+        result.Outputs["stdout"].GetString().ShouldBe(stdout);
+        artifacts.Puts.ShouldBeEmpty();
+    }
+
+    private static void ShouldHoldNoFragmentOfTheCanary(string text, string where)
+    {
+        const int window = 6;
+        for (var start = 0; start + window <= Canary.Length; start++)
+            text.ShouldNotContain(Canary.Substring(start, window), Case.Sensitive, $"{where} keeps '{Canary.Substring(start, window)}', a fragment of the secret: {text[..Math.Min(text.Length, 200)]}");
+    }
+
     private sealed class LossObserver : INodeObservability, INodeLossReporting
     {
         public List<string> Notices { get; } = [];

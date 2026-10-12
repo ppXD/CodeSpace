@@ -1,6 +1,7 @@
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Constants;
 
 namespace CodeSpace.Core.Services.Workflows.Llm;
@@ -57,9 +58,7 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
             () => StartedPayloadAsync(scope, Provider, request.Model, request.SystemPrompt, request.UserPrompt, request.Temperature, request.MaxOutputTokens, cancellationToken), cancellationToken).ConfigureAwait(false);
 
         var accumulator = new LlmCompletionAccumulator();
-        var pending = new StringBuilder();
-        var pendingBytes = 0;
-        var deltaOrdinal = 0;
+        var pending = new PendingDelta(PersistenceSecretRedactor.Union(scope.NativeCredentialRedactor, scope.CaptureRedactor));
 
         await using var enumerator = _streamingInner.StreamAsync(request, cancellationToken).GetAsyncEnumerator(cancellationToken);
         using var timer = new PeriodicTimer(DeltaFlushInterval, _timeProvider);
@@ -71,7 +70,7 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
             bool moved;
             try
             {
-                if (pending.Length > 0)
+                if (!pending.IsEmpty)
                 {
                     var completed = await Task.WhenAny(moveNextTask, tickTask).ConfigureAwait(false);
                     if (completed == tickTask)
@@ -79,8 +78,7 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
                         cancellationToken.ThrowIfCancellationRequested();
                         if (!await tickTask.ConfigureAwait(false)) break;
 
-                        await RecordPendingDeltaAsync(scope, correlationId, pending, deltaOrdinal++, cancellationToken).ConfigureAwait(false);
-                        pendingBytes = 0;
+                        await RecordPendingDeltaAsync(scope, correlationId, pending, DeltaFlush.Settled, cancellationToken).ConfigureAwait(false);
                         tickTask = timer.WaitForNextTickAsync(cancellationToken).AsTask();
                         continue;
                     }
@@ -92,8 +90,8 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
             {
                 // The caller's token is commonly already cancelled here. Capture uses its own non-cancelled attempt so
                 // cancellation itself remains a typed terminal fact; SafeRecord still swallows any ledger failure.
-                if (pending.Length > 0)
-                    await RecordPendingDeltaAsync(scope, correlationId, pending, deltaOrdinal++, CancellationToken.None).ConfigureAwait(false);
+                if (!pending.IsEmpty)
+                    await RecordPendingDeltaAsync(scope, correlationId, pending, DeltaFlush.Cut, CancellationToken.None).ConfigureAwait(false);
 
                 var failureRecorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), CancellationToken.None).ConfigureAwait(false);
                 if (failureRecorded && declared) await MarkCapturePresentAsync(scope).ConfigureAwait(false);
@@ -109,12 +107,8 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
             if (current is LlmStreamEvent.TextDelta delta)
             {
                 pending.Append(delta.Text);
-                pendingBytes += Encoding.UTF8.GetByteCount(delta.Text);
-                if (pendingBytes >= DeltaFlushBytes)
-                {
-                    await RecordPendingDeltaAsync(scope, correlationId, pending, deltaOrdinal++, cancellationToken).ConfigureAwait(false);
-                    pendingBytes = 0;
-                }
+                if (pending.Bytes >= DeltaFlushBytes)
+                    await RecordPendingDeltaAsync(scope, correlationId, pending, DeltaFlush.Settled, cancellationToken).ConfigureAwait(false);
             }
 
             yield return current;
@@ -123,21 +117,79 @@ public sealed class RecordingStreamingStructuredLLMClientDecorator : RecordingSt
 
         // Keep the final tail in the ordered live projection. This is at most one extra row per streamed call, preserves
         // exact concatenation, and does not change authority: completed below remains the canonical whole output.
-        if (pending.Length > 0)
-            await RecordPendingDeltaAsync(scope, correlationId, pending, deltaOrdinal, cancellationToken).ConfigureAwait(false);
+        if (!pending.IsEmpty)
+            await RecordPendingDeltaAsync(scope, correlationId, pending, DeltaFlush.End, cancellationToken).ConfigureAwait(false);
 
         var recorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionCompleted, correlationId,
             async () => CompletedPayload(scope, Provider, accumulator.ResolveModel(request.Model), accumulator.Usage, await OffloadTextAsync(scope, accumulator.Text, CancellationToken.None).ConfigureAwait(false)), CancellationToken.None).ConfigureAwait(false);
         if (recorded && declared) await MarkCapturePresentAsync(scope).ConfigureAwait(false);
     }
 
-    private async Task RecordPendingDeltaAsync(LlmCallScope scope, Guid correlationId, StringBuilder pending, int ordinal, CancellationToken cancellationToken)
+    private async Task RecordPendingDeltaAsync(LlmCallScope scope, Guid correlationId, PendingDelta pending, DeltaFlush flush, CancellationToken cancellationToken)
     {
-        var fragment = pending.ToString();
-        pending.Clear();
+        if (pending.Take(flush) is not { } fragment) return;
+
+        var text = Observe(scope, fragment.Text);
 
         await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionDelta, correlationId,
-            async () => DeltaPayload(scope, Provider, ordinal, await OffloadTextAsync(scope, fragment, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false);
+            async () => DeltaPayload(scope, Provider, fragment.Ordinal, await OffloadTextAsync(scope, text, cancellationToken).ConfigureAwait(false)), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>What a flush may release of the held text.</summary>
+    private enum DeltaFlush
+    {
+        /// <summary>Mid-stream: only the settled text; the rest is carried into the next flush.</summary>
+        Settled,
+
+        /// <summary>The stream ended: everything, verbatim — a held tail nothing followed never became a secret.</summary>
+        End,
+
+        /// <summary>
+        /// The stream was cut — a cancel or a fault: everything, with a held tail that could start a secret masked. The
+        /// carry holds exactly that text, the rest of it was never streamed, and exact matching never sees it whole.
+        /// </summary>
+        Cut,
+    }
+
+    /// <summary>
+    /// The text streamed since the last delta row, and the ordinal the next row takes. Each row is redacted on its own, so
+    /// a flush mid-stream releases only the SETTLED text — none that a secret could still run across — and carries the
+    /// rest into the next flush; otherwise a secret the model prints across a flush (by size or by the one-second
+    /// cadence) is stored as two halves no exact match recognises, and the live view concatenates them back. The end
+    /// of the stream releases everything, so the rows still concatenate to exactly the streamed text, masked; a cut
+    /// releases everything too, but masks the end it was holding back.
+    /// </summary>
+    private sealed class PendingDelta(PersistenceSecretRedactor boundary)
+    {
+        private readonly StringBuilder _text = new();
+        private int _ordinal;
+
+        /// <summary>UTF-8 size of the held text — the size bound is in bytes, not UTF-16 chars.</summary>
+        public int Bytes { get; private set; }
+
+        public bool IsEmpty => _text.Length == 0;
+
+        public void Append(string text)
+        {
+            _text.Append(text);
+            Bytes += Encoding.UTF8.GetByteCount(text);
+        }
+
+        /// <summary>The text one row may carry and that row's ordinal, or null when nothing is settled yet.</summary>
+        public (PersistenceRedaction<string?> Text, int Ordinal)? Take(DeltaFlush flush)
+        {
+            var text = _text.ToString();
+            var length = flush == DeltaFlush.Settled ? boundary.SettledLength(text) : text.Length;
+
+            if (length == 0) return null;
+
+            _text.Remove(0, length);
+            Bytes = Encoding.UTF8.GetByteCount(text.AsSpan(length));
+
+            var released = flush == DeltaFlush.Cut ? boundary.RedactCut(text) : new PersistenceRedaction<string?>(text[..length], false);
+
+            return (released, _ordinal++);
+        }
     }
 
     /// <summary>The <c>interaction.delta</c> payload: the ordinal (monotonic within the call) + the coalesced text fragment (inline-or-<c>$artifact_id</c>).</summary>

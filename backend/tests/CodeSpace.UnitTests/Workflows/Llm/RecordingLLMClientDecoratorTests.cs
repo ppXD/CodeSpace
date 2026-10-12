@@ -451,6 +451,183 @@ public class RecordingLLMClientDecoratorTests
         }
     }
 
+    private const string StreamSecret = "CANARY-delta-9b2e4f70c13a";
+
+    /// <summary>
+    /// Each <c>interaction.delta</c> used to be redacted on its own, so a secret the model printed across a flush landed
+    /// as two halves no exact match recognised, and the Room concatenates the deltas back into the whole secret. A flush
+    /// now releases only text no secret can still run across, and carries the rest into the next one.
+    /// </summary>
+    [Fact]
+    public async Task A_secret_split_by_a_size_flush_is_masked_in_the_deltas()
+    {
+        var head = new string('x', RecordingStreamingStructuredLLMClientDecorator.DeltaFlushBytes - 10);
+        var inner = new SplitStreamingClient([head + StreamSecret[..10]], [StreamSecret[10..] + " tail"]);
+        inner.Release.TrySetResult();
+        var logger = new CapturingLogger();
+
+        using (PushScope(logger, new PersistenceSecretRedactor([StreamSecret])))
+            await ConsumeAsync(new RecordingStreamingStructuredLLMClientDecorator(inner, new FakeTimeProvider()), CancellationToken.None);
+
+        ShouldMaskTheSecretInEveryDelta(logger, head + PersistenceSecretRedactor.Marker + " tail");
+        DeltaTexts(logger).Count.ShouldBe(2, "the size flush still wrote its row, holding back only the start of the secret");
+    }
+
+    [Fact]
+    public async Task A_secret_split_by_a_time_flush_is_masked_in_the_deltas()
+    {
+        var inner = new SplitStreamingClient(["Bearer " + StreamSecret[..10]], [StreamSecret[10..] + " tail"]);
+        var time = new FakeTimeProvider();
+        var logger = new CapturingLogger();
+
+        using (PushScope(logger, new PersistenceSecretRedactor([StreamSecret])))
+        {
+            var consume = ConsumeAsync(new RecordingStreamingStructuredLLMClientDecorator(inner, time), CancellationToken.None);
+            await inner.WaitingAtPause.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            time.Advance(RecordingStreamingStructuredLLMClientDecorator.DeltaFlushInterval);
+            await WaitForDeltasAsync(logger, 1, "the one-second flush writes what is settled");
+            DeltaTexts(logger).ToArray().ShouldBe(new[] { "Bearer " }, "the live view shows the settled text and holds back the possible start of the secret");
+
+            inner.Release.TrySetResult();
+            await consume;
+        }
+
+        ShouldMaskTheSecretInEveryDelta(logger, "Bearer " + PersistenceSecretRedactor.Marker + " tail");
+    }
+
+    [Fact]
+    public async Task Secrets_split_by_a_size_flush_and_then_a_time_flush_are_both_masked()
+    {
+        const string second = "CANARY-delta-second-41d8e5";
+        var head = new string('x', RecordingStreamingStructuredLLMClientDecorator.DeltaFlushBytes - 5);
+        var inner = new SplitStreamingClient([head + StreamSecret[..5], StreamSecret[5..] + " and " + second[..7]], [second[7..] + " end"]);
+        var time = new FakeTimeProvider();
+        var logger = new CapturingLogger();
+
+        using (PushScope(logger, new PersistenceSecretRedactor([StreamSecret, second])))
+        {
+            var consume = ConsumeAsync(new RecordingStreamingStructuredLLMClientDecorator(inner, time), CancellationToken.None);
+            await inner.WaitingAtPause.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            await WaitForDeltasAsync(logger, 1, "the size flush has written");
+
+            time.Advance(RecordingStreamingStructuredLLMClientDecorator.DeltaFlushInterval);
+            await WaitForDeltasAsync(logger, 2, "the time flush writes the now-whole first secret");
+
+            inner.Release.TrySetResult();
+            await consume;
+        }
+
+        ShouldMaskTheSecretInEveryDelta(logger, head + PersistenceSecretRedactor.Marker + " and " + PersistenceSecretRedactor.Marker + " end", second);
+    }
+
+    [Fact]
+    public async Task The_final_flush_releases_a_held_tail_that_never_became_a_secret()
+    {
+        // The stream ends on "C", which could have been the start of the secret. Nothing follows, so it is not one.
+        var inner = new SplitStreamingClient(["done. " + StreamSecret[..1]], []);
+        inner.Release.TrySetResult();
+        var logger = new CapturingLogger();
+
+        using (PushScope(logger, new PersistenceSecretRedactor([StreamSecret])))
+            await ConsumeAsync(new RecordingStreamingStructuredLLMClientDecorator(inner, new FakeTimeProvider()), CancellationToken.None);
+
+        string.Concat(DeltaTexts(logger)).ShouldBe("done. C", "the carry is released at the final flush; no streamed text is lost");
+        logger.Calls[^1].Payload.GetProperty("output").GetString().ShouldBe("done. C");
+    }
+
+    /// <summary>
+    /// A cancel or a provider fault cuts the stream while the carry holds exactly the text that could be the start of a
+    /// secret, and the rest of it never arrives. Released verbatim, it is a fragment exact matching never recognises
+    /// again; the cut's flush masks it, and the call's presence delta says its capture was masked.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_stream_cut_while_the_carry_holds_the_start_of_a_secret_masks_that_start(bool cancelled)
+    {
+        var inner = new SplitStreamingClient(["progress " + StreamSecret[..14]], [StreamSecret[14..]]);
+        var time = new FakeTimeProvider();
+        var logger = new CapturingLogger();
+        var completeness = new CapturingCompletenessWriter();
+        using var cancellation = new CancellationTokenSource();
+
+        using (PushScope(logger, new PersistenceSecretRedactor([StreamSecret]), completeness))
+        {
+            var consume = ConsumeAsync(new RecordingStreamingStructuredLLMClientDecorator(inner, time), cancellation.Token);
+            await inner.WaitingAtPause.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            time.Advance(RecordingStreamingStructuredLLMClientDecorator.DeltaFlushInterval);
+            await WaitForDeltasAsync(logger, 1, "the one-second flush writes the settled text and holds back the start of the secret");
+
+            if (cancelled) cancellation.Cancel();
+            else inner.Release.TrySetException(new IOException("connection reset mid-stream"));
+
+            await Should.ThrowAsync<Exception>(() => consume);
+        }
+
+        DeltaTexts(logger).ToArray().ShouldBe(new[] { "progress ", PersistenceSecretRedactor.Marker }, "the cut's flush masks the held start of the secret instead of releasing it");
+        ShouldHoldNoFragmentOf(StreamSecret, DeltaTexts(logger));
+        logger.Snapshot()[^1].RecordType.ShouldBe(WorkflowRunRecordTypes.InteractionFailed);
+        completeness.Advances.Single(advance => advance.Present > 0).Masked.ShouldBeTrue("the stored delta was masked, so the presence delta may not claim a verbatim capture");
+    }
+
+    [Fact]
+    public async Task A_stream_cut_after_text_that_cannot_start_a_secret_keeps_that_text_verbatim()
+    {
+        var inner = new SplitStreamingClient(["progress so far"], []);
+        var logger = new CapturingLogger();
+        var completeness = new CapturingCompletenessWriter();
+
+        using (PushScope(logger, new PersistenceSecretRedactor([StreamSecret]), completeness))
+        {
+            var consume = ConsumeAsync(new RecordingStreamingStructuredLLMClientDecorator(inner, new FakeTimeProvider()), CancellationToken.None);
+            await inner.WaitingAtPause.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            inner.Release.TrySetException(new IOException("connection reset mid-stream"));
+            await Should.ThrowAsync<IOException>(() => consume);
+        }
+
+        DeltaTexts(logger).ToArray().ShouldBe(new[] { "progress so far" }, "a cut masks only a held tail that could start a secret, never text that cannot");
+        completeness.Advances.Single(advance => advance.Present > 0).Masked.ShouldBeFalse();
+    }
+
+    private static void ShouldHoldNoFragmentOf(string secret, IEnumerable<string> texts)
+    {
+        foreach (var text in texts)
+            for (var start = 0; start + 6 <= secret.Length; start++)
+                text.ShouldNotContain(secret.Substring(start, 6), Case.Sensitive, $"no delta row may keep '{secret.Substring(start, 6)}', a fragment of a secret");
+    }
+
+    private static IDisposable PushScope(IRunRecordLogger logger, PersistenceSecretRedactor redactor, IRunDataCompletenessWriter? completeness = null) =>
+        LlmCallContext.Push(new LlmCallScope(Run, Team, "llm", "", "llm.complete", logger, new NoopOffloader(), CaptureRedactor: redactor, Completeness: completeness).Unbudgeted("recording test — budget not under test"));
+
+    private static List<string> DeltaTexts(CapturingLogger logger) =>
+        logger.Snapshot().Where(c => c.RecordType == WorkflowRunRecordTypes.InteractionDelta).Select(c => c.Payload.GetProperty("text").GetString()!).ToList();
+
+    private static void ShouldMaskTheSecretInEveryDelta(CapturingLogger logger, string expectedConcatenation, params string[] otherSecrets)
+    {
+        var deltas = logger.Snapshot().Where(c => c.RecordType == WorkflowRunRecordTypes.InteractionDelta).ToList();
+        deltas.Select(d => d.Payload.GetProperty("ordinal").GetInt32()).ShouldBe(Enumerable.Range(0, deltas.Count), "ordinals stay monotonic from 0");
+
+        foreach (var secret in otherSecrets.Prepend(StreamSecret))
+            for (var start = 0; start + 6 <= secret.Length; start++)
+                deltas.ShouldAllBe(d => !d.Payload.GetProperty("text").GetString()!.Contains(secret.Substring(start, 6)), $"no delta row may keep '{secret.Substring(start, 6)}', a fragment of a secret");
+
+        string.Concat(DeltaTexts(logger)).ShouldBe(expectedConcatenation, "concatenated, the deltas are the masked output: nothing lost, nothing duplicated");
+        logger.Snapshot()[^1].Payload.GetProperty("output").GetString().ShouldBe(expectedConcatenation, "and they agree with the authoritative completed row");
+    }
+
+    private static async Task WaitForDeltasAsync(CapturingLogger logger, int count, string because)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(5);
+        while (Volatile.Read(ref logger.DeltaCount) < count)
+        {
+            if (DateTime.UtcNow > deadline) throw new ShouldAssertException($"{because}: expected {count} interaction.delta rows within 5s, saw {Volatile.Read(ref logger.DeltaCount)}. The streaming recorder's flush did not run — check RecordPendingDeltaAsync.");
+            await Task.Delay(10);
+        }
+    }
+
     [Fact]
     public async Task A_stream_capture_failure_never_changes_or_faults_the_provider_stream()
     {
@@ -746,6 +923,25 @@ public class RecordingLLMClientDecoratorTests
         }
     }
 
+    /// <summary>Streams <c>beforePause</c>, waits for <see cref="Release"/>, then streams <c>afterPause</c> — so a test can hold the stream open across a fake-clock flush.</summary>
+    private sealed class SplitStreamingClient(IReadOnlyList<string> beforePause, IReadOnlyList<string> afterPause) : ILLMClient, IStructuredLLMClient, IStreamingLLMClient
+    {
+        public TaskCompletionSource WaitingAtPause { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public TaskCompletionSource Release { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public string Provider => "streaming";
+        public Task<LLMCompletion> CompleteAsync(LLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new LLMCompletion { Text = "", Model = "m" });
+        public Task<StructuredLLMCompletion> CompleteStructuredAsync(StructuredLLMCompletionRequest request, CancellationToken ct) => Task.FromResult(new StructuredLLMCompletion { Json = JsonDocument.Parse("{}").RootElement, Model = "m" });
+
+        public async IAsyncEnumerable<LlmStreamEvent> StreamAsync(LLMCompletionRequest request, [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken ct)
+        {
+            foreach (var part in beforePause) yield return new LlmStreamEvent.TextDelta(part);
+            WaitingAtPause.TrySetResult();
+            await Release.Task.WaitAsync(ct);
+            foreach (var part in afterPause) yield return new LlmStreamEvent.TextDelta(part);
+            yield return new LlmStreamEvent.Meta(Model: "m", OutputTokens: 1, FinishReason: "stop");
+        }
+    }
+
     private sealed class NoopOffloader : IArtifactOffloader
     {
         public Task<OffloadedText> OffloadIfLargeAsync(Guid teamId, string? text, string contentType, CancellationToken ct) => Task.FromResult(new OffloadedText(text ?? "", null));
@@ -764,17 +960,22 @@ public class RecordingLLMClientDecoratorTests
 
     private sealed class CapturingLogger : IRunRecordLogger
     {
+        private readonly object _gate = new();
         public List<Captured> Calls { get; } = new();
         public TaskCompletionSource DeltaRecorded { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        public int DeltaCount;
         public bool ThrowOnRecord { get; set; }
         public bool HonorCancellation { get; set; }
+
+        /// <summary>A copy taken under the lock, for a test that reads while the stream is still recording on another thread.</summary>
+        public List<Captured> Snapshot() { lock (_gate) return Calls.ToList(); }
 
         public Task<Guid> RecordInteractionAsync(Guid runId, string recordType, string? nodeId, string iterationKey, Guid correlationId, Guid? parentRecordId, JsonElement payload, CancellationToken cancellationToken)
         {
             if (HonorCancellation) cancellationToken.ThrowIfCancellationRequested();
             if (ThrowOnRecord) throw new InvalidOperationException("ledger down");
-            Calls.Add(new Captured(runId, recordType, nodeId, iterationKey, correlationId, payload.Clone()));
-            if (recordType == WorkflowRunRecordTypes.InteractionDelta) DeltaRecorded.TrySetResult();
+            lock (_gate) Calls.Add(new Captured(runId, recordType, nodeId, iterationKey, correlationId, payload.Clone()));
+            if (recordType == WorkflowRunRecordTypes.InteractionDelta) { Interlocked.Increment(ref DeltaCount); DeltaRecorded.TrySetResult(); }
             return Task.FromResult(Guid.NewGuid());
         }
 

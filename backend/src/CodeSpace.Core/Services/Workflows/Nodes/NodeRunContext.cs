@@ -96,6 +96,15 @@ public sealed record NodeRunContext
     public required INodeObservability Observability { get; init; }
 
     /// <summary>
+    /// Masks this node's in-scope secret values — the same exact-match redactor the engine applies to node.completed and
+    /// <see cref="Observability"/> applies to its records. The engine's mask covers only the outputs it persists; text a
+    /// node stores itself (an artifact, which has no encrypted sidecar) or cuts down (an excerpt, whose cut can land
+    /// inside a secret and leave a fragment no exact match recognises) must be redacted by the node FIRST, then cut.
+    /// <see cref="PersistenceSecretRedactor.None"/> off the engine path, where no secrets are in scope.
+    /// </summary>
+    public PersistenceSecretRedactor PersistenceRedactor { get; init; } = PersistenceSecretRedactor.None;
+
+    /// <summary>
     /// Set ONLY when the node is being re-run after a suspension was resolved — carries the
     /// resume signal's payload (timer wake marker, the approver's decision, the callback body).
     /// <c>null</c> on a node's first execution. A suspending node (e.g. flow.sleep, a future

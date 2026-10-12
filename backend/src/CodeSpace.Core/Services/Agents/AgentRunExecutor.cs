@@ -1075,11 +1075,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var writer = NewEventWriter(context.Owner, context.TeamId);   // same batched-append + flush-at-checkpoint path as the live tail
         var native = await OpenResumedCaptureAsync(context, redactor, cancellationToken).ConfigureAwait(false);   // G1: the RESUMED frame stream of the same process, continuing its source cursor and the execution's reduction
         var applicationSourceHead = context.Handle.StdoutOffset;
+        var frames = redactor.CreateFrameStream();   // a line the reader cut is redacted with its continuation, as on the live tail
 
         async Task PersistFrameAsync(SandboxOutputFrame output)
         {
             var line = output.Text;
-            var redactedLine = redactor.Redact(line);
+            var redactedLine = frames.Redact(line, output.IsComplete);
 
             // A best-effort native flush may have failed after the normalized events were durable and before this
             // source head was checkpointed. Rewind the reader to the plane head to recover those native frames, but do
@@ -4549,10 +4550,11 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var facts = AgentRunFacts.For(context.Harness);   // the three facts a forced terminal reports without folding, read with THIS harness's declared spellings (or the fallback union when it declares none)
         var writer = NewEventWriter(context.Owner, context.TeamId);   // batches the DB inserts; flushed at each spool checkpoint + once at the end
         var native = await OpenNativeCaptureAsync(context, cancellationToken).ConfigureAwait(false);   // G1: the lossless frame plane, dual-written beside the log; a plane that won't open leaves this path unchanged
+        var frames = context.Redactor.CreateFrameStream();   // a line longer than one read pass arrives cut; its two frames must not each keep half of a key
 
         async Task PersistAsync(string line, SandboxOutputFrame? output)
         {
-            var redactedLine = context.Redactor.Redact(line);
+            var redactedLine = frames.Redact(line, output?.IsComplete ?? true);
 
             // Capture the faithful transcript FIRST — redact the raw line, then keep it whether or not ParseEvents
             // surfaces any event. ParseEvents drops blank/unrecognized lines; the transcript keeps them so a replay
@@ -5731,11 +5733,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             if (!pump.IsCapturing) return;
 
             var delivered = 0;
+            var frames = capture.Redactor.CreateFrameStream();   // a diagnostic the reader cut must not keep the start of a key its continuation finishes
 
             async Task RecordAsync(SandboxDiagnosticLine line, CancellationToken token)
             {
                 delivered++;
-                await pump.CaptureDiagnosticAsync(line.Text, capture.Redactor.Redact(line.Text), line.IsComplete, token).ConfigureAwait(false);
+                await pump.CaptureDiagnosticAsync(line.Text, frames.Redact(line.Text, line.IsComplete), line.IsComplete, token).ConfigureAwait(false);
             }
 
             var budget = new SandboxDiagnosticBudget { MaxLines = MaxDiagnosticFrames, MaxBytes = MaxDiagnosticBytes };

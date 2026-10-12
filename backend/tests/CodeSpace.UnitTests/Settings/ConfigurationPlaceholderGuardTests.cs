@@ -18,20 +18,39 @@ namespace CodeSpace.UnitTests.Settings;
 public class ConfigurationPlaceholderGuardTests
 {
     [Theory]
-    [InlineData("#{Agents:RunSpoolDirectory}")]                       // the one that shipped
-    [InlineData("/app/#{Agents:RunSpoolDirectory}")]                  // embedded in an otherwise real path
-    [InlineData("#{Db:Password}")]
-    [InlineData("#{DB_PASSWORD}")]                                     // SHOUTING_CASE, no colon
-    [InlineData("__CONNECTION_STRING__")]                             // Azure DevOps token replacement
-    [InlineData("https://#{Api:Host}/api/webhooks")]
-    public void An_unrendered_placeholder_refuses_the_start(string value)
+    [InlineData("#{Agents:RunSpoolDirectory}", "#{Agents:RunSpoolDirectory}")]           // the one that shipped
+    [InlineData("/app/#{Agents:RunSpoolDirectory}", "#{Agents:RunSpoolDirectory}")]      // embedded in an otherwise real path
+    [InlineData("#{Db:Password}", "#{Db:Password}")]
+    [InlineData("#{DB_PASSWORD}", "#{DB_PASSWORD}")]                                     // SHOUTING_CASE, no colon
+    [InlineData("__CONNECTION_STRING__", "__CONNECTION_STRING__")]                       // Azure DevOps token replacement
+    [InlineData("https://#{Api:Host}/api/webhooks", "#{Api:Host}")]
+    public void An_unrendered_placeholder_refuses_the_start(string value, string placeholder)
     {
         var act = () => ConfigurationPlaceholderGuard.ThrowIfUnrendered(ConfigurationOf(("Agents:RunSpoolDirectory", value)));
 
         var thrown = act.ShouldThrow<InvalidOperationException>();
 
         thrown.Message.ShouldContain("Agents:RunSpoolDirectory", customMessage: "the operator has to be told which key to go and define");
-        thrown.Message.ShouldContain(value, customMessage: "and the literal text to search their release definition for");
+        thrown.Message.ShouldContain(placeholder, customMessage: "and the literal text to search their release definition for");
+    }
+
+    /// <summary>
+    /// A partly rendered value. The release step substituted the password and missed the database name, so the value
+    /// now holds a real credential beside the template. This message goes to stderr before logging exists, so it names
+    /// the key and the placeholder and never the value.
+    /// </summary>
+    [Fact]
+    public void A_partly_rendered_value_is_reported_by_key_and_placeholder_and_never_by_its_value()
+    {
+        var configuration = ConfigurationOf(("CodeSpaceStore:ConnectionString", "Host=pg.internal;Username=codespace;Password=CANARY-placeholder-7e21;Database=#{CodeSpace:DbName};Search Path=__DB_SCHEMA__"));
+
+        var thrown = Should.Throw<InvalidOperationException>(() => ConfigurationPlaceholderGuard.ThrowIfUnrendered(configuration));
+
+        thrown.Message.ShouldContain("CodeSpaceStore:ConnectionString");
+        thrown.Message.ShouldContain("#{CodeSpace:DbName}");
+        thrown.Message.ShouldContain("__DB_SCHEMA__", customMessage: "every placeholder in the value is named, so one redeploy fixes them all");
+        thrown.Message.ShouldNotContain("CANARY-placeholder-7e21", Case.Sensitive, "the rendered part of the value may be a credential");
+        thrown.Message.ShouldNotContain("pg.internal");
     }
 
     /// <summary>

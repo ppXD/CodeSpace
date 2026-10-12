@@ -516,6 +516,55 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         }
     }
 
+    /// <summary>
+    /// The resumed tail reads the spool in 8 MiB passes like the live one, so a line longer than a pass arrives as a frame
+    /// the reader cut and its continuation. A key the cut lands inside must be masked whole in the transcript, not kept
+    /// as a head on one line and a tail on the next.
+    /// </summary>
+    [Fact]
+    public async Task Re_attach_masks_a_model_key_the_read_pass_cut_splits_in_the_resumed_tail()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        var key = "sk-split-" + string.Concat(Enumerable.Range(0, 32).Select(_ => "BCDFGHJKLMNPQRSTVWZ23456789"[Random.Shared.Next(27)]));
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedModelCredentialAsync(teamId, "scripted-provider", key);
+        var runId = await CreateRunWithCredentialAsync(teamId, credId);
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().MarkRunningAsync(runId, CancellationToken.None);
+
+        // The dead observer checkpointed after the first line. The resumed pass then cuts the long line 12 characters into the key.
+        var spoolDir = NewSpoolDir();
+        const string preCrash = "pre-crash-line\n";
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "out.log"), preCrash + new string('x', 8 * 1024 * 1024 - 12) + key + "\npost-crash-line\n");
+        await File.WriteAllTextAsync(Path.Combine(spoolDir, "exit"), "0");
+
+        var handle = new SandboxHandle { Kind = "local", ProcessId = 2147480000, SpoolDirectory = spoolDir, Deadline = DateTimeOffset.UtcNow.AddMinutes(10), StdoutOffset = preCrash.Length, InjectedKeyFingerprint = new SecretRedactor(new[] { key }).Fingerprint };
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<IAgentRunService>().SetRunnerHandleAsync(runId, JsonSerializer.Serialize(handle, AgentJson.Options), CancellationToken.None);
+
+        using (var scope = _fixture.BeginScope())
+        {
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = clock_timestamp() - interval '1 hour' WHERE id = {runId}");
+            _reservations[runId] = (await scope.Resolve<IAgentRunService>().ReserveReattachAsync(runId, CancellationToken.None))!;
+        }
+
+        await ReattachAsync(runId, new ProjectingHarness("scripted-provider", "SCRIPTED_MODEL_KEY", maxLineChars: 1024));
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
+            run.Status.ShouldBe(AgentRunStatus.Succeeded, run.Error);
+
+            var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
+            var transcript = result.TranscriptArtifactId is { } transcriptId ? System.Text.Encoding.UTF8.GetString((await scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>().GetBytesAsync(teamId, transcriptId, CancellationToken.None))!.Bytes) : result.Transcript;
+
+            transcript.ShouldEndWith("x\n" + SecretRedactor.Placeholder + "\npost-crash-line\n", Case.Sensitive, "the key is masked whole on the line that continues the cut, not dropped");
+            for (var start = 0; start + 6 <= key.Length; start++)
+                transcript.Contains(key.Substring(start, 6), StringComparison.Ordinal).ShouldBeFalse($"the resumed transcript holds '{key.Substring(start, 6)}', a fragment of the model key");
+        }
+    }
+
     [Fact]
     public async Task A_re_attached_brokered_run_records_that_its_model_access_died_with_the_minting_worker()
     {
@@ -1192,11 +1241,14 @@ public sealed class AgentRunReattachFlowTests : IDisposable
     {
         private readonly string _provider;
         private readonly string _envVar;
+        private readonly int _maxLineChars;
 
-        public ProjectingHarness(string provider, string envVar)
+        /// <param name="maxLineChars">A longer line becomes no event, as a production CLI parser drops a line it cannot parse.</param>
+        public ProjectingHarness(string provider, string envVar, int maxLineChars = int.MaxValue)
         {
             _provider = provider;
             _envVar = envVar;
+            _maxLineChars = maxLineChars;
         }
 
         public string Kind => "scripted-projector";
@@ -1208,7 +1260,7 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
         {
             var line = rawLine.Trim();
-            return line.Length == 0 ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) } };
+            return line.Length == 0 || line.Length > _maxLineChars ? Array.Empty<AgentEvent>() : new[] { new AgentEvent { Kind = AgentEventKind.AssistantMessage, Text = line, Data = JsonSerializer.SerializeToElement(new { line }) } };
         }
 
         // Via ScriptedFolders, as above. Its exit reason on a non-zero exit becomes "non-zero-exit" rather than

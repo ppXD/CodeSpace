@@ -192,8 +192,9 @@ public sealed class HttpRequestNode : INodeRuntime
         });
     }
 
+    /// <summary>Where the call goes — scheme, host and port — for the operator log. Never the userinfo (<c>user:password@</c>), path or query: this line reaches the shared log sink before any redaction runs.</summary>
     private static string SafeLogTarget(string url) => Uri.TryCreate(url, UriKind.Absolute, out var parsed)
-        ? parsed.GetLeftPart(UriPartial.Authority)
+        ? parsed.GetComponents(UriComponents.SchemeAndServer, UriFormat.UriEscaped)
         : "[invalid-or-relative-url]";
 
     private static HttpRequestMessage BuildRequest(HttpMethod method, string url, IReadOnlyDictionary<string, JsonElement> inputs)

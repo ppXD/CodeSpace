@@ -3664,7 +3664,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private NodeRunContext BuildNodeRunContext(NodeExecution exec)
     {
         var nodeLogger = _loggerFactory.CreateLogger($"Workflow.{exec.Runtime.TypeKey}.{exec.Node.Id}");
-        var observability = new NodeObservability(new NodeObservationBinding(_recordLogger, _artifactStore, exec.Run.Id, exec.Node.Id, exec.Run.TeamId, exec.ParentRecordId, PersistenceSecretRedactor.FromScope(exec.Scope), _completenessWriter));
+        var redactor = PersistenceSecretRedactor.FromScope(exec.Scope);
+        var observability = new NodeObservability(new NodeObservationBinding(_recordLogger, _artifactStore, exec.Run.Id, exec.Node.Id, exec.Run.TeamId, exec.ParentRecordId, redactor, _completenessWriter));
 
         return new NodeRunContext
         {
@@ -3676,6 +3677,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             Scope = exec.Scope,
             Logger = nodeLogger,
             Observability = observability,
+            PersistenceRedactor = redactor,
             ResumePayload = exec.ResumePayload,
             PriorAttemptPayload = exec.PriorAttemptPayload,
             NodeId = exec.Node.Id,

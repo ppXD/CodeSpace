@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Redaction;
 
 namespace CodeSpace.Core.Services.Workflows.Runtime;
 
@@ -17,6 +18,12 @@ public sealed class PersistenceSecretRedactor
         .Distinct(StringComparer.Ordinal)
         .OrderByDescending(value => value.Length)
         .ToArray();
+
+    /// <summary>A redactor with no secrets: every value passes through unchanged.</summary>
+    public static PersistenceSecretRedactor None { get; } = new([]);
+
+    /// <summary>One redactor masking every secret of each given one; an absent redactor contributes nothing.</summary>
+    public static PersistenceSecretRedactor Union(params PersistenceSecretRedactor?[] redactors) => new(redactors.OfType<PersistenceSecretRedactor>().SelectMany(redactor => redactor._secrets));
 
     public static PersistenceSecretRedactor FromScope(NodeRunScope scope)
     {
@@ -49,6 +56,30 @@ public sealed class PersistenceSecretRedactor
         var redacted = value;
         foreach (var secret in _secrets) redacted = redacted.Replace(secret, Marker, StringComparison.Ordinal);
         return new PersistenceRedaction<string?>(redacted, !string.Equals(value, redacted, StringComparison.Ordinal));
+    }
+
+    /// <summary>
+    /// How much of <paramref name="text"/>, a text that may still continue, can be redacted on its own: the longest prefix
+    /// that no secret runs across and after which nothing could yet become one. A writer persisting a growing text in
+    /// pieces releases this much and carries the rest into the next piece, because exact matching cannot recognise a
+    /// secret split between two of them.
+    /// </summary>
+    public int SettledLength(string text) => SecretBoundary.SettledLength(text, _secrets);
+
+    /// <summary>
+    /// Redacts a text whose END was cut: a capture that stopped at its budget while the source went on. Besides every
+    /// whole secret, a trailing fragment that could be the start of one is masked, because the rest of it was cut away
+    /// and exact matching will never see it whole.
+    /// </summary>
+    public PersistenceRedaction<string?> RedactCut(string? value)
+    {
+        if (string.IsNullOrEmpty(value)) return new PersistenceRedaction<string?>(value, false);
+
+        var settled = SettledLength(value);
+
+        if (settled == value.Length) return Redact(value);
+
+        return new PersistenceRedaction<string?>(Redact(value[..settled]).Value + Marker, true);
     }
 
     public PersistenceRedaction<JsonElement> Redact(JsonElement value)

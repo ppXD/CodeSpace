@@ -216,6 +216,82 @@ public class NodeObservabilityTests
         logger.FailedCalls.Single().Target.ShouldBe(PersistenceSecretRedactor.Marker);
     }
 
+    /// <summary>
+    /// A host shutdown or an operator cancel while the call is in flight. The cancellation branch used to persist the raw
+    /// target while every other branch persisted the redacted one, so a <c>?api_key={{team.SECRET}}</c> reached the
+    /// failed record every member reads through the records endpoint, the SSE tail and the timeline.
+    /// </summary>
+    [Fact]
+    public async Task TraceExternalCallAsync_cancelled_mid_call_persists_the_redacted_target()
+    {
+        const string secret = "CANARY-cancel-call-7d1f0b";
+        var logger = new RecordingLogger();
+        var observability = new NodeObservability(new NodeObservationBinding(logger, new RecordingArtifactStore(), RunId, NodeId, TeamId, ParentRecordId, new PersistenceSecretRedactor([secret])));
+        using var cancellation = new CancellationTokenSource();
+        var inFlight = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        var call = observability.TraceExternalCallAsync<int>(
+            target: "https://api.example.test/hold?api_key=" + secret,
+            method: "GET",
+            requestPayload: null,
+            action: async ct => { inFlight.TrySetResult(); await Task.Delay(Timeout.Infinite, ct); return 0; },
+            cancellationToken: cancellation.Token);
+        await inFlight.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        cancellation.Cancel();
+
+        await Should.ThrowAsync<OperationCanceledException>(() => call);
+        var failed = logger.FailedCalls.ShouldHaveSingleItem("the cancelled call still leaves its failed record");
+        failed.Target.ShouldBe("https://api.example.test/hold?api_key=" + PersistenceSecretRedactor.Marker);
+        failed.Target.ShouldBe(logger.StartedCalls.Single().Target, "the failed record names the call exactly as the started record did");
+    }
+
+    [Fact]
+    public async Task TraceExternalStreamAsync_cancelled_mid_stream_persists_the_redacted_target()
+    {
+        const string secret = "CANARY-cancel-stream-3e9a42";
+        var logger = new RecordingLogger();
+        var observability = new NodeObservability(new NodeObservationBinding(logger, new RecordingArtifactStore(), RunId, NodeId, TeamId, ParentRecordId, new PersistenceSecretRedactor([secret])));
+        using var cancellation = new CancellationTokenSource();
+
+        await using var events = observability.TraceExternalStreamAsync("https://api.example.test/stream?api_key=" + secret, "POST", null, HoldAfterFirstEvent, cancellation.Token).GetAsyncEnumerator();
+        (await events.MoveNextAsync()).ShouldBeTrue();
+        cancellation.Cancel();
+
+        await Should.ThrowAsync<OperationCanceledException>(async () => await events.MoveNextAsync());
+        var failed = logger.FailedCalls.ShouldHaveSingleItem("the cancelled stream still leaves its failed record");
+        failed.Target.ShouldNotContain(secret);
+        failed.Target.ShouldBe(logger.StartedCalls.Single().Target, "the failed record names the stream exactly as the started record did");
+    }
+
+    private static async IAsyncEnumerable<int> HoldAfterFirstEvent([System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        yield return 1;
+        await Task.Delay(Timeout.Infinite, cancellationToken);
+        yield return 2;
+    }
+
+    /// <summary>
+    /// An artifact has no encrypted sidecar: the bytes stored are the bytes every member downloads. So a node's text or
+    /// JSON is masked before it is stored, and opaque bytes, which exact matching cannot read, pass through untouched.
+    /// </summary>
+    [Theory]
+    [InlineData("text/plain", "token=CANARY-artifact-55c1 in a log", "token=[REDACTED] in a log")]
+    [InlineData("application/json", "{\"auth\":\"CANARY-artifact-55c1\",\"n\":1}", "{\"auth\":\"[REDACTED]\",\"n\":1}")]
+    [InlineData("application/json", "{\"auth\":\"CANARY\\u002Dartifact\\u002D55c1\"}", "{\"auth\":\"[REDACTED]\"}")]   // an escaped spelling of the same value
+    [InlineData("application/octet-stream", "token=CANARY-artifact-55c1", "token=CANARY-artifact-55c1")]
+    [InlineData("text/plain", "nothing secret", "nothing secret")]
+    public async Task PersistArtifactAsync_masks_text_and_json_before_storing_and_keeps_opaque_bytes(string contentType, string content, string expected)
+    {
+        var store = new RecordingArtifactStore();
+        var observability = new NodeObservability(new NodeObservationBinding(new RecordingLogger(), store, RunId, NodeId, TeamId, ParentRecordId, new PersistenceSecretRedactor(["CANARY-artifact-55c1"])));
+
+        var reference = await observability.PersistArtifactAsync(contentType, System.Text.Encoding.UTF8.GetBytes(content), CancellationToken.None);
+
+        var stored = System.Text.Encoding.UTF8.GetString(store.PutCalls.Single().Bytes.Span);
+        stored.ShouldBe(expected);
+        reference.GetProperty("size_bytes").GetInt32().ShouldBe(System.Text.Encoding.UTF8.GetByteCount(stored), "the ref describes the bytes that were stored");
+    }
+
     [Fact]
     public async Task PersistArtifactAsync_delegates_to_store_with_bound_team_id()
     {
