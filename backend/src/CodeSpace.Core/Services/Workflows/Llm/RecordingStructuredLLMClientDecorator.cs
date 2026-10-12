@@ -55,7 +55,7 @@ public class RecordingStructuredLLMClientDecorator : RecordingLLMClientDecorator
         }
         catch (Exception ex)
         {
-            var failureRecorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex)), CancellationToken.None).ConfigureAwait(false);
+            var failureRecorded = await SafeRecordAsync(scope, WorkflowRunRecordTypes.InteractionFailed, correlationId, () => Task.FromResult(FailedPayload(scope, Provider, ex, request.Credential)), CancellationToken.None).ConfigureAwait(false);
             if (failureRecorded && declared) await MarkCapturePresentAsync(scope).ConfigureAwait(false);
 
             throw;

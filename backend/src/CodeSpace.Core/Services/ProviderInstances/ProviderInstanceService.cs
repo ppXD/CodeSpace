@@ -4,13 +4,16 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Middlewares.Transactional;
+using CodeSpace.Core.Services.Redaction;
 using CodeSpace.Core.Services.RepositoryBinding;
 using CodeSpace.Core.Services.Webhooks.Scope;
 using CodeSpace.Messages.Commands.ProviderInstances;
 using CodeSpace.Messages.Dtos.ProviderInstances;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using CodeSpace.Messages.Queries.ProviderInstances;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.ProviderInstances;
 
@@ -18,21 +21,25 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
 {
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
     private readonly IPayloadEncryptor _encryptor;
     private readonly IRepositoryBindingService _binding;
     private readonly IWebhookScopeTransitionService _webhookScope;
     private readonly IPostCommitActions _postCommit;
     private readonly TimeProvider _clock;
+    private readonly ILogger<ProviderInstanceService> _logger;
 
-    public ProviderInstanceService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IPayloadEncryptor encryptor, IRepositoryBindingService binding, IWebhookScopeTransitionService webhookScope, IPostCommitActions postCommit, TimeProvider clock)
+    public ProviderInstanceService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, IRepositoryBindingService binding, IWebhookScopeTransitionService webhookScope, IPostCommitActions postCommit, TimeProvider clock, ILogger<ProviderInstanceService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
+        _currentUser = currentUser;
         _encryptor = encryptor;
         _binding = binding;
         _webhookScope = webhookScope;
         _postCommit = postCommit;
         _clock = clock;
+        _logger = logger;
     }
 
     public async Task<IReadOnlyList<ProviderInstanceSummary>> ListAsync(CancellationToken cancellationToken)
@@ -48,9 +55,11 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
                 TeamId = p.TeamId,
                 Provider = p.Provider,
                 DisplayName = p.DisplayName,
-                BaseUrl = p.BaseUrl,
-                ApiUrl = p.ApiUrl,
-                WebUrl = p.WebUrl,
+                // Masked: userinfo and secret-named query values are credentials, and this list reaches every member.
+                // Update reads each exact string sent back as "keep the stored URL".
+                BaseUrl = CredentialUrl.Masked(p.BaseUrl)!,
+                ApiUrl = CredentialUrl.Masked(p.ApiUrl),
+                WebUrl = CredentialUrl.Masked(p.WebUrl),
                 CreatedDate = p.CreatedDate,
                 OauthEnabled = p.OauthClientId != null && p.OauthClientSecretEnc != null
             })
@@ -112,23 +121,93 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
         var teamId = _currentTeam.Id!.Value;
 
         var instance = await LoadOwnedInstanceAsync(request.ProviderInstanceId, teamId, cancellationToken).ConfigureAwait(false);
+        var edits = WithStoredUrlsKept(instance, request);
 
         // Compute the post-edit (base_url, client_id) tuple — needed for the uniqueness
         // check. Only run the check when at least one of those keys is actually changing,
         // because the no-op case would self-collide on the row's own values.
-        var newBaseUrl = request.BaseUrl != null ? NormaliseBaseUrl(request.BaseUrl) : instance.BaseUrl;
-        var newClientId = request.OauthClientId != null ? NormaliseClientId(request.OauthClientId) : instance.OauthClientId;
+        var newBaseUrl = NextBaseUrl(instance, edits);
+        var newClientId = edits.OauthClientId != null ? NormaliseClientId(edits.OauthClientId) : instance.OauthClientId;
         var baseUrlChanged = !string.Equals(newBaseUrl, instance.BaseUrl, StringComparison.Ordinal);
         var clientIdChanged = !string.Equals(newClientId, instance.OauthClientId, StringComparison.Ordinal);
 
         if (baseUrlChanged || clientIdChanged) await EnsureUniquenessKeyAvailableAsync(instance, newBaseUrl, newClientId, cancellationToken).ConfigureAwait(false);
 
+        await EnsureSecretsStayWithTheirEndpointAsync(instance, edits, cancellationToken).ConfigureAwait(false);
+        LogEndpointMove(instance, edits);
+
         var previousScope = instance.WebhookScope;
 
-        ApplyEdits(instance, request);
+        ApplyEdits(instance, edits);
 
         await ApplyWebhookScopeChangeAsync(instance, previousScope, cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The edit with each URL the list shows MASKED (<see cref="CredentialUrl.Masked"/>) read back as "unchanged" when it
+    /// is sent back exactly as shown, so an edit form or API client that PATCHes back what it GETs keeps the stored URL
+    /// and its real embedded credentials; a placeholder left in an otherwise edited URL is refused. Resolved before the
+    /// uniqueness check, so a masked echo of the row's own URL never reads as a different one.
+    /// </summary>
+    private static UpdateProviderInstanceCommand WithStoredUrlsKept(ProviderInstance instance, UpdateProviderInstanceCommand request) => request with
+    {
+        BaseUrl = request.BaseUrl == null ? null : CredentialUrl.KeepStoredIfMasked(instance.BaseUrl, NormaliseBaseUrl(request.BaseUrl)),
+        ApiUrl = request.ApiUrl == null ? null : CredentialUrl.KeepStoredIfMasked(instance.ApiUrl, request.ApiUrl),
+        WebUrl = request.WebUrl == null ? null : CredentialUrl.KeepStoredIfMasked(instance.WebUrl, request.WebUrl)
+    };
+
+    /// <summary>
+    /// Whether an edit moves where this connection presents its secrets: the API every provider call goes to
+    /// (<c>ApiUrl</c>, or the base URL when unset) or the base URL the OAuth token, authorize and revoke endpoints are
+    /// derived from. A move is a change of scheme, host or port (<see cref="CredentialUrl.SameEndpoint"/>); a path, a
+    /// trailing slash or a credential slot is not.
+    /// </summary>
+    internal static bool EndpointMoves(string storedBaseUrl, string? storedApiUrl, string nextBaseUrl, string? nextApiUrl) =>
+        !CredentialUrl.SameEndpoint(storedBaseUrl, nextBaseUrl) || !CredentialUrl.SameEndpoint(ApiOf(storedBaseUrl, storedApiUrl), ApiOf(nextBaseUrl, nextApiUrl));
+
+    /// <summary>
+    /// Refuse a repoint the connection's secrets would follow. Its connected tokens are write-only and belong to the
+    /// members who connected them, so an editor who may change the URL could otherwise point it at a host they control
+    /// and have the next repository read, git node, webhook registration or OAuth refresh present every one of them
+    /// there — they are disconnected first instead. The stored OAuth client secret is the editor's to re-enter, as a
+    /// model key is. A connection with nothing bound moves freely.
+    /// </summary>
+    private async Task EnsureSecretsStayWithTheirEndpointAsync(ProviderInstance instance, UpdateProviderInstanceCommand edits, CancellationToken cancellationToken)
+    {
+        if (!EndpointMoves(instance.BaseUrl, instance.ApiUrl, NextBaseUrl(instance, edits), NextApiUrl(instance, edits))) return;
+
+        var bound = await CountPresentableCredentialsAsync(instance.Id, cancellationToken).ConfigureAwait(false);
+
+        if (bound > 0)
+            throw new ProviderEndpointCredentialsBoundException(instance.Id, bound);
+
+        if (instance.OauthClientSecretEnc != null && string.IsNullOrEmpty(edits.OauthClientSecret))
+            throw new ProviderEndpointSecretRequiredException(instance.Id);
+    }
+
+    /// <summary>Credentials that would still be presented: connected through this instance and not disconnected (a disconnect revokes the row and blanks its token).</summary>
+    private Task<int> CountPresentableCredentialsAsync(Guid providerInstanceId, CancellationToken cancellationToken) =>
+        _db.Credential.AsNoTracking().CountAsync(c => c.ProviderInstanceId == providerInstanceId && c.DeletedDate == null && c.Status != CredentialStatus.Revoked, cancellationToken);
+
+    /// <summary>One audit line per endpoint move, naming only scheme://host:port on each side (<see cref="CredentialUrl.Endpoint"/>) — never embedded credentials, path or query.</summary>
+    private void LogEndpointMove(ProviderInstance instance, UpdateProviderInstanceCommand edits)
+    {
+        var nextBaseUrl = NextBaseUrl(instance, edits);
+        var nextApiUrl = NextApiUrl(instance, edits);
+
+        if (!EndpointMoves(instance.BaseUrl, instance.ApiUrl, nextBaseUrl, nextApiUrl)) return;
+
+        _logger.LogInformation("Provider instance {ProviderInstanceId} of team {TeamId} moved its endpoint from {PreviousEndpoint} (API {PreviousApiEndpoint}) to {Endpoint} (API {ApiEndpoint}), by user {UserId}", instance.Id, instance.TeamId, CredentialUrl.Endpoint(instance.BaseUrl), CredentialUrl.Endpoint(ApiOf(instance.BaseUrl, instance.ApiUrl)), CredentialUrl.Endpoint(nextBaseUrl), CredentialUrl.Endpoint(ApiOf(nextBaseUrl, nextApiUrl)), _currentUser.Id);
+    }
+
+    private static string NextBaseUrl(ProviderInstance instance, UpdateProviderInstanceCommand edits) => edits.BaseUrl != null ? NormaliseBaseUrl(edits.BaseUrl) : instance.BaseUrl;
+
+    private static string? NextApiUrl(ProviderInstance instance, UpdateProviderInstanceCommand edits) => edits.ApiUrl == null ? instance.ApiUrl : NullIfBlank(edits.ApiUrl);
+
+    /// <summary>Where provider calls go: the API URL when one is set, the base URL otherwise — the fallback every provider reads.</summary>
+    private static string ApiOf(string baseUrl, string? apiUrl) => string.IsNullOrWhiteSpace(apiUrl) ? baseUrl : apiUrl;
+
+    private static string? NullIfBlank(string value) => string.IsNullOrWhiteSpace(value) ? null : value;
 
     /// <summary>
     /// Deferred to after the edit commits, for the reason a bind defers its registration: the

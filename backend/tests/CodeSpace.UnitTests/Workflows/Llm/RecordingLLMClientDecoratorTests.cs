@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.RunData;
+using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Contracts;
 using Microsoft.Extensions.Time.Testing;
@@ -122,6 +123,69 @@ public class RecordingLLMClientDecoratorTests
         logger.Calls.Select(c => c.RecordType).ShouldBe(new[] { WorkflowRunRecordTypes.InteractionStarted, WorkflowRunRecordTypes.InteractionFailed });
         logger.Calls[1].Payload.GetProperty("provider").GetString().ShouldBe("anthropic");
         logger.Calls[1].Payload.GetProperty("error").GetString().ShouldBe("gateway boom");
+    }
+
+    // ── Backstop: a failure that reached the decorator still quoting the call's own credential ──
+    // The transport strikes an echoed key before the typed failure exists; a failure raised anywhere else (a client that
+    // bypasses the transport, a handler that wraps the response) is struck here, against the credential the call carried.
+
+    private const string EchoedKey = "sk-BACKSTOP-CANARY-4a5b6c7d";
+
+    private static ResolvedModelCredential EchoedCredential => new() { Provider = "OpenAI", ApiKey = EchoedKey, BaseUrl = "https://svc:pw-BACKSTOP-CANARY@gw.example/v1" };
+
+    [Fact]
+    public async Task A_structured_failure_quoting_the_calls_credential_is_recorded_without_it_and_rethrown_verbatim()
+    {
+        var fault = new InvalidOperationException($"upstream rejected {EchoedKey} at https://svc:pw-BACKSTOP-CANARY@gw.example/v1");
+        var logger = new CapturingLogger();
+
+        using (PushScope(logger))
+        {
+            var thrown = await Should.ThrowAsync<InvalidOperationException>(() => new RecordingStructuredLLMClientDecorator(new ThrowingClient(fault)).CompleteStructuredAsync(Request() with { Credential = EchoedCredential }, CancellationToken.None));
+            thrown.ShouldBeSameAs(fault, "the backstop strikes the RECORD, never the exception the caller handles");
+        }
+
+        ShouldRecordNoCredential(logger);
+    }
+
+    [Fact]
+    public async Task A_plain_failure_quoting_the_calls_credential_is_recorded_without_it()
+    {
+        var logger = new CapturingLogger();
+
+        using (PushScope(logger))
+        {
+            await Should.ThrowAsync<InvalidOperationException>(() => new RecordingLLMClientDecorator(new ThrowingClient(new InvalidOperationException($"bad key {EchoedKey}"))).CompleteAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u", Credential = EchoedCredential }, CancellationToken.None));
+        }
+
+        ShouldRecordNoCredential(logger);
+    }
+
+    [Fact]
+    public async Task A_streamed_failure_quoting_the_calls_credential_is_recorded_without_it()
+    {
+        var inner = new StreamingFakeClient { ThrowAfter = 1, ThrowWith = new InvalidOperationException($"stream cut, key {EchoedKey}") };
+        var logger = new CapturingLogger();
+
+        using (PushScope(logger))
+        {
+            await Should.ThrowAsync<InvalidOperationException>(async () =>
+            {
+                await foreach (var _ in new RecordingStreamingStructuredLLMClientDecorator(inner).StreamAsync(new LLMCompletionRequest { Model = "m", SystemPrompt = "s", UserPrompt = "u", Credential = EchoedCredential }, CancellationToken.None)) { }
+            });
+        }
+
+        ShouldRecordNoCredential(logger);
+    }
+
+    private static void ShouldRecordNoCredential(CapturingLogger logger)
+    {
+        var failed = logger.Calls.Single(c => c.RecordType == WorkflowRunRecordTypes.InteractionFailed).Payload.GetProperty("error").GetString();
+
+        failed.ShouldNotBeNull();
+        failed.ShouldNotContain(EchoedKey);
+        failed.ShouldNotContain("pw-BACKSTOP-CANARY");
+        failed.ShouldContain(PersistenceSecretRedactor.Marker);
     }
 
     [Fact]
