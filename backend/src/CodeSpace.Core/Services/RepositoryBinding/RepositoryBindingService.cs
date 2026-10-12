@@ -259,9 +259,10 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         return ctx with { Instance = instance };
     }
 
+    /// <summary>A soft-deleted credential — unlinked, or retired when its owner left the team — is gone, and nothing binds through it again.</summary>
     private async Task<BindContext> LoadCredentialAsync(BindContext ctx, CancellationToken cancellationToken)
     {
-        var credential = await _db.Credential.SingleOrDefaultAsync(c => c.Id == ctx.Request.CredentialId && c.TeamId == ctx.Request.TeamId, cancellationToken).ConfigureAwait(false)
+        var credential = await _db.Credential.SingleOrDefaultAsync(c => c.Id == ctx.Request.CredentialId && c.TeamId == ctx.Request.TeamId && c.DeletedDate == null, cancellationToken).ConfigureAwait(false)
             ?? throw new InvalidOperationException($"Credential {ctx.Request.CredentialId} not found in team {ctx.Request.TeamId}");
 
         return ctx with { Credential = credential };

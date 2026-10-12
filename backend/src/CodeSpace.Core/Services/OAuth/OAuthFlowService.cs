@@ -1,9 +1,11 @@
+using CodeSpace.Core.Authorization;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Providers.Identity;
+using CodeSpace.Core.Services.Teams;
 using CodeSpace.Core.Settings.Application;
 using CodeSpace.Core.Settings.OAuth;
 using CodeSpace.Messages.Commands.Credentials;
@@ -30,10 +32,11 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
     private readonly ICurrentUser _currentUser;
     private readonly IUserProviderIdentityService _identityService;
     private readonly ICredentialSuccessionService _succession;
+    private readonly ITeamMemberService _members;
     private readonly OAuthCallbackUrlSetting _callbackUrlSetting;
     private readonly PublicBaseUrlSetting _publicBaseUrl;
 
-    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, ICredentialSuccessionService succession, OAuthCallbackUrlSetting callbackUrlSetting, PublicBaseUrlSetting publicBaseUrl)
+    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, ICredentialSuccessionService succession, ITeamMemberService members, OAuthCallbackUrlSetting callbackUrlSetting, PublicBaseUrlSetting publicBaseUrl)
     {
         _db = db;
         _oauthClients = oauthClients;
@@ -45,6 +48,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         _currentUser = currentUser;
         _identityService = identityService;
         _succession = succession;
+        _members = members;
         _callbackUrlSetting = callbackUrlSetting;
         _publicBaseUrl = publicBaseUrl;
     }
@@ -55,6 +59,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
 
         var instance = await LoadOwnedInstanceAsync(providerInstanceId, cancellationToken).ConfigureAwait(false);
         var (clientId, _) = ReadOAuthClientCredentials(instance);
+        var ownerUserId = await ResolveOwnerWithinReachAsync(intendedOwnerUserId, cancellationToken).ConfigureAwait(false);
 
         var pkce = _pkce.Generate();
         var browserNonce = OAuthBrowserNonce.Mint();
@@ -66,7 +71,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
             InitiatorUserId = _currentUser.Id!.Value,
             CodeVerifier = pkce.Verifier,
             IntendedDisplayName = displayName,
-            IntendedOwnerUserId = intendedOwnerUserId ?? _currentUser.Id!.Value,
+            IntendedOwnerUserId = ownerUserId,
             ReturnUrl = returnUrl,
             BrowserNonceHash = OAuthBrowserNonce.Hash(browserNonce),
             RequestedScopes = scopes ?? instance.OauthDefaultScopes,
@@ -94,7 +99,12 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         var instance = await LoadInstanceAsync(pending.ProviderInstanceId, cancellationToken).ConfigureAwait(false);
         var (clientId, clientSecret) = ReadOAuthClientCredentials(instance);
 
+        await EnsureOwnerStillInTeamAsync(pending, cancellationToken).ConfigureAwait(false);
+
         var token = await ExchangeCodeAsync(instance, clientId, clientSecret, code, pending.CodeVerifier, cancellationToken).ConfigureAwait(false);
+
+        await HoldOwnerInTeamAsync(pending, cancellationToken).ConfigureAwait(false);
+
         var credential = PersistCredential(pending, instance, token);
 
         await _succession.CarryForwardAsync(credential, cancellationToken).ConfigureAwait(false);
@@ -141,6 +151,55 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
             Serilog.Log.Warning(ex, "[OAuthFlow] Connected credential {CredentialId} but could not link an act-as-user identity for user {UserId}; act-as-me stays unavailable until reconnect", credential.Id, ownerId);
         }
     }
+
+    /// <summary>
+    /// Who the credential will belong to — the caller unless they name someone — and whom an OAuth connect links as an
+    /// act-as identity. Naming them is acting on them, so they must have standing in this team and be within the caller's
+    /// reach, and that is checked for the caller too: a personal token in a team is lent by someone who stands in it — a
+    /// member, or an instance Admin, who stands in every team.
+    /// </summary>
+    private async Task<Guid> ResolveOwnerWithinReachAsync(Guid? intendedOwnerUserId, CancellationToken cancellationToken)
+    {
+        var ownerUserId = intendedOwnerUserId ?? _currentUser.Id!.Value;
+
+        await _members.EnsureMayActOnAsync(ownerUserId, cancellationToken).ConfigureAwait(false);
+
+        return ownerUserId;
+    }
+
+    /// <summary>
+    /// The callback can land up to <see cref="StateTtl"/> after Init, and the owner may have left or been removed — or, an
+    /// instance Admin outside the team, lost the role — in between. A token minted for them now would be a live credential
+    /// of someone without standing in the team — one the team could bind through, and one the repair sweep would hand their
+    /// retired bindings to — so the code is not exchanged at all. Runs anonymous, so it asks standing directly
+    /// (<see cref="TeamStanding"/>) rather than through the caller's reach.
+    /// </summary>
+    private async Task EnsureOwnerStillInTeamAsync(OAuthPendingState pending, CancellationToken cancellationToken)
+    {
+        if (pending.IntendedOwnerUserId is not Guid ownerId) return;
+
+        var teamLive = await _db.Team.AsNoTracking().AnyAsync(t => t.Id == pending.TeamId && t.DeletedDate == null, cancellationToken).ConfigureAwait(false);
+
+        if (!teamLive || !await TeamStanding.HeldAsync(_db, pending.TeamId, ownerId, cancellationToken).ConfigureAwait(false))
+            throw OwnerLeftTheTeam();
+    }
+
+    /// <summary>
+    /// The check above runs before the provider round-trip, and the owner can leave during it. So the owner's standing is
+    /// asked again once the token is back, and a member's held until this callback commits: a departure that committed
+    /// during the exchange refuses the token here, and one that starts now waits for the commit and then retires the token
+    /// with the rest of theirs. The refused token is not revoked at the provider — revoking an OAuth grant there can end
+    /// the person's tokens elsewhere — it is simply never stored.
+    /// </summary>
+    private async Task HoldOwnerInTeamAsync(OAuthPendingState pending, CancellationToken cancellationToken)
+    {
+        if (pending.IntendedOwnerUserId is not Guid ownerId) return;
+
+        if (!await _members.HoldMembershipAsync(pending.TeamId, ownerId, cancellationToken).ConfigureAwait(false))
+            throw OwnerLeftTheTeam();
+    }
+
+    private static OAuthCallbackException OwnerLeftTheTeam() => new("the person this connection was started for no longer has standing in the team");
 
     private async Task<ProviderInstance> LoadOwnedInstanceAsync(Guid id, CancellationToken cancellationToken)
     {

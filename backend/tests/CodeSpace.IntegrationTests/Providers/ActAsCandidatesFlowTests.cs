@@ -4,8 +4,10 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Providers.Identity;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Providers;
@@ -84,6 +86,33 @@ public class ActAsCandidatesFlowTests
         candidates.ShouldBeEmpty();
     }
 
+    public enum Standing { Member, Departed, TeamDeleted, InstanceAdminOutsideTheTeam, ExInstanceAdminOutsideTheTeam }
+
+    [Theory]
+    [InlineData(Standing.Member, true)]
+    [InlineData(Standing.Departed, false)]
+    [InlineData(Standing.TeamDeleted, false)]
+    [InlineData(Standing.InstanceAdminOutsideTheTeam, true)]
+    [InlineData(Standing.ExInstanceAdminOutsideTheTeam, false)]
+    public async Task The_picker_and_the_write_agree_on_who_may_act(Standing standing, bool acts)
+    {
+        // One predicate decides both, so the picker offers exactly the people a write can act as. The write used to skip
+        // the membership half: someone removed from the team dropped out of the picker, yet a workflow that named them
+        // still wrote through their token. Departed deletes the membership row and nothing else — a departure from before
+        // departures retired tokens — so the identity and its token are still live and only standing can refuse it. An
+        // instance Admin stands in every team without a row, as everywhere else; once the role goes, they stand nowhere.
+        var ctx = await SeedAsync().ConfigureAwait(false);
+        var actor = await AddMemberAsync(ctx.TeamId, "actor").ConfigureAwait(false);
+        await LinkIdentityAsync(ctx, actor, "bob", "777").ConfigureAwait(false);
+        await ApplyStandingAsync(ctx.TeamId, actor, standing).ConfigureAwait(false);
+
+        var offered = (await ListAsync(ctx.RepositoryId, ctx.TeamId).ConfigureAwait(false)).Any(c => c.UserId == actor);
+        var resolves = await ResolveAsync(actor, ctx.ProviderInstanceId).ConfigureAwait(false) != null;
+
+        offered.ShouldBe(acts, $"{standing}: the picker {(acts ? "offers" : "hides")} them");
+        resolves.ShouldBe(acts, $"{standing}: a write naming them {(acts ? "acts as them" : "is refused")}, exactly as the picker says");
+    }
+
     [Fact]
     public async Task Empty_when_the_repository_is_not_the_teams()
     {
@@ -153,6 +182,32 @@ public class ActAsCandidatesFlowTests
         await db.SaveChangesAsync().ConfigureAwait(false);
 
         return new SeedCtx(team.Id, owner.Id, instance.Id, repo.Id);
+    }
+
+    private async Task<Guid> AddMemberAsync(Guid teamId, string name)
+    {
+        var userId = await AddUserAsync(name).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = userId, Role = TeamRole.Member });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return userId;
+    }
+
+    private async Task ApplyStandingAsync(Guid teamId, Guid userId, Standing standing)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        if (standing is Standing.Departed or Standing.InstanceAdminOutsideTheTeam or Standing.ExInstanceAdminOutsideTheTeam) db.TeamMembership.RemoveRange(db.TeamMembership.Where(m => m.TeamId == teamId && m.UserId == userId));
+        if (standing == Standing.TeamDeleted) (await db.Team.SingleAsync(t => t.Id == teamId).ConfigureAwait(false)).DeletedDate = DateTimeOffset.UtcNow;
+        if (standing is Standing.InstanceAdminOutsideTheTeam or Standing.ExInstanceAdminOutsideTheTeam) db.RoleUser.Add(new RoleUser { Id = Guid.NewGuid(), RoleId = await db.Role.Where(r => r.Name == Roles.Admin).Select(r => r.Id).SingleAsync().ConfigureAwait(false), UserId = userId });
+
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        if (standing == Standing.ExInstanceAdminOutsideTheTeam) await db.RoleUser.Where(r => r.UserId == userId).ExecuteDeleteAsync().ConfigureAwait(false);
     }
 
     private async Task<Guid> AddUserAsync(string name)

@@ -10,7 +10,7 @@ public sealed record AddCredentialInput
 {
     public required Guid ProviderInstanceId { get; init; }
 
-    /// <summary>The owning user for a Personal credential; ignored (forced null) for TeamService.</summary>
+    /// <summary>The owning user for a Personal credential — the caller when unset; ignored (forced null) for TeamService.</summary>
     public Guid? OwnerUserId { get; init; }
 
     public required string DisplayName { get; init; }

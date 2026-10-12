@@ -119,6 +119,29 @@ public class UserProviderIdentityServiceTests
     }
 
     [Fact]
+    public async Task Unlink_breaks_the_repositories_bound_through_the_credential()
+    {
+        // Unlinking retires the token behind the identity, so a repository still bound through it has nothing left to
+        // authenticate with. It says so — the "needs a new credential" a Disconnect leaves — instead of staying Active
+        // until a run dies on the blanked token.
+        var (userId, teamId, instanceId) = await SeedAsync();
+
+        Guid identityId;
+        using (var scope = ScopeAs(userId, teamId, ValidProbe("8", "dana")))
+            identityId = (await scope.Resolve<IUserProviderIdentityService>().LinkByPatAsync(instanceId, "tok", CancellationToken.None)).Id;
+
+        var repoId = await SeedRepositoryBoundThroughAsync(teamId, instanceId, await IdentityCredentialAsync(identityId));
+
+        using (var scope = ScopeAs(userId, teamId, ValidProbe("8", "dana")))
+            await scope.Resolve<IUserProviderIdentityService>().UnlinkAsync(identityId, CancellationToken.None);
+
+        using var verify = _fixture.BeginScope();
+        var repo = await verify.Resolve<CodeSpaceDbContext>().Repository.AsNoTracking().SingleAsync(r => r.Id == repoId);
+        repo.Status.ShouldBe(RepositoryStatus.Error, "a repository bound through an unlinked token must say it needs a new credential");
+        repo.LastError.ShouldNotBeNullOrWhiteSpace();
+    }
+
+    [Fact]
     public async Task List_is_scoped_to_the_calling_user()
     {
         var (alice, teamId, instanceId) = await SeedAsync();
@@ -173,6 +196,26 @@ public class UserProviderIdentityServiceTests
         await db.SaveChangesAsync();
 
         return (user.Id, team.Id, instance.Id);
+    }
+
+    private async Task<Guid> IdentityCredentialAsync(Guid identityId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().UserProviderIdentity.AsNoTracking().Where(i => i.Id == identityId).Select(i => i.CredentialId).SingleAsync();
+    }
+
+    private async Task<Guid> SeedRepositoryBoundThroughAsync(Guid teamId, Guid instanceId, Guid credentialId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var repo = new Repository { Id = Guid.NewGuid(), TeamId = teamId, ProviderInstanceId = instanceId, CredentialId = credentialId, ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = "web", FullPath = $"acme/web-{suffix}", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = "https://git.local/acme/web", Status = RepositoryStatus.Active };
+
+        db.Repository.Add(repo);
+        await db.SaveChangesAsync();
+
+        return repo.Id;
     }
 
     private async Task<Guid> SeedUserAsync(Guid teamId)
