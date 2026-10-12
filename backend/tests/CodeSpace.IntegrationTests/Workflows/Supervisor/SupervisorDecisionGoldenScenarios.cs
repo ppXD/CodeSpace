@@ -162,7 +162,22 @@ public static class SupervisorDecisionGoldenScenarios
         AcceptedKinds = new[] { SupervisorDecisionKinds.Merge },
     };
 
-    /// <summary>The merge integrated CLEANLY (a reviewable branch exists, no conflict) → STOP and ship; the goal is met and nothing remains (re-merging / re-spawning is churn).</summary>
+    /// <summary>
+    /// The merge integrated CLEANLY (a reviewable branch exists, no conflict) → STOP and ship; the goal is met and nothing remains (re-merging / re-spawning is churn).
+    ///
+    /// <para>It carries the operator's acceptance FLOOR (<see cref="DeclaredAcceptanceFloor"/>) so the decision eval can see
+    /// what the floor block does to STOPPING. The block tells the model to "drive the work until it passes before declaring
+    /// success" over a check whose verdict it can never see before it stops, so the way that copy can hurt most is a model
+    /// that reads it as a reason not to stop. <see cref="RepeatFailureUnderADeclaredCheck"/> carries a floor too, but accepts
+    /// retry, stop and ask_human: a model that answered retry because of the block still passes it. Until this tape, no
+    /// scenario whose only right answer is a stop carried one.</para>
+    ///
+    /// <para>This tape, and not <see cref="ResolveCapSpent"/>, because the floor's presence must not be able to change the
+    /// right answer here. Every unit is green and integrated, so a <c>dotnet test</c> floor is consistent with stopping and
+    /// stop stays the ONLY answer. The cap-spent tape records "the build still fails and the tests do not pass" and accepts
+    /// ask_human beside stop, so under the same floor the block could legitimately move the answer, and a miss would be
+    /// unreadable — the floor, or the judgement?</para>
+    /// </summary>
     private static SupervisorGoldenScenario CleanIntegration() => new()
     {
         Name = "clean-integration",
@@ -173,7 +188,7 @@ public static class SupervisorDecisionGoldenScenarios
                 Agent(Agent1, "Succeeded", summary: "s1", branch: "agent/s1"),
                 Agent(Agent2, "Succeeded", summary: "s2", branch: "agent/s2")),
             CleanMerge(),
-        }),
+        }, DeclaredAcceptanceFloor),
         AcceptedKinds = new[] { SupervisorDecisionKinds.Stop },
     };
 
@@ -680,9 +695,9 @@ public static class SupervisorDecisionGoldenScenarios
     };
 
     /// <summary>
-    /// The operator's objective floor for <see cref="RepeatFailureUnderADeclaredCheck"/> — real argv, because
-    /// <see cref="SupervisorTurnContext.AcceptanceChecks"/> is the command a terminal verdict is graded against, not
-    /// a label.
+    /// The operator's objective floor for <see cref="RepeatFailureUnderADeclaredCheck"/> and <see cref="CleanIntegration"/>
+    /// — real argv, because <see cref="SupervisorTurnContext.AcceptanceChecks"/> is the command a terminal verdict is graded
+    /// against, not a label.
     /// <para>A PROPERTY for the reason <see cref="SupervisorProfile"/> is one, and this one was caught the hard way:
     /// as a <c>static readonly</c> field declared below <see cref="All"/> it was still <c>null</c> while the
     /// scenarios were being built, so the floor never reached the fold and the quality line recited
@@ -728,10 +743,10 @@ public static class SupervisorDecisionGoldenScenarios
     /// <summary>
     /// <paramref name="acceptanceChecks"/> is the OPERATOR's objective floor
     /// (<see cref="SupervisorTurnContext.AcceptanceChecks"/>), and null — the default, and what every scenario but
-    /// <see cref="RepeatFailureUnderADeclaredCheck"/> passes — leaves the context byte-identical to before it was a
-    /// parameter. It is threaded HERE rather than applied with a <c>with</c> at the call site because the quality
-    /// fold below reads it: a floor attached after the fold would be invisible to the recommendation that is
-    /// supposed to be derived from it.
+    /// <see cref="RepeatFailureUnderADeclaredCheck"/> and <see cref="CleanIntegration"/> passes — leaves the context
+    /// byte-identical to before it was a parameter. It is threaded HERE rather than applied with a <c>with</c> at the
+    /// call site because the quality fold below reads it: a floor attached after the fold would be invisible to the
+    /// recommendation that is supposed to be derived from it.
     /// </summary>
     private static SupervisorTurnContext Context(int turn, IReadOnlyList<SupervisorPriorDecision> priors, IReadOnlyList<string>? acceptanceChecks = null)
     {

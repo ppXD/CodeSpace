@@ -79,7 +79,7 @@ public class SupervisorDefinitionBuilderTests
         Builder.OperatorAcceptance.GradingKind.ToString().ShouldBe("TestsPass");
 
         Builder.Build(Context()).Nodes.Single(n => n.Id == "sup").Config.TryGetProperty("acceptanceChecks", out _).ShouldBeFalse("no floor ⇒ key omitted (byte-identical)");
-        Builder.Build(Context(acceptanceChecks: new[] { " ", "must-not-become-executable" })).Nodes.Single(n => n.Id == "sup").Config.TryGetProperty("acceptanceChecks", out _).ShouldBeFalse("an all-blank floor collapses to omitted");
+        Builder.Build(Context(acceptanceChecks: new[] { " ", "must-not-become-executable" })).Nodes.Single(n => n.Id == "sup").Config.TryGetProperty("acceptanceChecks", out _).ShouldBeFalse("a floor whose first element is blank has no program, so it collapses to omitted");
     }
 
     [Fact]

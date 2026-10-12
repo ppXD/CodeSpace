@@ -179,6 +179,64 @@ public class SupervisorDeciderTests
         prompt.ShouldContain($"- no regressions{Environment.NewLine}{Environment.NewLine}{LlmSupervisorDecider.OperatorFloorHeader}", Case.Sensitive, customMessage: "the criteria say what done means and the floor is the command that grades it — one after the other, nothing between them");
     }
 
+    // ── A subtask's OWN check is shown the way the floor is: an argv the grader spawns with no shell, never a shell line ──
+
+    private const string CheckLinePrefix = "        acceptance check (TestsPass): ";
+
+    /// <summary>A live plan whose one subtask authors <paramref name="command"/> as its own acceptance check — the CURRENT PLAN block shows it on that item's <c>acceptance check</c> line.</summary>
+    private static SupervisorPriorDecision PlanWithCheck(params string[] command) => new()
+    {
+        Id = Guid.NewGuid(), Sequence = 1, DecisionKind = SupervisorDecisionKinds.Plan, Status = SupervisorDecisionStatus.Succeeded,
+        PayloadJson = JsonSerializer.Serialize(new SupervisorPlanPayload { Goal = "ship", Subtasks = new[] { new SupervisorPlannedSubtask { Id = "s1", Title = "Audit", Instruction = "audit it", Acceptance = new SupervisorAcceptanceSpec { Command = command } } } }, AgentJson.Options),
+        OutcomeJson = """{"planned":["s1"],"count":1}""",
+    };
+
+    [Fact]
+    public void The_per_subtask_check_line_keeps_every_argv_element_boundary_the_grader_will_run()
+    {
+        // The argv the floor line keeps (TaskLaunchFlowTests pins ["sh", " ", "check.sh"] surviving launch). A model authors
+        // per-unit checks too, and the joined line it used to be shown read that one as two arguments.
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 1, PlanWithCheck("sh", " ", "check.sh")));
+
+        prompt.ShouldContain($$"""{{CheckLinePrefix}}["sh"," ","check.sh"]{{Environment.NewLine}}""", Case.Sensitive, customMessage: "the whitespace element is ITS OWN argument — the grader runs it as one");
+        prompt.ShouldNotContain("sh   check.sh", customMessage: "a plain join reads that argv as two arguments, so the model would be shown a command that is not the one graded");
+    }
+
+    [Theory]
+    [InlineData(new[] { "sh", " ", "check.sh" }, "a whitespace element is its own argument")]
+    [InlineData(new[] { "dotnet", "test", "--filter", "Category=Unit|Category=Smoke" }, "a pipe inside an argument is a character, not a pipeline")]
+    [InlineData(new[] { "echo", "it's & <b> +1" }, "what the default encoder would turn into \\u00XX codes")]
+    [InlineData(new[] { "sh", "-c", "a\nb" }, "a newline stays a visible escape, never the space a flattening would make of it")]
+    [InlineData(new[] { "custom-check", "", "  ", "quoted argument" }, "empty, blank and space-bearing elements")]
+    public void The_per_subtask_check_line_writes_an_argv_exactly_as_the_floor_line_does(string[] argv, string what)
+    {
+        var floor = LlmSupervisorDecider.BuildUserPromptForTest(Context() with { AcceptanceChecks = argv }).Split(Environment.NewLine);
+        var headerAt = Array.IndexOf(floor, LlmSupervisorDecider.OperatorFloorHeader);
+
+        headerAt.ShouldBeGreaterThanOrEqualTo(0, "fixture check: the floor block must be on the wire, or there is no floor line to compare the check line with");
+
+        var floorLine = floor[headerAt + 1].TrimStart();
+
+        LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 1, PlanWithCheck(argv)))
+            .ShouldContain($"{CheckLinePrefix}{floorLine}{Environment.NewLine}", Case.Sensitive, customMessage: $"{what} — and one command is written one way in one prompt: the floor and a unit's own check share the renderer (AcceptanceArgv.AsLine), so neither can read as shell text while the other reads as an array");
+    }
+
+    [Theory]
+    [InlineData(400, false)]   // exactly at the bound — verbatim, no ellipsis
+    [InlineData(401, true)]    // one over — cut at 400 and marked with the class's ellipsis
+    public void The_per_subtask_check_line_is_bounded_at_400_chars_like_the_floor_line(int lineLength, bool bounded)
+    {
+        // A one-element argv is four characters of JSON punctuation (["…"]) around its text, so the line is exactly that long.
+        var element = new string('x', lineLength - 4);
+        var json = $"[\"{element}\"]";
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(turnNumber: 1, PlanWithCheck(element)));
+
+        var shown = bounded ? json[..400] + "…" : json;
+
+        prompt.ShouldContain($"{CheckLinePrefix}{shown}{Environment.NewLine}", Case.Sensitive, customMessage: "a unit's check is unbounded model config and this line is a fixed per-turn cost the tape compaction cannot shrink");
+    }
+
     // ── P1e compaction ladder: a re-planned run renders only the LATEST plan full; superseded plans collapse to a digest ──
 
     [Fact]

@@ -31,10 +31,10 @@ public static class SupervisorAmendAcceptance
     /// <summary>The marker phrase EVERY amend card carries — the stable tail detectors match to recognise this card (vs the other three markers / a content ask). Pinned by a unit test so a reword is a visible decision.</summary>
     public const string AmendMarker = "Reply 'approve' to apply this acceptance amendment, or describe what to do instead.";
 
-    /// <summary>Per-fragment cap on the quoted reason — the card is a headline, not the failure dossier (the failing grade's evidence lives on the tape).</summary>
+    /// <summary>Per-fragment cap on the quoted reason and on the proposed check's argv line — the card is a headline, not the failure dossier (the failing grade's evidence lives on the tape).</summary>
     internal const int MaxQuotedChars = 200;
 
-    /// <summary>Rewrite the model's amend proposal into the parked ask card: the question names the target subtask, the waive-vs-amend shape, the reason, and the proposed command; the structured payload rides beside it as the root <c>amend</c> node; the decision-level rationale is appended last, mirroring the projector's own rationale merge (deterministic order → replay-stable idempotency key).</summary>
+    /// <summary>Rewrite the model's amend proposal into the parked ask card: the question names the target subtask, the waive-vs-amend shape, the reason, and the proposed command — as the JSON array (<see cref="AcceptanceArgv.AsLine"/>; for a TestsPass check the argv the grader would spawn, for a file-oracle kind the paths it reads), never a shell line the human co-signer would read differently from what runs; the structured payload rides beside it as the root <c>amend</c> node; the decision-level rationale is appended last, mirroring the projector's own rationale merge (deterministic order → replay-stable idempotency key).</summary>
     public static SupervisorDecision IntoAskHuman(SupervisorAmendAcceptancePayload payload, SupervisorRationale? rationale = null)
     {
         var ask = JsonSerializer.Serialize(new SupervisorAskHumanPayload { Question = QuestionFor(payload) }, AgentJson.Options);
@@ -117,7 +117,7 @@ public static class SupervisorAmendAcceptance
             question.Append($"\nReason: {Quote(payload.Reason)}");
 
         if (!payload.Waive && payload.Acceptance is not null)
-            question.Append($"\nProposed check: {Quote(string.Join(" ", payload.Acceptance.Command))}");
+            question.Append($"\nProposed check: {AcceptanceArgv.AsLine(payload.Acceptance.Command, MaxQuotedChars)}");
 
         question.Append($"\n{AmendMarker}");
 

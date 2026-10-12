@@ -1083,17 +1083,11 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
     /// decider rendered only the free-text criteria and the system prompt names "the operator's floor" without showing
     /// it, so the brain drove the work blind to the one check that decides the run.
     ///
-    /// <para>The argv is written as a JSON array of strings, never as shell text. The grader spawns it with NO shell
-    /// (<c>TestsPassGrader</c> hands the first element to the runner as the program and the rest as its arguments), so a
-    /// shell-looking line misleads: <c>--filter Category=Unit|Category=Smoke</c> reads as a pipe, and a joined line cannot
-    /// tell <c>["sh", " ", "check.sh"]</c> from two arguments. The array keeps every element boundary and every
-    /// character — <c>WorkflowJson.InterpolatedText</c>, the repo's own way to write an array into prompt text, leaves
-    /// the quote, pipe, ampersand, angle brackets and plus as themselves — and it escapes a newline, which
-    /// <see cref="BoundOneLine"/> would otherwise flatten into a space.</para>
-    ///
-    /// <para>The line is bounded like the per-subtask check line: the argv is unbounded operator config and this block is
-    /// a fixed per-turn cost the tape compaction cannot shrink, so a longer one is cut and marked with the class's
-    /// ellipsis. Null / empty ⇒ no block ⇒ byte-identical prompt.</para>
+    /// <para>The argv is written through <see cref="AcceptanceArgv.AsLine"/> — the same renderer the per-subtask check
+    /// line and the amendment card use (the grader's own fenced evidence line is a separate record of what ran) — and
+    /// bounded like the per-subtask check line: the argv is unbounded operator
+    /// config and this block is a fixed per-turn cost the tape compaction cannot shrink, so a longer one is cut and
+    /// marked with an ellipsis. Null / empty ⇒ no block ⇒ byte-identical prompt.</para>
     /// </summary>
     private static void AppendOperatorAcceptanceFloor(StringBuilder builder, SupervisorTurnContext context)
     {
@@ -1102,7 +1096,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
         if (context.AcceptanceChecks is not { Count: > 0 } floor) return;
 
         builder.AppendLine(OperatorFloorHeader);
-        builder.AppendLine($"  {BoundOneLine(JsonSerializer.Serialize(floor, Workflows.WorkflowJson.InterpolatedText), maxChars)}");
+        builder.AppendLine($"  {AcceptanceArgv.AsLine(floor, maxChars)}");
         builder.AppendLine(DoNotRepeatTheFloorAsTheStopAcceptance);
         builder.AppendLine();
     }
@@ -1527,7 +1521,7 @@ public sealed class LlmSupervisorDecider : ISupervisorDecider, IScopedDependency
             if (effective.WaivedSubtaskIds.Contains(subtask.Id))
                 builder.AppendLine("        acceptance check: WAIVED by a co-signed amendment — this item carries no verification. WAIVED is not PASSED; do not report it as verified.");
             else if (effective.BySubtask.GetValueOrDefault(subtask.Id) is { } acceptance)
-                builder.AppendLine($"        acceptance check ({acceptance.Kind?.ToString() ?? "TestsPass"}){(ReferenceEquals(acceptance, subtask.Acceptance) ? "" : ", AMENDED by a co-signed amendment")}: {BoundOneLine(string.Join(" ", acceptance.Command), maxChars)}");
+                builder.AppendLine($"        acceptance check ({acceptance.Kind?.ToString() ?? "TestsPass"}){(ReferenceEquals(acceptance, subtask.Acceptance) ? "" : ", AMENDED by a co-signed amendment")}: {AcceptanceArgv.AsLine(acceptance.Command, maxChars)}");
         }
 
         return true;
