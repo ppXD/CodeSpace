@@ -26,6 +26,15 @@ public sealed class DeterministicCriticLlmClient : ILLMClient, IStructuredLLMCli
     /// <summary>An artifact carrying this marker gets a verdict with NO observed wire identity — the honest fake's ONE deliberate unknown-identity flow (a missing/untrusted provider observation), kept alongside the default known-identity answer below so both branches of <c>ObservedLlmModel.FromWire</c> stay exercised by the shared fake.</summary>
     public const string UnknownIdentityMarker = "NO-WIRE-IDENTITY";
 
+    /// <summary>
+    /// A prompt carrying this marker draws a verdict that QUOTES the first prompt line carrying it — the goal, which
+    /// leads the prompt — in its rationale and, when flagged, in its issue evidence: a model restating the task it
+    /// judges, which is how a goal's resolved secret reaches the verdict's words. The quote is recorded on
+    /// <see cref="CriticReviewScript.Quoted"/>. Unlike <see cref="Critique"/> it repeats whatever the goal holds, so it
+    /// is for single-pass (Gate) reviews only.
+    /// </summary>
+    public const string QuoteGoalMarker = "QUOTE-THE-GOAL";
+
     /// <summary>The deterministic critique the disapproval carries — the revise loop feeds it back, so the E2Es assert it verbatim in the revise instruction.</summary>
     public const string Critique = "the change still carries a placeholder hack";
 
@@ -59,11 +68,23 @@ public sealed class DeterministicCriticLlmClient : ILLMClient, IStructuredLLMCli
                 ? JsonSerializer.SerializeToElement(new { approved = false, score = 8, issues = new[] { new { issue = "a terse local name could be clearer", evidence = "the naming in the diff", severity = "minor" } }, rationale = "sound; one cosmetic nit" })
                 : JsonSerializer.SerializeToElement(new { approved = true, score = 9, issues = Array.Empty<object>(), rationale = "clean and goal-aligned" });
 
+        if (QuotedLine(request.UserPrompt) is { } quote)
+        {
+            _script.Quoted.Add(quote);
+            json = Quoting(flawed, quote);
+        }
+
         // Known identity by default — an honest fake echoes what a real provider's wire response would carry, so
         // the critic's ObservedLlmModel.FromWire policy has a real name to accept on every OTHER flow through this
         // fake (the blind spot a null-only ObservedModel used to leave). UnknownIdentityMarker opts one flow OUT.
         return Task.FromResult(new StructuredLLMCompletion { Json = json, Model = request.Model, ObservedModel = unknownIdentity ? null : request.Model, Usage = new() { InputTokens = 11, OutputTokens = 7 } });
     }
+
+    private static string? QuotedLine(string prompt) => prompt.Split('\n').FirstOrDefault(line => line.Contains(QuoteGoalMarker, StringComparison.Ordinal))?.Trim();
+
+    private static JsonElement Quoting(bool flawed, string quote) => flawed
+        ? JsonSerializer.SerializeToElement(new { approved = false, score = 3, issues = new[] { new { issue = "the result does not do what the task asked", evidence = quote, severity = "blocker" } }, rationale = $"The task was: \"{quote}\"." })
+        : JsonSerializer.SerializeToElement(new { approved = true, score = 9, issues = Array.Empty<object>(), rationale = $"The task was: \"{quote}\". The result does it." });
 }
 
 /// <summary>The fixture-singleton counter the critic fake bumps per structured call — how a test proves the ORDER of billing (e.g. a failed oracle never bills a review). Reset it at test start (the fixture is shared across the Postgres collection).</summary>
@@ -71,5 +92,12 @@ public sealed class CriticReviewScript
 {
     public int Calls { get; set; }
 
-    public void Reset() => Calls = 0;
+    /// <summary>Every prompt line a <see cref="DeterministicCriticLlmClient.QuoteGoalMarker"/> verdict quoted, in call order — what the reviewer was actually shown.</summary>
+    public List<string> Quoted { get; } = new();
+
+    public void Reset()
+    {
+        Calls = 0;
+        Quoted.Clear();
+    }
 }

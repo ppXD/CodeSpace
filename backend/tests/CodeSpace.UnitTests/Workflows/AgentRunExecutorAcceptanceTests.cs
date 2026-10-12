@@ -676,6 +676,30 @@ public class AgentRunExecutorAcceptanceTests
         expected.AllowNetwork.ShouldBe(tier == AgentAutonomyLevel.Trusted, "fixture check: the two tiers really differ on the network");
     }
 
+    [Theory]
+    [InlineData("branch")]
+    [InlineData("patch")]
+    [InlineData("multi-repo")]
+    public async Task Every_repository_lane_hands_the_grade_the_workflow_secrets_its_task_embeds(string lane)
+    {
+        // The task's acceptance argv may carry a {{team.X}} the task was sealed over; the grade runs it exactly and
+        // must mask it out of the evidence it stores, so every lane passes the opened task's secrets along.
+        const string secret = "CANARY-lane-7e2a9c41";
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "tests-passed" });
+        var task = TaskWith(Spec("sh", "-c", $"curl -H 'Authorization: Bearer {secret}' https://deploy.test")) with { WorkflowSecrets = [secret] };
+        var result = lane switch
+        {
+            "branch" => Succeeded(),
+            "patch" => SucceededPatchOnly(),
+            _ => Succeeded() with { RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "web", ProducedBranch = "agent/web" }, new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "api", ProducedBranch = "agent/api" } } },
+        };
+
+        await executor.GradeAcceptanceIfPresentAsync(Run(), task, result, workspace: null, CancellationToken.None);
+
+        grader.WorkflowSecrets.Count.ShouldBe(lane == "multi-repo" ? 2 : 1, "fixture check: the lane under test actually graded");
+        grader.WorkflowSecrets.ShouldAllBe(secrets => secrets != null && secrets.SequenceEqual(new[] { secret }));
+    }
+
     // ─── fixtures ────────────────────────────────────────────────────────────────
 
     private static AgentRun Run() => new() { Id = Guid.NewGuid(), TeamId = Guid.NewGuid() };
@@ -786,15 +810,20 @@ public class AgentRunExecutorAcceptanceTests
         /// <summary>The producing-run posture every request-form grade carried, in call order — a lane that dropped it records null.</summary>
         public List<AcceptanceGradingPosture?> Postures { get; } = new();
 
+        /// <summary>The workflow secrets every request-form grade was told to mask, in call order — a lane that dropped them records null.</summary>
+        public List<IReadOnlyList<string>?> WorkflowSecrets { get; } = new();
+
         public Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
         {
             Postures.Add(request.Posture);
+            WorkflowSecrets.Add(request.WorkflowSecrets);
             return GradeAsync(request.RepositoryId, request.TeamId, request.Branch, request.Spec, request.TimeoutSeconds, request.Anchor, cancellationToken);
         }
 
         public Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken)
         {
             Postures.Add(request.Posture);
+            WorkflowSecrets.Add(request.WorkflowSecrets);
             return GradePatchAsync(request.RepositoryId, request.TeamId, request.BaseSha, request.InlinePatch, request.PatchArtifactId, request.Spec, request.TimeoutSeconds, cancellationToken);
         }
 

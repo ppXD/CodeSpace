@@ -47,9 +47,10 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
     private readonly IProviderRegistry _providers;
     private readonly IProviderModuleCatalog _modules;
     private readonly IScopeChecker _scopeChecker;
+    private readonly Runtime.WorkflowSensitivePayloadSealer _sealer;
     private readonly ILogger<ActorIdentityRequirementGate> _logger;
 
-    public ActorIdentityRequirementGate(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IActorIdentityResolver actorIdentity, IProviderRegistry providers, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ILogger<ActorIdentityRequirementGate> logger)
+    public ActorIdentityRequirementGate(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IActorIdentityResolver actorIdentity, IProviderRegistry providers, IProviderModuleCatalog modules, IScopeChecker scopeChecker, Runtime.WorkflowSensitivePayloadSealer sealer, ILogger<ActorIdentityRequirementGate> logger)
     {
         _db = db;
         _nodeRegistry = nodeRegistry;
@@ -57,6 +58,7 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
         _providers = providers;
         _modules = modules;
         _scopeChecker = scopeChecker;
+        _sealer = sealer;
         _logger = logger;
     }
 
@@ -88,11 +90,14 @@ public sealed class ActorIdentityRequirementGate : IActorIdentityRequirementGate
         var definition = definitionJson == null ? null : JsonSerializer.Deserialize<WorkflowDefinition>(definitionJson, WorkflowJson.Options);
         if (definition == null) return Array.Empty<ActorIdentityRequirementPlan.Requirement>();
 
-        var payloadJson = await _db.WorkflowRunRequest.AsNoTracking()
+        // The EXACT payload the run executes with — a sealed child payload is masked in its public column, and the
+        // requirement is derived from the inputs the act-as node will actually resolve.
+        var payload = await _db.WorkflowRunRequest.AsNoTracking()
             .Where(q => q.Id == run.RunRequestId)
-            .Select(q => q.NormalizedPayloadJson)
+            .Select(q => new { q.NormalizedPayloadJson, q.SealedPayloadCiphertext })
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
+        var payloadJson = payload is null ? null : _sealer.Open(payload.NormalizedPayloadJson, payload.SealedPayloadCiphertext).Json;
         var inputScope = BuildInputScope(definition, ParsePayloadObject(payloadJson));
 
         return ActorIdentityRequirementPlan.Derive(definition, waitNodeId, ActsAsUserOf, inputScope);

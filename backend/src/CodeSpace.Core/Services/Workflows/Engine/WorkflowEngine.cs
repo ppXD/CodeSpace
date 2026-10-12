@@ -539,7 +539,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task<NodeRunScope> BuildScopeFreshAndPersistSnapshotAsync(WorkflowRun run, WorkflowDefinition definition, string releaseHash, CancellationToken cancellationToken)
     {
-        var trigger = ParsePayloadObject(run.RunRequest?.NormalizedPayloadJson);
+        var payload = OpenRunPayload(run);
+        var trigger = ParsePayloadObject(payload.Json);
         var input = BuildInputScope(definition, trigger);
 
         // Fail-fast: surface required inputs the caller didn't supply AND that have no Default
@@ -566,10 +567,26 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var (projects, projectSecretPaths) = await LoadReferencedProjectVariablesAsync(run.TeamId, WorkflowScopeId(run), definition, cancellationToken).ConfigureAwait(false);
 
         var secretPaths = CollectSecretPaths(wfResolved, teamResolved, projectSecretPaths);
+        secretPaths.UnionWith(InheritedSecretTaint.Paths(trigger, input, payload.Secrets));
 
         await PersistFirstRunSnapshotAsync(run, releaseHash, wfResolved, teamResolved, cancellationToken).ConfigureAwait(false);
 
-        return new NodeRunScope { Trigger = trigger, Input = input, Wf = wf, Sys = sys, Team = team, Projects = projects, SecretPaths = secretPaths };
+        return new NodeRunScope { Trigger = trigger, Input = input, Wf = wf, Sys = sys, Team = team, Projects = projects, SecretPaths = secretPaths, InheritedSecretValues = payload.Secrets };
+    }
+
+    /// <summary>
+    /// The run's exact trigger payload and the secrets it inherited — opened from the request's sealed copy when the
+    /// payload was sealed (a <c>flow.subworkflow</c> child whose inputs carried a parent secret), else read from the
+    /// public column, which is then itself exact and inherits nothing. Every scope build reads it here, so the child
+    /// executes with the real value on its first walk, on every resume and on a rerun (which copies the sealed copy).
+    /// </summary>
+    private OpenedPayload OpenRunPayload(WorkflowRun run)
+    {
+        var request = run.RunRequest;
+
+        if (request?.SealedPayloadCiphertext is null) return new OpenedPayload(request?.NormalizedPayloadJson ?? "{}", []);
+
+        return _lifetimeScope.Resolve<WorkflowSensitivePayloadSealer>().Open(request.NormalizedPayloadJson, request.SealedPayloadCiphertext);
     }
 
     /// <summary>
@@ -584,7 +601,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// </summary>
     private async Task<NodeRunScope> BuildScopeForReplayAsync(WorkflowRun run, WorkflowDefinition definition, CancellationToken cancellationToken)
     {
-        var trigger = ParsePayloadObject(run.RunRequest?.NormalizedPayloadJson);
+        var payload = OpenRunPayload(run);
+        var trigger = ParsePayloadObject(payload.Json);
         var input = BuildInputScope(definition, trigger);
         var sys = BuildSysScope(run);
 
@@ -612,6 +630,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // freshly-fetched set to drive the paths bag — the snapshot itself stores no plaintext.
         var secretPaths = new HashSet<string>(wfSecretNames.Select(n => $"wf.{n}").Concat(teamSecretNames.Select(n => $"team.{n}")));
         foreach (var p in projectSecretPaths) secretPaths.Add(p);
+        secretPaths.UnionWith(InheritedSecretTaint.Paths(trigger, input, payload.Secrets));
 
         _logger.LogInformation(
             "Replay scope built. RunId={RunId} ParentRunId={ParentRunId} SnapshotCount={SnapshotCount}",
@@ -626,6 +645,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             Team = team,
             Projects = projects,
             SecretPaths = secretPaths,
+            InheritedSecretValues = payload.Secrets,
         };
     }
 
@@ -2447,7 +2467,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var scope = new NodeRunScope
         {
             Trigger = outer.Trigger, Team = outer.Team, Wf = outer.Wf, Input = outer.Input,
-            Sys = outer.Sys, Projects = outer.Projects, SecretPaths = outer.SecretPaths,
+            Sys = outer.Sys, Projects = outer.Projects, SecretPaths = outer.SecretPaths, InheritedSecretValues = outer.InheritedSecretValues,
             Iteration = iteration,
         };
 
@@ -2778,7 +2798,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var scope = new NodeRunScope
         {
             Trigger = outer.Trigger, Team = outer.Team, Wf = outer.Wf, Input = outer.Input,
-            Sys = outer.Sys, Projects = outer.Projects, SecretPaths = outer.SecretPaths,
+            Sys = outer.Sys, Projects = outer.Projects, SecretPaths = outer.SecretPaths, InheritedSecretValues = outer.InheritedSecretValues,
             Iteration = outer.Iteration, Loop = loop,
         };
 
@@ -2992,8 +3012,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// workflow_run_wait row, and — for a Timer wait — schedule the resume at wake_at. The walk
     /// then throws <see cref="RunSuspendedException"/> so the run lands in Suspended.
     /// </summary>
-    private async Task SuspendNodeAsync(WorkflowRun run, NodeDefinition node, NodeResult result, CancellationToken cancellationToken, string iterationKey = NoIteration)
+    private async Task SuspendNodeAsync(NodeExecution exec, NodeResult result, CancellationToken cancellationToken)
     {
+        var (run, node, iterationKey) = (exec.Run, exec.Node, exec.IterationKey);
         var token = result.SuspendUntil
             ?? throw new NodeFailureException($"Node '{node.Id}' returned Suspended without a SuspensionToken.");
 
@@ -3037,8 +3058,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // failure throws SubworkflowStartException, which ExecuteNodeAsync turns into a node failure.
         var correlationToken = waitKind switch
         {
-            WorkflowWaitKinds.Subworkflow => (await StageSubworkflowChildAsync(run, token, stagingCt).ConfigureAwait(false)).ToString(),
-            WorkflowWaitKinds.AgentRun => (await StageAgentRunAsync(run, node, token, iterationKey, stagingCt).ConfigureAwait(false)).ToString(),
+            WorkflowWaitKinds.Subworkflow => (await StageSubworkflowChildAsync(exec, token, stagingCt).ConfigureAwait(false)).ToString(),
+            WorkflowWaitKinds.AgentRun => (await StageAgentRunAsync(exec, token, iterationKey, stagingCt).ConfigureAwait(false)).ToString(),
             _ => token.CorrelationToken ?? Guid.NewGuid().ToString("N"),
         };
 
@@ -3056,7 +3077,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // Stash the node's suspend payload (e.g. an approval prompt) so the run-detail UI can
             // render the right affordance while parked. Overwritten with the resume payload on
             // resolve — the engine only reads Resolved waits, so there's no conflict.
-            PayloadJson = token.Payload.ValueKind == JsonValueKind.Undefined ? null : token.Payload.GetRawText(),
+            PayloadJson = PersistedSuspendPayload(token, exec.Scope),
             CreatedAt = DateTimeOffset.UtcNow,
         };
 
@@ -3079,6 +3100,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         else if (token.DeadlineAt.HasValue && token.TimeoutPayload is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null } timeoutPayload)
             _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeByDeadlineAsync(waitId, timeoutPayload.GetRawText(), CancellationToken.None), token.DeadlineAt.Value);
     }
+
+    /// <summary>
+    /// The wait row is a persistence boundary like every ledger row: a Viewer reads it back as the run's pending wait,
+    /// and the payload a node suspends with is built from RESOLVED inputs and config — an agent's task, a child's
+    /// inputs — so it is masked with the node scope's secrets here, whatever the wait kind. Nothing executes from the
+    /// pending row: the staging above takes the in-memory token (and seals what it hands on), and a resolve overwrites
+    /// the row with its answer.
+    /// </summary>
+    private static string? PersistedSuspendPayload(SuspensionToken token, NodeRunScope scope) =>
+        token.Payload.ValueKind == JsonValueKind.Undefined ? null : PersistenceSecretRedactor.FromScope(scope).Redact(token.Payload).Value.GetRawText();
 
     /// <summary>The error a staged agent is cancelled with when its step's park was refused because a Continue overtook the step.</summary>
     private const string OvertakenParkAgentReason = "The workflow run was continued while this step was parking; the continued run stages its own agent.";
@@ -3131,8 +3162,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// the wait it resumes through exists. Returns the agent-run id, which becomes the wait's
     /// correlation token. A malformed envelope is a clean node failure.
     /// </summary>
-    private async Task<Guid> StageAgentRunAsync(WorkflowRun run, NodeDefinition node, SuspensionToken token, string iterationKey, CancellationToken cancellationToken)
+    private async Task<Guid> StageAgentRunAsync(NodeExecution exec, SuspensionToken token, string iterationKey, CancellationToken cancellationToken)
     {
+        var (run, node) = (exec.Run, exec.Node);
         AgentTask task;
 
         try
@@ -3162,6 +3194,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // (session id + transcript ref) onto the task before it is persisted. A first run / no prior session ⇒ no hint,
         // byte-identical to a fresh run.
         task = await ApplyResumeHintAsync(task, run, node.Id, iterationKey, cancellationToken).ConfigureAwait(false);
+
+        // The task was built from the node's RESOLVED config: name the scope secrets it embeds, so the store persists it
+        // masked (the exact copy sealed beside it) and the executor masks them in everything the agent echoes.
+        task = AgentTaskSecrets.Embed(task, PersistenceSecretRedactor.FromScope(exec.Scope));
 
         // iterationKey is the engine's authoritative effective cell key for this suspension (computed in
         // SuspendNodeAsync from the branch key ?? the token's own key) — identical to the value stamped on the
@@ -3201,7 +3237,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// the suspend payload and create the child via <see cref="ISubworkflowService"/> (NOT dispatched
     /// yet). Returns the child run id, which becomes the wait's correlation token.
     /// </summary>
-    private async Task<Guid> StageSubworkflowChildAsync(WorkflowRun run, SuspensionToken token, CancellationToken cancellationToken)
+    private async Task<Guid> StageSubworkflowChildAsync(NodeExecution exec, SuspensionToken token, CancellationToken cancellationToken)
     {
         var payload = token.Payload;
 
@@ -3211,10 +3247,19 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             throw new SubworkflowStartException("Sub-workflow node is missing a valid 'workflowId'.");
 
         int? version = payload.TryGetProperty("version", out var vEl) && vEl.ValueKind == JsonValueKind.Number && vEl.TryGetInt32(out var v) ? v : null;
-        var inputsJson = payload.TryGetProperty("inputs", out var inEl) && inEl.ValueKind == JsonValueKind.Object ? inEl.GetRawText() : "{}";
+        var inputs = payload.TryGetProperty("inputs", out var inEl) && inEl.ValueKind == JsonValueKind.Object ? inEl : EmptyJsonObject();
 
-        return await _subworkflowService.StageChildRunAsync(run, childWorkflowId, version, inputsJson, cancellationToken).ConfigureAwait(false);
+        return await _subworkflowService.StageChildRunAsync(exec.Run, childWorkflowId, version, SealChildInputs(inputs, exec.Scope), cancellationToken).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The child's inputs were resolved in THIS scope, so its request row gets them masked and the exact copy sealed
+    /// together with the parent secret values they embed — the child opens that copy to build its scope and keeps
+    /// those values as secrets (<see cref="NodeRunScope.InheritedSecretValues"/>), which its own variable rows could
+    /// never name. Inputs embedding no secret are staged byte-identical, unsealed.
+    /// </summary>
+    private SealedPayload SealChildInputs(JsonElement inputs, NodeRunScope scope) =>
+        _lifetimeScope.Resolve<WorkflowSensitivePayloadSealer>().Seal(inputs, PersistenceSecretRedactor.FromScope(scope));
 
     /// <summary>For a Timer suspension the node puts an ISO-8601 <c>wake_at</c> in the token payload.</summary>
     private static DateTimeOffset? ReadWakeAt(SuspensionToken token)
@@ -3332,7 +3377,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             {
                 try
                 {
-                    await SuspendNodeAsync(run, node, result, cancellationToken, iterationKey).ConfigureAwait(false);
+                    await SuspendNodeAsync(exec, result, cancellationToken).ConfigureAwait(false);
                     return new NodeRunOutcome(NodeStatus.Suspended, null, null, null);
                 }
                 catch (SubworkflowStartException ex)
@@ -3407,7 +3452,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         if (exec.ResumePayload is not { } approval)
         {
             var token = Rerun.RerunSideEffectGate.BuildApprovalToken(exec.Node.Id, exec.Runtime.Manifest.DisplayName);
-            await SuspendNodeAsync(exec.Run, exec.Node, NodeResult.Suspend(token), cancellationToken, exec.IterationKey).ConfigureAwait(false);
+            await SuspendNodeAsync(exec, NodeResult.Suspend(token), cancellationToken).ConfigureAwait(false);
             return new NodeRunOutcome(NodeStatus.Suspended, null, null, null);
         }
 

@@ -140,6 +140,17 @@ public sealed class NodeRunScope
     /// fine — they're sent over the wire to whatever provider but never persisted to OutputsJson.</para>
     /// </summary>
     public IReadOnlySet<string> SecretPaths { get; init; } = new HashSet<string>();
+
+    /// <summary>
+    /// Exact secret values this run inherited rather than resolved — a <c>flow.subworkflow</c> child receives the
+    /// parent's <c>wf.*</c> / <c>project.*</c> / <c>team.*</c> values its inputs carry, which none of this run's own
+    /// buckets name. Not a template head: they only widen <see cref="PersistenceSecretRedactor.FromScope"/>, so every
+    /// persistence boundary and the Terminal leak guard treat them exactly like this run's own secrets, and they pass
+    /// on to whatever this run hands further down. The input keys that carry them are tainted in
+    /// <see cref="SecretPaths"/> (<c>trigger.X</c> / <c>input.X</c>) for the path-based guards. Every scope derived from
+    /// another (a map branch, a loop pass, an iterate item) copies it alongside <see cref="SecretPaths"/>.
+    /// </summary>
+    public IReadOnlyList<string> InheritedSecretValues { get; init; } = [];
 }
 
 /// <summary>

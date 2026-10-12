@@ -89,7 +89,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
 
             if (protection.Failure is not null) return protection.Failure;
 
-            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(workspace.Directory, spec, teamId, timeoutSeconds, request.Posture, request.ProducerModel, protection), cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(workspace.Directory, spec, teamId, timeoutSeconds, request.Posture, request.ProducerModel, protection, request.WorkflowSecrets), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -115,7 +115,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
         if (!Directory.Exists(request.Directory))
             return new BenchmarkGrade { Passed = false, Detail = "grade-error: the workspace directory no longer exists", Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
 
-        return await GradeWorkspaceAsync(new WorkspaceGradeRequest(request.Directory, request.Spec, request.TeamId, request.TimeoutSeconds, request.Posture), cancellationToken).ConfigureAwait(false);
+        return await GradeWorkspaceAsync(new WorkspaceGradeRequest(request.Directory, request.Spec, request.TeamId, request.TimeoutSeconds, request.Posture, WorkflowSecrets: request.WorkflowSecrets), cancellationToken).ConfigureAwait(false);
     }
 
     public Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
@@ -281,7 +281,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
 
             if (protection.Failure is not null) return protection.Failure;
 
-            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.Posture, request.ProducerModel, protection), cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.Posture, request.ProducerModel, protection, request.WorkflowSecrets), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -699,7 +699,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
     /// </summary>
     private async Task<BenchmarkGrade> GradeWorkspaceAsync(WorkspaceGradeRequest request, CancellationToken cancellationToken)
     {
-        var (directory, spec, teamId, authoredTimeoutSeconds, posture, producerModel, protection) = request;
+        var (directory, spec, _, authoredTimeoutSeconds, posture, producerModel, protection, _) = request;
         var timeoutSeconds = BoundedGradeWindow(authoredTimeoutSeconds);
         var runner = AcceptanceGradingPosturePolicy.Bind(_runners.Resolve(GradingRunnerKind), posture ?? AcceptanceGradingPosturePolicy.FailClosed);
         var setupSpec = spec.SetupCommand is { Count: > 0 } setupCommand ? SetupSpec(setupCommand, directory, timeoutSeconds) : null;
@@ -713,7 +713,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
             var beforeSetup = protection.Restored?.Fingerprint(directory);
 
             var setupFailure = await RunSetupCommandAsync(runner, setupSpec, severed: setupEgress == SandboxEgressMode.None, cancellationToken).ConfigureAwait(false);
-            if (setupFailure is not null) return await CaptureEvidenceAsync(WithSetupNotice(setupFailure, setupNotice), teamId, cancellationToken).ConfigureAwait(false);
+            if (setupFailure is not null) return await CaptureEvidenceAsync(WithSetupNotice(setupFailure, setupNotice), request, cancellationToken).ConfigureAwait(false);
 
             protection = await ReassertOracleAsync(directory, protection, beforeSetup, timeoutSeconds, cancellationToken).ConfigureAwait(false);
             if (protection.Failure is not null) return protection.Failure;
@@ -721,7 +721,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
 
         var grade = await RunGuardedCheckAsync(request, runner, timeoutSeconds, protection.Restored, cancellationToken).ConfigureAwait(false);
 
-        return await CaptureEvidenceAsync(Annotate(grade, protection, setupNotice), teamId, cancellationToken).ConfigureAwait(false);
+        return await CaptureEvidenceAsync(Annotate(grade, protection, setupNotice), request, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -766,7 +766,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
         return grade with { OracleNote = OracleRuntime.CombineNotes(protection.IntegrityNote, grade.OracleNote) };
     }
 
-    private sealed record WorkspaceGradeRequest(string Directory, SupervisorAcceptanceSpec Spec, Guid TeamId, int TimeoutSeconds, AcceptanceGradingPosture? Posture, ReviewModelIdentity? ProducerModel = null, OracleProtectionOutcome Protection = default);
+    private sealed record WorkspaceGradeRequest(string Directory, SupervisorAcceptanceSpec Spec, Guid TeamId, int TimeoutSeconds, AcceptanceGradingPosture? Posture, ReviewModelIdentity? ProducerModel = null, OracleProtectionOutcome Protection = default, IReadOnlyList<string>? WorkflowSecrets = null);
 
     /// <summary>The narrowed-setup notice this grade owes, logged once, or null when the contract has no setup step or the sandbox left it the network it asks for.</summary>
     private string? SetupNotice(SandboxSpec? setupSpec, AcceptanceGradingPosture posture, SandboxEgressMode? enforced, string directory)
@@ -799,15 +799,17 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
     /// P5-2: the clipped <c>EvidenceTail</c> is folded BEFORE the store attempt, so the repair loop's diagnosis
     /// survives a store fault that the receipt's evidence binding does not.
     /// </summary>
-    private async Task<BenchmarkGrade> CaptureEvidenceAsync(BenchmarkGrade grade, Guid teamId, CancellationToken cancellationToken)
+    private async Task<BenchmarkGrade> CaptureEvidenceAsync(BenchmarkGrade grade, WorkspaceGradeRequest request, CancellationToken cancellationToken)
     {
+        grade = MaskedGrade(grade, request.WorkflowSecrets);
+
         if (string.IsNullOrEmpty(grade.EvidenceText)) return grade;
 
         grade = WithClippedEvidenceTail(grade);
 
         try
         {
-            var id = await _artifacts.PutAsync(teamId, System.Text.Encoding.UTF8.GetBytes(grade.EvidenceText!), "text/plain", cancellationToken).ConfigureAwait(false);
+            var id = await _artifacts.PutAsync(request.TeamId, System.Text.Encoding.UTF8.GetBytes(grade.EvidenceText!), "text/plain", cancellationToken).ConfigureAwait(false);
 
             return grade with { EvidenceArtifactId = id, EvidenceText = null };
         }
@@ -816,6 +818,28 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
             _logger.LogWarning(ex, "Storing oracle evidence failed; the grade stands evidence-less (a required contract reads at most InfraUnknown once admission tightens)");
             return grade with { EvidenceText = null };
         }
+    }
+
+    /// <summary>
+    /// The grade with the producing run's workflow secrets (<see cref="WorkspaceGradeRequest.WorkflowSecrets"/>) masked
+    /// out of everything that outlives the check: the evidence text (the authored argv line and both output tails),
+    /// before it is clipped onto the tail and stored as a team artifact a Viewer can download, the oracle note and the
+    /// detail (a failed setup's detail carries its stderr). The check ran with the exact argv; only what is kept is
+    /// masked. No secrets: the grade unchanged. Internal for direct unit pinning.
+    /// </summary>
+    internal static BenchmarkGrade MaskedGrade(BenchmarkGrade grade, IReadOnlyList<string>? secrets)
+    {
+        if (secrets is not { Count: > 0 }) return grade;
+
+        var redactor = new Workflows.Runtime.PersistenceSecretRedactor(secrets);
+
+        return grade with
+        {
+            Detail = redactor.Redact(grade.Detail).Value ?? grade.Detail,
+            EvidenceText = redactor.Redact(grade.EvidenceText).Value,
+            EvidenceTail = redactor.Redact(grade.EvidenceTail).Value,
+            OracleNote = redactor.Redact(grade.OracleNote).Value,
+        };
     }
 
     /// <summary>The inline diagnosis budget (P5-2): the trailing slice of the oracle's output kept on the grade for prompt/repair consumers. Small enough to ride the tape and the decider prompt per failed unit; the FULL text is always behind the CAS id.</summary>

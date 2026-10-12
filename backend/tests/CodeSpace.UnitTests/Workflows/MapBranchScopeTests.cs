@@ -76,4 +76,32 @@ public class MapBranchScopeTests
         loopScope.Iteration.ShouldBeSameAs(outer.Iteration, "the loop passes the enclosing iteration through by reference");
         loopScope.Iteration!["item"].GetString().ShouldBe("outer-el");
     }
+
+    [Fact]
+    public void Every_derived_scope_keeps_the_secrets_its_run_inherited()
+    {
+        // A sub-workflow child's inherited parent secrets are no bucket a template names, so a derived scope that
+        // dropped them would let a map / loop / iterate body persist them unmasked — the gap the Projects +
+        // SecretPaths copy once had (see FlowIterateNode.BuildIterationScope).
+        var outer = OuterWithIteration(JsonSerializer.SerializeToElement("outer-el"));
+        var tainted = new NodeRunScope
+        {
+            Trigger = outer.Trigger, Iteration = outer.Iteration,
+            SecretPaths = new HashSet<string> { "trigger.token" }, InheritedSecretValues = ["inherited-parent-secret"],
+        };
+        var element = JsonSerializer.SerializeToElement("el");
+
+        var derived = new[]
+        {
+            WorkflowEngine.BuildMapBranchScope(tainted, element, index: 0),
+            WorkflowEngine.BuildLoopScope(tainted, tainted.Nodes, new Dictionary<string, JsonElement>(), index: 0),
+            CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowIterateNode.BuildIterationScope(tainted, "item", element, index: 0),
+        };
+
+        foreach (var scope in derived)
+        {
+            scope.InheritedSecretValues.ShouldBe(["inherited-parent-secret"]);
+            PersistenceSecretRedactor.FromScope(scope).Redact("x inherited-parent-secret x").Value.ShouldBe("x [REDACTED] x");
+        }
+    }
 }

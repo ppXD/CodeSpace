@@ -61,6 +61,13 @@ public class AgentRun : IEntity<Guid>, IAuditable
     /// <summary>The full <c>AgentTask</c> envelope as JSON — the run's inputs, kept whole so the envelope can evolve without a migration.</summary>
     public string TaskJson { get; set; } = "{}";
 
+    /// <summary>
+    /// The exact task envelope, encrypted, when <see cref="TaskJson"/> had a workflow secret masked (0247). Carries the
+    /// secret values the task embeds too, so the executor's redactor treats them as secrets. NULL — every pre-0247 row
+    /// and every task with no secret in it — means <see cref="TaskJson"/> is itself exact. Never projected by a read API.
+    /// </summary>
+    public string? SealedTaskCiphertext { get; set; }
+
     /// <summary>The normalized <c>AgentRunResult</c> as JSON, written on completion. NULL while in-flight.</summary>
     public string? ResultJson { get; set; }
 

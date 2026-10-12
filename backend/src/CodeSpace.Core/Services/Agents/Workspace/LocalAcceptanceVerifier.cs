@@ -22,7 +22,7 @@ public abstract class LocalAcceptanceContext : IDisposable
     public abstract void Dispose();
 }
 /// <summary>Verifies an already selected local invocation world under fresh run authority and ownership. Directory continuity is observed, not a new filesystem access grant. No context is reconstructed from a durable handle after host loss.</summary>
-public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuthorityService authority, ISupervisorAcceptanceGrader grader, IArtifactManifestStore manifests, IArtifactContentVerifier contentVerifier) : IScopedDependency
+public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuthorityService authority, ISupervisorAcceptanceGrader grader, IArtifactManifestStore manifests, IArtifactContentVerifier contentVerifier, Workflows.Runtime.WorkflowSensitivePayloadSealer sealer) : IScopedDependency
 {
     public async Task<LocalAcceptanceContext> PrepareAsync(LocalAcceptancePreparation request, CancellationToken cancellationToken)
     {
@@ -57,7 +57,7 @@ public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuth
         if (observation.Failure != null) return observation.Failure;
         var context = (Context)request.Context!;
         BenchmarkGrade grade;
-        try { grade = await grader.GradeDirectoryAsync(new DirectoryAcceptanceGradeRequest { Directory = observation.Directory!, Spec = context.Spec!, TeamId = request.TeamId, TimeoutSeconds = context.Spec!.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Posture = AcceptanceGradingPosturePolicy.For(request.Task) }, cancellationToken).ConfigureAwait(false); }
+        try { grade = await grader.GradeDirectoryAsync(new DirectoryAcceptanceGradeRequest { Directory = observation.Directory!, Spec = context.Spec!, TeamId = request.TeamId, TimeoutSeconds = context.Spec!.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Posture = AcceptanceGradingPosturePolicy.For(request.Task), WorkflowSecrets = request.Task.WorkflowSecrets }, cancellationToken).ConfigureAwait(false); }
         catch (Exception ex) when (ex is not OperationCanceledException and not Exceptions.AgentRunOwnershipLostException and not AgentAuthorityDeniedException)
         {
             return Failed($"local-oracle-unavailable: {ex.GetType().Name}", GradeFailureClass.GraderFault);
@@ -121,7 +121,9 @@ public sealed class LocalAcceptanceVerifier(IAgentRunService runs, ExecutionAuth
         await authority.EnsureAgentActionAsync(request.Owner.RunId, request.TeamId, cancellationToken).ConfigureAwait(false);
         await runs.AssertOwnershipAsync(request.Owner, cancellationToken).ConfigureAwait(false);
         var run = await runs.GetAsync(request.Owner.RunId, cancellationToken).ConfigureAwait(false);
-        var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options);
+        // The EXACT stored contract — the executor's own copy was opened from the sealed task, so a masked goal would
+        // never hash equal to it.
+        var task = AgentTaskSecrets.Open(run, sealer);
         if (run.TeamId != request.TeamId || task == null || AgentAcceptanceContract.Hash(task) != AgentAcceptanceContract.Hash(request.Task)
             || task.WorkspaceDirectory is { } stored && !SamePath(stored, request.Task.WorkspaceDirectory))
             return Failed("local-context-mismatch", GradeFailureClass.GraderFault);

@@ -212,9 +212,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     // when the process has exited or the runner killed it. While raised, a process this pass started may still be working
     // in the clone, so the executor-error arm asks the runner before the clone may go (AgentMayStillRunInCloneAsync).
     private bool _launchUnobserved;
+    // Opens a task whose workflow secrets were sealed out of task_jsonb (AgentTaskSecrets). Optional like the rest — a
+    // hand-built test double that never stages a sealed run does not have to know about it; a sealed run reaching an
+    // executor without one fails loudly instead of launching the masked goal.
+    private readonly Workflows.Runtime.WorkflowSensitivePayloadSealer? _sealer;
     private readonly ILogger<AgentRunExecutor> _logger;
 
-    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null, AgentRunLogging.IAgentRunLogService? logs = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, Recovery.IAgentSessionTranscriptCheckpointer? sessionCheckpointer = null, TimeProvider? clock = null)
+    public AgentRunExecutor(IAgentRunService runs, IAgentHarnessRegistry harnesses, IHarnessModelReconciler harnessReconciler, ISandboxRunnerRegistry runners, IAgentWorkspaceResolver workspaceResolver, IModelCredentialResolver modelCredentials, IWorkspaceProviderRegistry workspaces, IAgentRunCompletionNotifier notifier, IServiceScopeFactory scopeFactory, CodeSpaceDbContext db, IStructuredCritic critic, IArtifactOffloader offloader, Workflows.Artifacts.IArtifactStore artifacts, IPublishManifestStore manifests, IArtifactManifestStore artifactManifests, Capture.ICaptureIntentService captureIntents, IEnumerable<IPublishGuard> publishGuards, ILogger<AgentRunExecutor> logger, IAgentRunLogCaptureBridge? logCapture = null, INativeRecordPlane? nativeRecords = null, AgentDefaultRunnerSetting? defaultRunner = null, Services.RunData.IRunDataCompletenessWriter? completeness = null, Credentials.IModelCredentialBroker? credentialBroker = null, AgentRunLogging.IAgentRunLogService? logs = null, Microsoft.Extensions.Hosting.IHostApplicationLifetime? lifetime = null, Recovery.IAgentSessionTranscriptCheckpointer? sessionCheckpointer = null, TimeProvider? clock = null, Workflows.Runtime.WorkflowSensitivePayloadSealer? sealer = null)
     {
         _runs = runs;
         _harnesses = harnesses;
@@ -241,6 +245,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         _lifetime = lifetime;
         _sessionCheckpointer = sessionCheckpointer;
         _clock = clock ?? TimeProvider.System;
+        _sealer = sealer;
         // Tolerate a null enumerable (a hand-built test double that never exercises the push path) — zero guards
         // registered is a legitimate state (every push clears), not a constructor-time crash.
         _publishGuards = (publishGuards ?? Enumerable.Empty<IPublishGuard>()).OrderBy(g => g.Order).ToList();
@@ -324,7 +329,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // of escaping uncaught to leave the run Running for the reconciler to later abandon with a generic reason.
             if (await AbortIfParentTerminalAsync(owner, run.TeamId, run.WorkflowRunId, cancellationToken).ConfigureAwait(false)) return;
 
-            var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
+            var task = AgentTaskSecrets.Open(run, _sealer)
                        ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
 
             // Reconcile the authored harness with the model's provider (from the pinned credential, or — for the
@@ -875,7 +880,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         if (DeserializeHandle(run.RunnerHandleJson) is not { } handle) return;   // no durable handle — the reconciler marker-recovers it instead
 
-        var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options)
+        var task = AgentTaskSecrets.Open(run, _sealer)
                    ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
 
         // Re-attach must redact + fold against the SAME harness the original run reconciled to (so the right model
@@ -3056,8 +3061,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // with. The patch lane always had this anchor; the BRANCH lane discarded it and graded the candidate's
             // bytes as the judge.
             grade = hasBranch
-                ? await grader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = run.TeamId, Branch = result.ProducedBranch!, Spec = fullSpec, TimeoutSeconds = timeoutSeconds, Anchor = new OracleAnchor(result.BaseSha, OracleFloorPrograms(fullSpec)), Posture = posture }, cancellationToken).ConfigureAwait(false)
-                : await grader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = run.TeamId, BaseSha = result.BaseSha!, InlinePatch = result.Patch, PatchArtifactId = result.PatchArtifactId, Spec = fullSpec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = OracleFloorPrograms(fullSpec), Posture = posture }, cancellationToken).ConfigureAwait(false);
+                ? await grader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = run.TeamId, Branch = result.ProducedBranch!, Spec = fullSpec, TimeoutSeconds = timeoutSeconds, Anchor = new OracleAnchor(result.BaseSha, OracleFloorPrograms(fullSpec)), Posture = posture, WorkflowSecrets = task.WorkflowSecrets }, cancellationToken).ConfigureAwait(false)
+                : await grader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = run.TeamId, BaseSha = result.BaseSha!, InlinePatch = result.Patch, PatchArtifactId = result.PatchArtifactId, Spec = fullSpec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = OracleFloorPrograms(fullSpec), Posture = posture, WorkflowSecrets = task.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
         {
@@ -3152,7 +3157,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             try
             {
                 // C3: each repo's own recorded base anchors ITS oracle restore — same protection as the single-repo lane.
-                grade = await grader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId!.Value, TeamId = run.TeamId, Branch = target.ProducedBranch!, Spec = fullSpec, TimeoutSeconds = timeoutSeconds, Anchor = new OracleAnchor(target.BaseSha, OracleFloorPrograms(fullSpec)), Posture = posture }, cancellationToken).ConfigureAwait(false);
+                grade = await grader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId!.Value, TeamId = run.TeamId, Branch = target.ProducedBranch!, Spec = fullSpec, TimeoutSeconds = timeoutSeconds, Anchor = new OracleAnchor(target.BaseSha, OracleFloorPrograms(fullSpec)), Posture = posture, WorkflowSecrets = task.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
             }
             catch (Exception ex) when (ex is not OperationCanceledException and not AgentRunOwnershipLostException)
             {
@@ -3292,7 +3297,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         if (!agentVerdict.Failed && !agentVerdict.Approved) return agentVerdict;
 
         var review = await BuildReviewRequestAsync(task, result, run, cancellationToken).ConfigureAwait(false);
-        var modelVerdict = await CoveringTheWholeResultAsync(await ReviewRecordedAsync(review.Request, run, task, cancellationToken).ConfigureAwait(false), review, run, cancellationToken).ConfigureAwait(false);
+        var reviewed = MaskedVerdict(await ReviewRecordedAsync(review.Request, run, task, cancellationToken).ConfigureAwait(false), task);
+        var modelVerdict = await CoveringTheWholeResultAsync(reviewed, review, run, cancellationToken).ConfigureAwait(false);
 
         return agentVerdict.Failed ? modelVerdict : CoSigned(agentVerdict, modelVerdict);
     }
@@ -3423,7 +3429,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         using var recordingScope = _scopeFactory.CreateScope();
 
-        using (LlmCallContext.Push(await BuildCriticCallScopeAsync(recordingScope, workflowRunId, run, cancellationToken).ConfigureAwait(false)))
+        using (LlmCallContext.Push(await BuildCriticCallScopeAsync(recordingScope, workflowRunId, run, task, cancellationToken).ConfigureAwait(false)))
             return await _critic.ReviewAsync(request, run.TeamId, task.ReviewerModelId, cancellationToken).ConfigureAwait(false);
     }
 
@@ -3439,17 +3445,47 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// the task cap was refused, and the critic's refusal contract silently degraded it to <c>ReviewFailed</c>.
     /// A cap and the sum it is compared against must always be the same grain.</para>
     /// </summary>
-    private async Task<LlmCallScope> BuildCriticCallScopeAsync(IServiceScope recordingScope, Guid workflowRunId, AgentRun run, CancellationToken cancellationToken)
+    private async Task<LlmCallScope> BuildCriticCallScopeAsync(IServiceScope recordingScope, Guid workflowRunId, AgentRun run, AgentTask task, CancellationToken cancellationToken)
     {
         var logger = recordingScope.ServiceProvider.GetRequiredService<IRunRecordLogger>();
         var offloader = recordingScope.ServiceProvider.GetRequiredService<IArtifactOffloader>();
         var ledger = recordingScope.ServiceProvider.GetRequiredService<Workflows.Budget.IBudgetLedger>();
-        var scope = new LlmCallScope(workflowRunId, run.TeamId, run.NodeId, run.IterationKey, "agent.critic", logger, offloader, Budget: ledger);
+        var scope = new LlmCallScope(workflowRunId, run.TeamId, run.NodeId, run.IterationKey, "agent.critic", logger, offloader, Budget: ledger, CaptureRedactor: CriticCaptureRedactor(task));
 
         if (await RunCostCapAsync(workflowRunId, cancellationToken).ConfigureAwait(false) is not { } capUsd)
             return scope.Unbudgeted("the workflow run declares no cost cap for its agent's output-review critic");
 
         return scope with { CapUsd = capUsd, ModelPrices = await ModelPriceResolver.LoadAsync(_db, run.TeamId, cancellationToken).ConfigureAwait(false) };
+    }
+
+    /// <summary>
+    /// The critic's prompt carries the producer's goal, so its <c>interaction.*</c> capture must mask the workflow
+    /// secrets that goal embeds — the masking every node scope's capture gets from the engine, which this scope (pushed
+    /// by the executor, outside any node) would otherwise lack. Null when the task embeds none: nothing to mask.
+    /// </summary>
+    private static Workflows.Runtime.PersistenceSecretRedactor? CriticCaptureRedactor(AgentTask task) =>
+        task.WorkflowSecrets is { Count: > 0 } secrets ? new Workflows.Runtime.PersistenceSecretRedactor(secrets) : null;
+
+    /// <summary>
+    /// The model critic's verdict with the task's workflow secrets masked out of every word it says: the rationale, each
+    /// issue and its evidence, and the critique. The critic is shown the producer's EXACT goal, and a model restates the
+    /// task it judges, so a verdict can quote a goal's resolved <c>{{team.X}}</c>. The capture of the call is masked
+    /// (<see cref="CriticCaptureRedactor"/>), but the verdict outlives that scope. It becomes the review.completed beat,
+    /// the flagged warning event, the result's ReviewFeedback and an unreviewed hold's reason. Masked once here, all of
+    /// them hold the mask. A task that embeds no secret gets its verdict back unchanged.
+    /// </summary>
+    internal static CriticVerdict MaskedVerdict(CriticVerdict verdict, AgentTask task)
+    {
+        if (CriticCaptureRedactor(task) is not { } redactor) return verdict;
+
+        string Mask(string text) => redactor.Redact(text).Value ?? text;
+
+        return verdict with
+        {
+            Rationale = Mask(verdict.Rationale),
+            Critique = verdict.Critique is null ? null : Mask(verdict.Critique),
+            Issues = verdict.Issues.Select(issue => issue with { Text = Mask(issue.Text), Evidence = Mask(issue.Evidence) }).ToList(),
+        };
     }
 
     /// <summary>The owning workflow run's declared cost ceiling, read from the launch-stamped route the Room displays it from. One indexed single-column read per review pass (a review makes at most a verdict + a co-sign call), so it is not worth a cache that could go stale against a re-launched cap.</summary>
@@ -4093,7 +4129,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // this point and folds in via WithModelBrokerRunToken (the same reason the MCP token is folded there), so
         // that a re-attach rebuilding from the handle reproduces this exact fingerprint. The upstream key stays a
         // needle either way — the broker holds it, and a broker error can echo it.
-        var redactor = BuildRunRedactor(MergeEnvironment(task.Environment, brokered is null ? env : EmptySecretEnv), credential);
+        var redactor = WithWorkflowSecrets(BuildRunRedactor(MergeEnvironment(task.Environment, brokered is null ? env : EmptySecretEnv), credential), task.WorkflowSecrets);
 
         // The non-secret base URL + provider tag flow out so a restricted (Allowlist) run can pin its model-API host
         // in the egress allowlist (B3.3b) — the UPSTREAM ones even under brokerage, deliberately: the allowlist is
@@ -4281,6 +4317,24 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     }
 
     /// <summary>
+    /// A redactor widened by the workflow secrets the run's task embeds (<see cref="AgentTask.WorkflowSecrets"/> — a goal
+    /// that resolved <c>{{team.X}}</c>, opened from the run's sealed task). The agent was handed them, so it can echo
+    /// them into every sink this run persists — events, native records, result, error, the MCP ledger and its decision
+    /// requests — exactly like an injected key. Folded inside the credential resolve, which every redactor build
+    /// passes through (launch, re-attach fold, re-opened endpoint), so each rebuilds the SAME set from the sealed copy
+    /// and the fingerprint stamped on the handle keeps matching. Under <see cref="MinimumNeedleLength"/> stays readable,
+    /// as for any needle; ordinal-sorted and capped at <see cref="MaximumNeedles"/> so the fold is a function of the set.
+    /// A run whose task embeds none (every run staged before sealing existed) keeps its redactor — and fingerprint —
+    /// unchanged.
+    /// </summary>
+    internal static SecretRedactor WithWorkflowSecrets(SecretRedactor redactor, IReadOnlyList<string>? workflowSecrets)
+    {
+        var needles = (workflowSecrets ?? []).Where(secret => secret.Length >= MinimumNeedleLength).Distinct(StringComparer.Ordinal).OrderBy(secret => secret, StringComparer.Ordinal).Take(MaximumNeedles).ToList();
+
+        return needles.Count == 0 ? redactor : redactor.With(needles);
+    }
+
+    /// <summary>
     /// A redactor widened by the run's per-run MCP capability token — the one secret the launch mints AFTER the
     /// credential resolve, so <see cref="BuildRunRedactor"/> cannot see it. A no-op when the run has no token (no
     /// endpoint opened → nothing was injected) or when the token is too short to be a needle, which keeps the
@@ -4338,12 +4392,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>Re-persist the run's stored task with its RESOLVED model filled, so the live projection shows what an "auto" run actually dispatches from the moment it starts (mirrors the harness-reconciliation write). The task is the ORIGINAL (no injected secret env) with only <see cref="AgentTask.Model"/> set, so serializing it is safe.</summary>
-    private Task PersistResolvedModelAsync(AgentRunOwnerToken owner, AgentTask taskWithModel, CancellationToken cancellationToken) => PersistRuntimeIdentityAsync(owner, null, JsonSerializer.Serialize(taskWithModel, AgentJson.Options), cancellationToken);
+    /// <summary>Re-persist the run's stored task with its RESOLVED model filled, so the live projection shows what an "auto" run actually dispatches from the moment it starts (mirrors the harness-reconciliation write). The task is the ORIGINAL (no injected secret env) with only <see cref="AgentTask.Model"/> set — but it is the OPENED task, so it is re-sealed exactly as the store first persisted it: written back raw, the workflow secrets it embeds would land in task_jsonb again.</summary>
+    private Task PersistResolvedModelAsync(AgentRunOwnerToken owner, AgentTask taskWithModel, CancellationToken cancellationToken) => PersistRuntimeIdentityAsync(owner, null, AgentTaskSecrets.Seal(taskWithModel, _sealer), cancellationToken);
 
-    private async Task PersistRuntimeIdentityAsync(AgentRunOwnerToken owner, string? harness, string? taskJson, CancellationToken cancellationToken)
+    /// <summary>The masked task and its sealed copy move together; a harness-only write (null task) leaves both untouched.</summary>
+    private async Task PersistRuntimeIdentityAsync(AgentRunOwnerToken owner, string? harness, Messages.Workflows.SealedPayload? task, CancellationToken cancellationToken)
     {
-        var changed = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {owner.RunId} FOR UPDATE) UPDATE agent_run AS target SET harness = COALESCE({harness}, target.harness), task_jsonb = COALESCE(CAST({taskJson} AS jsonb), target.task_jsonb) FROM locked WHERE target.id = locked.id AND target.status = 'Running' AND target.owner_id = {owner.OwnerId} AND target.fence_epoch = {owner.Epoch} AND target.lease_expires_at > clock_timestamp()", cancellationToken).ConfigureAwait(false);
+        var taskJson = task?.PublicJson;
+        var ciphertext = task?.Ciphertext;
+        var changed = await _db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM agent_run WHERE id = {owner.RunId} FOR UPDATE) UPDATE agent_run AS target SET harness = COALESCE({harness}, target.harness), task_jsonb = COALESCE(CAST({taskJson} AS jsonb), target.task_jsonb), sealed_task_ciphertext = CASE WHEN CAST({taskJson} AS text) IS NULL THEN target.sealed_task_ciphertext ELSE CAST({ciphertext} AS text) END FROM locked WHERE target.id = locked.id AND target.status = 'Running' AND target.owner_id = {owner.OwnerId} AND target.fence_epoch = {owner.Epoch} AND target.lease_expires_at > clock_timestamp()", cancellationToken).ConfigureAwait(false);
         if (changed != 1) throw new AgentRunOwnershipLostException(owner.RunId);
     }
 
@@ -5094,7 +5151,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// </summary>
     private async Task<bool> FoldAndLandLostModelAccessAsync(AgentRunOwnerToken owner, AgentRun run, ISandboxDurableRunner durable, SandboxHandle handle, DateTimeOffset deadline, CancellationToken cancellationToken)
     {
-        var task = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options) ?? throw new InvalidOperationException($"AgentRun {owner.RunId} has an empty task envelope.");
+        var task = AgentTaskSecrets.Open(run, _sealer) ?? throw new InvalidOperationException($"AgentRun {owner.RunId} has an empty task envelope.");
         var harness = _harnesses.Resolve((await _harnessReconciler.ReconcileAsync(task, run.TeamId, cancellationToken).ConfigureAwait(false)).HarnessKind);
 
         var folded = await ReattachAndFoldAsync(new ReattachFoldContext { Owner = owner, TeamId = run.TeamId, ActorId = run.CreatedBy, Durable = durable, Handle = handle, Task = task, Harness = harness }, cancellationToken).ConfigureAwait(false);

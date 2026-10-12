@@ -70,6 +70,7 @@ public sealed class RunStarter : IRunStarter, IScopedDependency
             ActorType = envelope.ActorType,
             ActorId = envelope.ActorId,
             NormalizedPayloadJson = envelope.NormalizedPayloadJson,
+            SealedPayloadCiphertext = envelope.SealedPayloadCiphertext,
             Status = WorkflowRunRequestStatus.Consumed,
             ReceivedAt = now,
             VerifiedAt = now,

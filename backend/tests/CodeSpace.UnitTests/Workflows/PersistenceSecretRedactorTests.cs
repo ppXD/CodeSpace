@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Workflows.Runtime;
 
 namespace CodeSpace.UnitTests.Workflows;
 
+[Trait("Category", "Unit")]
 public sealed class PersistenceSecretRedactorTests
 {
     [Fact]
@@ -42,5 +43,39 @@ public sealed class PersistenceSecretRedactorTests
         Assert.False(result.Changed);
         Assert.Equal(original.GetRawText(), result.Value["result"].GetRawText());
         Assert.Equal("{\"value\":\"public\"}", values["result"].GetRawText());
+    }
+
+    [Fact]
+    public void FoundIn_NamesExactlyTheSecretsRedactWouldMask()
+    {
+        var subject = new PersistenceSecretRedactor(["token-123", "42", "absent-secret", "key-x"]);
+        var value = JsonSerializer.SerializeToElement(new Dictionary<string, object>
+        {
+            ["note"] = "prefix token-123 suffix",
+            ["key-x-name"] = 420,
+            ["count"] = 42,
+        });
+
+        var found = subject.FoundIn(value);
+
+        Assert.Equal(["42", "key-x", "token-123"], found.OrderBy(secret => secret, StringComparer.Ordinal).ToArray());
+        Assert.True(subject.Redact(value).Changed);
+        Assert.Empty(new PersistenceSecretRedactor(["42"]).FoundIn(JsonSerializer.SerializeToElement(new { count = 420 })));
+    }
+
+    [Fact]
+    public void FromScope_MasksValuesTheRunInheritedAsWellAsItsOwn()
+    {
+        var scope = new NodeRunScope
+        {
+            Trigger = new Dictionary<string, JsonElement>(),
+            Team = new Dictionary<string, JsonElement> { ["OWN"] = JsonSerializer.SerializeToElement("own-team-secret") },
+            SecretPaths = new HashSet<string> { "team.OWN", "trigger.token" },
+            InheritedSecretValues = ["inherited-parent-wf-secret"],
+        };
+
+        var redacted = PersistenceSecretRedactor.FromScope(scope).Redact("own-team-secret and inherited-parent-wf-secret");
+
+        Assert.Equal("[REDACTED] and [REDACTED]", redacted.Value);
     }
 }

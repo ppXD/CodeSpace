@@ -10,6 +10,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Workflows;
+using CodeSpace.Messages.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -223,7 +224,7 @@ public class SubworkflowFlowTests
             var deepest = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == deepestId);
 
             await Should.ThrowAsync<SubworkflowStartException>(
-                async () => await svc.StageChildRunAsync(deepest, workflowId, null, "{}", CancellationToken.None));
+                async () => await svc.StageChildRunAsync(deepest, workflowId, null, new SealedPayload("{}", null), CancellationToken.None));
         }
     }
 
@@ -257,7 +258,7 @@ public class SubworkflowFlowTests
             var deepest = await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == deepestId);
 
             // No throw: every ancestor hop is rerun lineage, so the nesting depth stays 0 and the child stages fine.
-            var childRunId = await svc.StageChildRunAsync(deepest, workflowId, null, "{}", CancellationToken.None);
+            var childRunId = await svc.StageChildRunAsync(deepest, workflowId, null, new SealedPayload("{}", null), CancellationToken.None);
             childRunId.ShouldNotBe(Guid.Empty, "a deep rerun-lineage chain stages a child fine — rerun hops are NOT nesting levels");
         }
     }
