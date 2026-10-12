@@ -168,13 +168,70 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
     /// </summary>
     public const string NoProjectDocOverride = "project_doc_max_bytes=0";
 
-    /// <summary>A task that loads no repository instructions (<see cref="AgentTask.ExcludeRepositoryInstructions"/> — an output reviewer, whose cwd is the branch under review) gets <see cref="NoProjectDocOverride"/>, so the reviewed agent's own <c>AGENTS.md</c> never instructs its reviewer; every other task is byte-identical.</summary>
+    /// <summary>
+    /// The <c>-c</c> override that loads none of the skills the CLI bundles. The pinned 0.142.2 installs five of its own
+    /// under <c>CODEX_HOME/skills/.system</c> on every start (a skill installer that fetches from GitHub, a skill creator,
+    /// a plugin creator, OpenAI docs and image generation) and lists them to the model. None is a platform skill, and each
+    /// was reachable from the goal: a <c>$name</c> anywhere in it, glued to a word, after a backslash or as
+    /// <c>[$name](path)</c>, makes the CLI read that <c>SKILL.md</c> into the turn before the model acts. A goal carries
+    /// text the platform does not author: a webhook body, a fork's pull request, another model's output. The scan cannot be
+    /// avoided: <c>exec</c> hands its prompt over as one text input, the CLI scans every text input, and no setting turns
+    /// the scan off. What it can resolve can be narrowed, and this narrows it to skills the run was given. With it the CLI
+    /// lists none of its own and removes the <c>.system</c> cache from the run's config home, on <c>exec</c> and
+    /// <c>exec resume</c> alike (<c>GoalChannelE2ETests.CodexSkills</c>, measured against 0.142.2 and 0.147.0). The
+    /// persona's skills, projected under <see cref="SkillsRoot"/>, still load and still resolve a mention. So do the
+    /// repository's own, under its <c>.agents/skills</c> and <c>.codex/skills</c>, on every run that loads its
+    /// <c>AGENTS.md</c>; a run that loads neither switches them off one by one (<see cref="AppendRepositorySkillExclusion"/>).
+    /// Pinned by a test (Rule 8): the key is the CLI's, and a key the CLI does not know is ignored.
+    /// </summary>
+    public const string NoBundledSkillsOverride = "skills.bundled.enabled=false";
+
+    /// <summary>
+    /// The config key Codex reads its per-skill rules from: a list of <c>{path=…,enabled=false}</c> entries, each switching
+    /// off the skill whose <c>SKILL.md</c> resolves to that path. The CLI reads the list from the user and session-flag
+    /// layers only, so a checkout's own config cannot add to it or undo it. Pinned by a test (Rule 8): the key is the
+    /// CLI's, and a key the CLI does not know is ignored.
+    /// </summary>
+    public const string SkillRulesKey = "skills.config";
+
+    /// <summary>Every run gets <see cref="NoBundledSkillsOverride"/>, so a goal can name only the skills the platform and the repository put in front of the model.</summary>
+    private static void AppendBundledSkillExclusion(List<string> args)
+    {
+        args.Add("-c");
+        args.Add(NoBundledSkillsOverride);
+    }
+
+    /// <summary>A task that loads no repository instructions (<see cref="AgentTask.ExcludeRepositoryInstructions"/> — an output reviewer, whose cwd is the branch under review) gets <see cref="NoProjectDocOverride"/>, so the reviewed agent's own <c>AGENTS.md</c> never instructs its reviewer, and none of the checkout's skills (<see cref="AppendRepositorySkillExclusion"/>); every other task is byte-identical.</summary>
     private static void AppendRepositoryInstructionExclusion(List<string> args, AgentTask task)
     {
         if (!task.ExcludeRepositoryInstructions) return;
 
         args.Add("-c");
         args.Add(NoProjectDocOverride);
+
+        AppendRepositorySkillExclusion(args, task.WorkspaceDirectory);
+    }
+
+    /// <summary>
+    /// Switch off every skill the reviewed checkout holds, each by its path. The pinned 0.142.2 lists a checkout's skills
+    /// to the model and injects one into the turn wherever the goal names it, and a reviewer's goal holds the producer's
+    /// goal and the names of the files the producer changed: <c>notes/$approve-all.md</c> in that list put a skill the
+    /// reviewed party wrote in front of its own reviewer, as a user message, before the model acted. No setting stops the
+    /// CLI reading a checkout's skills, and only a rule per skill switches one off. A path rule, not a name rule, because a
+    /// name rule would also switch off a persona skill of the same name, which a checkout could otherwise use to take a
+    /// reviewer's persona skill away (<see cref="CodexRepositorySkills"/>, <c>GoalChannelE2ETests.CodexSkills</c>). A
+    /// checkout with no skills adds nothing.
+    /// </summary>
+    private static void AppendRepositorySkillExclusion(List<string> args, string? workspace)
+    {
+        if (string.IsNullOrWhiteSpace(workspace)) return;
+
+        var skills = CodexRepositorySkills.In(workspace);
+
+        if (skills.Count == 0) return;
+
+        args.Add("-c");
+        args.Add($"{SkillRulesKey}=[{string.Join(',', skills.Select(skill => $"{{path={McpDeclarationWriter.TomlString(skill)},enabled=false}}"))}]");
     }
 
     public SandboxSpec BuildInvocation(AgentTask task)
@@ -212,6 +269,7 @@ public sealed class CodexHarness : IAgentHarness, IAgentHarnessBinary, IAgentHar
         AppendTelemetryConfig(args, task);
         AppendWorkspaceDistrust(args, task);
         AppendRepositoryInstructionExclusion(args, task);
+        AppendBundledSkillExclusion(args);
 
         // P3.3: Codex's default hook trust-review flow requires an interactive decision before a NON-managed command
         // hook may run — a freshly generated per-run hook has no persisted trust record, and there is no human at a

@@ -145,6 +145,9 @@ public static class FailureCodes
     /// <summary>The invocation itself is unexecutable: one of its argv/environment strings is past the kernel's per-string ceiling, so <c>execve</c> would refuse it with E2BIG. Distinct from <see cref="NativeLaunchUnavailable"/>, which is about the SLOT and can be retried elsewhere — every host refuses these same bytes, so a retry is N identical refusals. Remedy: shorten the text, or hand it to the agent as a file.</summary>
     public const string SandboxArgumentTooLong = "sandbox_argument_too_long";
 
+    /// <summary>A Codex run that loads no repository instructions (an output reviewer) was refused before it started, because a skill folder of its checkout holds more directories than the Codex CLI reads under one root. Past that limit which skills the CLI loads depends on the order it reads them in, so the harness cannot switch every one off. Every attempt over the same checkout is refused alike. Remedy: none on this run; an output review falls back to the model critic, which loads no skill.</summary>
+    public const string CodexSkillScanTruncated = "codex_skill_scan_truncated";
+
     /// <summary>This host cannot reserve a filtered-egress run's own /30 subnet, so the run is refused rather than handed one nothing reserved. Remedy: make the reservation directory under the agent-run spool root writable by the worker — a retry on the same host cannot help.</summary>
     public const string SandboxEgressReservationUnavailable = "sandbox_egress_reservation_unavailable";
 

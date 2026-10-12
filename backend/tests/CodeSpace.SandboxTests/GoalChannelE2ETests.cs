@@ -36,7 +36,7 @@ namespace CodeSpace.SandboxTests;
 /// <see cref="ReviewerReadsItsDiffE2ETests"/>; each arm that ran prints <see cref="RanMarker"/>, which the lanes require.</para>
 /// </summary>
 [Trait("Category", "Sandbox")]
-public sealed class GoalChannelE2ETests(ITestOutputHelper output) : IDisposable
+public sealed partial class GoalChannelE2ETests(ITestOutputHelper output) : IDisposable
 {
     /// <summary>Printed by every arm that actually ran; the sandbox lanes require one per arm in the test output.</summary>
     public const string RanMarker = "[goal-channel-e2e] ran";
