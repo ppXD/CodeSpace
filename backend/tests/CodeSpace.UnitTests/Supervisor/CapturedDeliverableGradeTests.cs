@@ -160,6 +160,43 @@ public class CapturedDeliverableGradeTests
         oracle.SeenFiles.ShouldNotBeEmpty("whichever of the pair landed first is still graded");
     }
 
+    [Fact]
+    public async Task A_captured_grade_masks_the_producers_secrets_in_everything_it_keeps()
+    {
+        // F1 residual: the supervisor's repo-less lane graded a unit with no secrets at all, so a model-authored
+        // acceptance that resolved one — or an oracle that quoted it back — kept it in the evidence artifact a Viewer
+        // downloads, its tail and the detail on the decision tape.
+        // MUTATION this pins: drop WorkflowSecrets from the captured lane's WorkspaceGradeRequest → the stored evidence
+        // carries the canary → red.
+        const string secret = "CANARY-G2-captured-9e8d7c6b";
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var (grader, _, store) = New(new BenchmarkGrade { Passed = false, Detail = $"missing: report.md (looked with {secret})", EvidenceText = $"$ check {secret}\nnot found" }, Row(runId, teamId, "notes.md", "# notes\n"));
+
+        var grade = await grader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = runId, TeamId = teamId, Spec = Spec("report.md"), TimeoutSeconds = 60, Posture = null, WorkflowSecrets = [secret] }, CancellationToken.None);
+
+        store.PutTexts.ShouldHaveSingleItem("the evidence is stored as a team artifact").ShouldNotContain(secret);
+        grade.Detail.ShouldNotContain(secret);
+        (grade.EvidenceTail ?? "").ShouldNotContain(secret);
+    }
+
+    [Fact]
+    public async Task A_captured_grade_whose_rebuild_faulted_masks_the_quoted_fault()
+    {
+        // MUTATION this pins: return the captured lane's grade without MaskedGrade → the `grade-error:` arm quotes the
+        // exception verbatim → red.
+        const string secret = "CANARY-G2-captured-fault-1a2b3c";
+        var runId = Guid.NewGuid();
+        var teamId = Guid.NewGuid();
+        var (grader, oracle, _) = New(new BenchmarkGrade { Passed = true, Detail = "unused" }, Row(runId, teamId, "report.md", "# r\n"));
+        oracle.Throw = new InvalidOperationException($"judge refused: token {secret} expired");
+
+        var grade = await grader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = runId, TeamId = teamId, Spec = Spec("report.md"), TimeoutSeconds = 60, Posture = null, WorkflowSecrets = [secret] }, CancellationToken.None);
+
+        grade.Detail.ShouldStartWith("grade-error: ");
+        grade.Detail.ShouldNotContain(secret);
+    }
+
     // ─── Fixtures ───
 
     private static SupervisorAcceptanceSpec Spec(params string[] paths) =>
@@ -217,7 +254,14 @@ public class CapturedDeliverableGradeTests
                 ? new ArtifactBytes { Id = artifactId, Sha256 = "", ContentType = "text/plain", Bytes = bytes }
                 : null);
 
-        public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken) => Task.FromResult(Guid.NewGuid());
+        public List<string> PutTexts { get; } = new();
+
+        public Task<Guid> PutAsync(Guid teamId, ReadOnlyMemory<byte> bytes, string contentType, CancellationToken cancellationToken)
+        {
+            PutTexts.Add(Encoding.UTF8.GetString(bytes.Span));
+            return Task.FromResult(Guid.NewGuid());
+        }
+
         public Task<ArtifactMetadata?> GetMetadataAsync(Guid teamId, Guid artifactId, CancellationToken cancellationToken) => throw new NotSupportedException();
     }
 

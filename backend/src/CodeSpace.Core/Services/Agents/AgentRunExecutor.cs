@@ -203,6 +203,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private Task<Messages.Agents.SessionTranscriptCheckpoint?> _sessionCheckpoint = Task.FromResult<Messages.Agents.SessionTranscriptCheckpoint?>(null);
     private DateTimeOffset? _sessionCheckpointAttemptedAt;
     private readonly SessionCheckpointWatermark _sessionCheckpointWatermark = new();
+    // The session the last capture read, EXACTLY as the agent wrote it, for the one reader that may have it: a WARM
+    // revise round, which continues that conversation in this process and whose goal only says "continue" — so a secret
+    // the original goal carried is in the conversation and nowhere else. The result carries the masked copy, because
+    // everything that reads a result keeps it (result_jsonb, its offload, the resume payload); this never leaves the
+    // process. Paired with the run it was read for and the masked copy it stands behind, so no other run, and no round
+    // whose own capture kept nothing, is ever handed it.
+    private CapturedConversation? _capturedConversation;
     // The launch this pass last got onto the row — cleared the moment another launch begins, set once its handle write
     // lands. A cancel's kill of the recorded handle proves the clone empty only while the two agree (see
     // StopCancelledAttemptAsync): mid-launch, the row still names the previous round's finished process while a new
@@ -579,7 +586,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // leaves this promise Intended; recovery marks it INDETERMINATE — visible, never a silent Succeeded.
             await _captureIntents.OpenAsync(agentRunId, run.TeamId, run.WorkflowRunId, claimedEpoch, CaptureExpectationsOf(effectiveTask), cancellationToken).ConfigureAwait(false);
 
-            result = await VerifyProducedWorkAsync(new(owner, run, harness, contract, workspace) { AcceptanceContext = localAcceptance }, result, cancellationToken).ConfigureAwait(false);
+            result = await VerifyProducedWorkAsync(new(owner, run, harness, contract, workspace) { AcceptanceContext = localAcceptance, Redactor = redactor }, result, cancellationToken).ConfigureAwait(false);
 
             // S6: the bounded REVISE loop — when the objective oracle failed on something the agent can fix, or the
             // Improve-mode critic flagged the output, feed the failure detail back to the SAME agent (same workspace;
@@ -612,7 +619,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
                 await AppendReviseEventAsync(owner, reason, round, reviseBudget, cancellationToken).ConfigureAwait(false);
 
-                var reviseTask = BuildReviseTask(effectiveTask, result, reason) with { Model = dispatchedModel };
+                var reviseTask = BuildReviseTask(effectiveTask, result, reason, conversation: ConversationBehind(agentRunId, result)) with { Model = dispatchedModel };
 
                 // D3: the round that just failed IS the evidence. When it says the model was the limit — an
                 // over-claim, or a check that failed on real work, never a grader / environment / gateway fault —
@@ -698,7 +705,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 // Verify under the ORIGINAL goal: the composed REVISE goal is for the harness invocation only — the
                 // output critic must judge goal-alignment against what the task actually asked for, not the feedback
                 // wrapper (which quotes the failure and could bias or blind the reviewer).
-                result = await VerifyProducedWorkAsync(new(owner, run, harness, reviseTask with { Goal = contract.Goal }, workspace) { AcceptanceContext = localAcceptance }, result, cancellationToken).ConfigureAwait(false);
+                result = await VerifyProducedWorkAsync(new(owner, run, harness, reviseTask with { Goal = contract.Goal }, workspace) { AcceptanceContext = localAcceptance, Redactor = redactor }, result, cancellationToken).ConfigureAwait(false);
 
                 priorReason = reason;
             }
@@ -1125,7 +1132,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             sandbox = await capture.ObserveAsync((capturedHandle, token) =>
             {
                 var replayHandle = capturedHandle with { StdoutOffset = Math.Min(capturedHandle.StdoutOffset, native.ReplayStartOffset) };
-                return context.Durable.AttachAsync(replayHandle, (frame, _) => PersistFrameAsync(frame), token, CheckpointHandleOffset(context.Owner, capturedHandle, new HarnessSinks(writer, native, CheckpointTickFor(context.Task, context.TeamId, context.Harness, context.Task.WorkspaceDirectory, facts))));
+                return context.Durable.AttachAsync(replayHandle, (frame, _) => PersistFrameAsync(frame), token, CheckpointHandleOffset(context.Owner, capturedHandle, new HarnessSinks(writer, native, CheckpointTickFor(context.Task, new SessionCheckpointTick(context.TeamId, context.Harness, context.Task.WorkspaceDirectory, facts, redactor)))));
             }, cancellationToken).ConfigureAwait(false);
         }
         finally
@@ -1152,7 +1159,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         // Capture the resumable session transcript here too — a run that completes via durable re-attach (worker restart
         // mid-run) is exactly the durability case continuity serves; the config home still lives under the handle's spool.
-        return await CaptureSessionTranscriptAsync(new SessionCapture(context.RunId, context.Task, context.Harness, capture.Handle), result, cancellationToken).ConfigureAwait(false);
+        return await CaptureSessionTranscriptAsync(new SessionCapture(context.RunId, context.Task, context.Harness, capture.Handle, redactor), result, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -1697,7 +1704,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             }
 
             using var reader = new StreamReader(stream);
-            var transcript = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            var conversation = await reader.ReadToEndAsync(cancellationToken).ConfigureAwait(false);
+            var transcript = SessionTranscriptRedaction.Redact(conversation, capture.Redactor);
+
+            _capturedConversation = new CapturedConversation(capture.RunId, transcript, conversation);
 
             return BackfillTranscriptModel(result, capture.Harness) with { SessionTranscript = transcript };
 
@@ -1717,8 +1727,15 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         }
     }
 
-    /// <summary>The coordinates one session capture needs, as a record rather than a parameter list: which run owns it, the task whose workspace directory keys the harness's session path, the harness that locates the file, and the durable handle whose spool holds the config home (null on the live path, which re-reads the handle recorded at launch).</summary>
-    internal sealed record SessionCapture(Guid RunId, AgentTask Task, IAgentHarness Harness, SandboxHandle? Handle);
+    /// <summary>A captured session as it is kept (masked) and as the agent wrote it (exact), with the run it was read for — see <see cref="_capturedConversation"/>.</summary>
+    private sealed record CapturedConversation(Guid RunId, string Kept, string Exact);
+
+    /// <summary>The session behind <paramref name="result"/>'s kept transcript exactly as the agent wrote it, when this executor captured it for this run; null otherwise.</summary>
+    private string? ConversationBehind(Guid runId, AgentRunResult result) =>
+        _capturedConversation is { } captured && captured.RunId == runId && string.Equals(captured.Kept, result.SessionTranscript, StringComparison.Ordinal) ? captured.Exact : null;
+
+    /// <summary>The coordinates one session capture needs, as a record rather than a parameter list: which run owns it, the task whose workspace directory keys the harness's session path, the harness that locates the file, the durable handle whose spool holds the config home (null on the live path, which re-reads the handle recorded at launch), and the run's redactor, which masks the file before it is kept.</summary>
+    internal sealed record SessionCapture(Guid RunId, AgentTask Task, IAgentHarness Harness, SandboxHandle? Handle, SecretRedactor Redactor);
 
     /// <summary>
     /// P3 (3.2c): resolve a REFERENCED restored transcript (the producer stamped <c>RestoredTranscriptArtifactId</c> to
@@ -2348,7 +2365,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         var runId = owner.RunId;
         var claimedEpoch = owner.Epoch;
         await _runs.AssertOwnershipAsync(owner, cancellationToken).ConfigureAwait(false);
-        result = await CaptureSessionTranscriptAsync(new SessionCapture(runId, task, harness, Handle: null), result, cancellationToken).ConfigureAwait(false);
+        result = await CaptureSessionTranscriptAsync(new SessionCapture(runId, task, harness, Handle: null, context.Redactor), result, cancellationToken).ConfigureAwait(false);
 
         result = await EnrichWithWorkspaceChangesAsync(new(owner, run.TeamId, task, workspace), result, cancellationToken).ConfigureAwait(false);
 
@@ -2794,8 +2811,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// home, so the instruction is just the delta. COLD otherwise: a fresh conversation in the same workspace, so the
     /// instruction restates the original goal too. Any ancestor continue-resume riding the task is superseded by THIS
     /// run's own session; a stale offloaded-transcript ref is dropped with it.
+    ///
+    /// <para>A warm round restores <paramref name="conversation"/> — the session behind the result's kept transcript as
+    /// the agent wrote it — when the caller has it: the kept copy is masked for storage, and the warm goal does not
+    /// restate the original one, so a secret that goal carried is in the conversation and nowhere else. This task is the
+    /// round's invocation only; it is never the envelope written back to task_jsonb.</para>
     /// </summary>
-    internal static AgentTask BuildReviseTask(AgentTask task, AgentRunResult result, string reason, bool mayResume = true)
+    internal static AgentTask BuildReviseTask(AgentTask task, AgentRunResult result, string reason, bool mayResume = true, string? conversation = null)
     {
         // mayResume is false when the warm round would not fit the launch pipe: the same repair goes on cold, and the
         // cold goal restates the contract no conversation now holds.
@@ -2807,7 +2829,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         {
             Goal = ComposeReviseGoal(task.Goal, diagnosis, warm),
             ResumeFromSessionId = warm ? result.SessionId : null,
-            RestoredTranscript = warm ? result.SessionTranscript : null,
+            RestoredTranscript = warm ? conversation ?? result.SessionTranscript : null,
             RestoredTranscriptArtifactId = null,
         };
     }
@@ -4540,7 +4562,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         SandboxResult sandbox;
         try
         {
-            sandbox = await RunSandboxAsync(context, PersistLineAsync, PersistFrameAsync, new HarnessSinks(writer, native, CheckpointTickFor(context.Task, context.TeamId, context.Harness, context.Spec.WorkingDirectory, facts)), cancellationToken).ConfigureAwait(false);
+            sandbox = await RunSandboxAsync(context, PersistLineAsync, PersistFrameAsync, new HarnessSinks(writer, native, CheckpointTickFor(context.Task, new SessionCheckpointTick(context.TeamId, context.Harness, context.Spec.WorkingDirectory, facts, context.Redactor))), cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -5882,7 +5904,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             return;
         }
 
-        var request = new Recovery.SessionTranscriptCheckpointRequest(tick.TeamId, owner, path, sessionId, _sessionCheckpointWatermark.Begin(path));
+        var request = new Recovery.SessionTranscriptCheckpointRequest(tick.TeamId, owner, path, sessionId, _sessionCheckpointWatermark.Begin(path)) { Redactor = tick.Redactor };
 
         _sessionCheckpoint = Task.Run(() => CheckpointInOwnScopeAsync(request), CancellationToken.None);
     }
@@ -6121,6 +6143,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     private sealed record ProducedWorkContext(AgentRunOwnerToken Owner, AgentRun Run, IAgentHarness Harness, AgentTask Task, IWorkspaceHandle? Workspace)
     {
         public LocalAcceptanceContext? AcceptanceContext { get; init; }
+
+        /// <summary>The run's redactor — every secret the launch handed the agent — which masks what the chain keeps of the agent's own files (its session transcript) before it is stored.</summary>
+        public required SecretRedactor Redactor { get; init; }
     }
     internal sealed record AcceptanceInvocation(AgentRun Run, AgentTask Task, IWorkspaceHandle? Workspace, AgentRunOwnerToken? Owner = null, LocalAcceptanceContext? LocalContext = null);
     private sealed record WorkspaceCaptureContext(AgentRunOwnerToken Owner, Guid TeamId, AgentTask Task, IWorkspaceHandle? Workspace);
@@ -6152,8 +6177,12 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// checkpoint, so the lifecycle line carrying the id is usually behind the replay head and its fresh facts never
     /// see one. The launch's own last checkpoint then stands, which is the right answer — it is the newest
     /// conversation anyone can prove.</para>
+    ///
+    /// <para><paramref name="Redactor"/> is the run's own — the same secrets that mask its events — because a checkpoint
+    /// is the agent's own file, and an agent that echoed its key or a workflow secret into a tool result has it there
+    /// too. The checkpoint is a team artifact a retry restores; it is masked before it is stored.</para>
     /// </summary>
-    private sealed record SessionCheckpointTick(Guid TeamId, IAgentHarness Harness, string? WorkingDirectory, AgentRunFacts Facts);
+    private sealed record SessionCheckpointTick(Guid TeamId, IAgentHarness Harness, string? WorkingDirectory, AgentRunFacts Facts, SecretRedactor Redactor);
 
     /// <summary>
     /// The checkpoint coordinates for a run whose envelope OPTED IN, else null — the one place the opt-in is read, so
@@ -6161,8 +6190,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// attempt nobody can retry writes nothing, which is what keeps the artifact store free of a per-minute
     /// transcript copy for every benchmark cell, review child and supervisor unit that no retry could resume.
     /// </summary>
-    private static SessionCheckpointTick? CheckpointTickFor(AgentTask task, Guid teamId, IAgentHarness harness, string? workingDirectory, AgentRunFacts facts) =>
-        task.CheckpointSessionTranscript ? new SessionCheckpointTick(teamId, harness, workingDirectory, facts) : null;
+    private static SessionCheckpointTick? CheckpointTickFor(AgentTask task, SessionCheckpointTick tick) =>
+        task.CheckpointSessionTranscript ? tick : null;
 
     private sealed record HarnessRunContext
     {

@@ -67,19 +67,21 @@ public sealed partial class LocalProcessRunner
     public static string ConfigHomePath(string spoolDirectory) => Path.Combine(spoolDirectory, AgentConfigHomeDir);
 
     /// <summary>
-    /// Create the per-run config-home restricted to the owner (0700) — the same treatment the non-durable command path
-    /// already gives its own config home. It holds the MCP declaration, which carries the run's live capability token,
-    /// so leaving it at whatever the umask happened to be made that token readable to every other local user on the
-    /// host. A no-op without a config home, and on Windows where unix modes don't apply.
+    /// Create a per-run directory restricted to the owner (0700), or narrow it to that when it already exists. Two
+    /// callers, both holding a secret at rest. The SPOOL holds <c>out.log</c>/<c>err.log</c>, the agent's output BEFORE
+    /// redaction — an echoed key, a broker token, a workflow secret in a tool result. The CONFIG HOME (the same treatment
+    /// the non-durable command path already gives its own) holds the MCP declaration, which carries the run's live
+    /// capability token. Left at whatever the umask happened to be, either was readable to every other local user on the
+    /// host. A no-op without a directory, and on Windows where unix modes don't apply.
     /// </summary>
-    private static void CreateOwnerOnlyConfigHome(string? configHome)
+    private static void CreateOwnerOnlyDirectory(string? directory)
     {
-        if (configHome is null) return;
+        if (directory is null) return;
 
-        Directory.CreateDirectory(configHome);
+        Directory.CreateDirectory(directory);
 
         if (!OperatingSystem.IsWindows())
-            File.SetUnixFileMode(configHome, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+            File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
     }
 
     /// <summary>
@@ -171,8 +173,13 @@ public sealed partial class LocalProcessRunner
     /// <c>/bin/sh</c> on macOS and RHEL), so the block size is chosen from <c>$BASH_VERSION</c> and the enforced
     /// ceiling is the SAME byte count on every host. prlimit cannot do this job at all: it wraps only the agent chain
     /// inside <c>"$@"</c>, never this supervisor, and RLIMIT_FSIZE does not apply to pipe writes.</para>
+    ///
+    /// <para>The spool files a copier writes are the agent's output BEFORE redaction, so each copier sets
+    /// <c>umask 077</c> and creates them owner-only (0600), and the FIFOs feeding them are made 0600 too. The umask is
+    /// the copier's own: each runs as a background subshell, so the agent in <c>"$@"</c> keeps the worker's umask for
+    /// every file it writes.</para>
     /// </summary>
-    internal const string SupervisorScript = "pid_path=\"$CSP_PID\"; out_path=\"$CSP_OUT\"; err_path=\"$CSP_ERR\"; exit_path=\"$CSP_EXIT\"; copy_status_path=\"$CSP_LOG_COPY_STATUS\"; max_bytes=\"${CSP_MAX_BYTES:-0}\"; in_path=\"${CSP_IN:-/dev/null}\"; unset CSP_PID CSP_OUT CSP_ERR CSP_EXIT CSP_LOG_COPY_STATUS CSP_MAX_BYTES CSP_IN; spool_block=512; [ -n \"$BASH_VERSION\" ] && spool_block=1024; copy_spool() { if [ \"$max_bytes\" -le 0 ]; then cat >\"$1\"; return 0; fi; ulimit -c 0; ulimit -f $((max_bytes/spool_block)) 2>/dev/null; { cat >\"$1\"; } 2>/dev/null; copy_status=$?; if [ \"$copy_status\" -eq 153 ]; then : >\"$1.truncated\"; copy_status=0; fi; cat >/dev/null; return \"$copy_status\"; }; printf '%s' \"$$\" >\"$pid_path\"; out_pipe=\"${out_path}.pipe\"; err_pipe=\"${err_path}.pipe\"; rm -f \"$out_pipe\" \"$err_pipe\"; mkfifo \"$out_pipe\" \"$err_pipe\" || exit 125; copy_spool \"$out_path\" <\"$out_pipe\" & out_cat=$!; copy_spool \"$err_path\" <\"$err_pipe\" & err_cat=$!; \"$@\" >\"$out_pipe\" 2>\"$err_pipe\" <\"$in_path\"; code=$?; wait \"$out_cat\"; out_status=$?; wait \"$err_cat\"; err_status=$?; rm -f \"$out_pipe\" \"$err_pipe\"; printf '%s' \"$code\" >\"$exit_path\"; printf '%s:%s' \"$out_status\" \"$err_status\" >\"$copy_status_path\"";
+    internal const string SupervisorScript = "pid_path=\"$CSP_PID\"; out_path=\"$CSP_OUT\"; err_path=\"$CSP_ERR\"; exit_path=\"$CSP_EXIT\"; copy_status_path=\"$CSP_LOG_COPY_STATUS\"; max_bytes=\"${CSP_MAX_BYTES:-0}\"; in_path=\"${CSP_IN:-/dev/null}\"; unset CSP_PID CSP_OUT CSP_ERR CSP_EXIT CSP_LOG_COPY_STATUS CSP_MAX_BYTES CSP_IN; spool_block=512; [ -n \"$BASH_VERSION\" ] && spool_block=1024; copy_spool() { umask 077; if [ \"$max_bytes\" -le 0 ]; then cat >\"$1\"; return 0; fi; ulimit -c 0; ulimit -f $((max_bytes/spool_block)) 2>/dev/null; { cat >\"$1\"; } 2>/dev/null; copy_status=$?; if [ \"$copy_status\" -eq 153 ]; then : >\"$1.truncated\"; copy_status=0; fi; cat >/dev/null; return \"$copy_status\"; }; printf '%s' \"$$\" >\"$pid_path\"; out_pipe=\"${out_path}.pipe\"; err_pipe=\"${err_path}.pipe\"; rm -f \"$out_pipe\" \"$err_pipe\"; mkfifo -m 600 \"$out_pipe\" \"$err_pipe\" || exit 125; copy_spool \"$out_path\" <\"$out_pipe\" & out_cat=$!; copy_spool \"$err_path\" <\"$err_pipe\" & err_cat=$!; \"$@\" >\"$out_pipe\" 2>\"$err_pipe\" <\"$in_path\"; code=$?; wait \"$out_cat\"; out_status=$?; wait \"$err_cat\"; err_status=$?; rm -f \"$out_pipe\" \"$err_pipe\"; printf '%s' \"$code\" >\"$exit_path\"; printf '%s:%s' \"$out_status\" \"$err_status\" >\"$copy_status_path\"";
 
     /// <summary>
     /// The per-spool-file byte budget for this run's FIFO copiers: the documented <see cref="SandboxSpec.MaxFileSizeMb"/>
@@ -989,7 +996,7 @@ public sealed partial class LocalProcessRunner
         // sandbox's writable HOME + a writable bind, so compute + create it BEFORE building the command. Created
         // here (before launch) so bwrap's --bind source exists when the process starts.
         var configHome = spec.ConfigHomeEnvVars.Count > 0 ? Path.Combine(spoolDir, AgentConfigHomeDir) : null;
-        CreateOwnerOnlyConfigHome(configHome);
+        CreateOwnerOnlyDirectory(configHome);
 
         // Write the run-scoped MCP server declaration (0600 — it carries the run token) into the config-home BEFORE
         // launch so the harness reads it on start. No-op when the run has no tool fabric (spec.Mcp null) or no

@@ -1,6 +1,7 @@
 using CodeSpace.Core.Services.Agents.Eval.Benchmark;
 using CodeSpace.Core.Services.Agents.Eval.Benchmark.Graders;
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
@@ -82,6 +83,35 @@ public sealed class AcceptanceEvidenceSecretMaskingTests
         SupervisorAcceptanceGrader.MaskedGrade(grade, null).ShouldBeSameAs(grade);
     }
 
+    [Theory]
+    [InlineData("repository", "clone-failed: ")]
+    [InlineData("patch", "clone-failed: ")]
+    [InlineData("base", "clone-failed: ")]
+    [InlineData("repository-fault", "grade-error: ")]
+    public async Task A_grade_that_fails_before_its_check_runs_keeps_its_prefix_with_the_secret_masked(string lane, string prefix)
+    {
+        // The fail-closed arms quote the failure they caught, and that detail is kept: on the result, the supervisor's
+        // decision tape, the Room. Its prefix is what the infra classifier reads, so only the secret may change.
+        // MUTATION this pins: return a lane's grade without MaskedGrade (the shape before this fix, where only the
+        // evidence capture masked) → the canary survives in the detail → red.
+        var failure = $"fatal: could not read from https://ci:{Secret}@git.test/team/repo";
+        var grader = new SupervisorAcceptanceGrader(new FailingResolver(lane.EndsWith("-fault", StringComparison.Ordinal) ? new InvalidOperationException(failure) : new WorkspaceException(failure)), null!, new RecordingRunner(), new BenchmarkGraderRegistry(new IBenchmarkGrader[] { new TestsPassGrader() }), null!, new SupervisorAcceptanceGraderTests.FakeArtifactStore(), null!, NullLogger<SupervisorAcceptanceGrader>.Instance);
+        var spec = new SupervisorAcceptanceSpec { Command = new[] { "make", "test" } };
+        IReadOnlyList<string> secrets = [Secret];
+
+        var grade = lane switch
+        {
+            "patch" => await grader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = Guid.NewGuid(), TeamId = Guid.NewGuid(), BaseSha = "abc123", Spec = spec, TimeoutSeconds = 30, Posture = null, WorkflowSecrets = secrets }, CancellationToken.None),
+            "base" => await grader.GradeBaseAsync(new BaseAcceptanceGradeRequest { RepositoryId = Guid.NewGuid(), TeamId = Guid.NewGuid(), BaseSha = "abc123", Spec = spec, TimeoutSeconds = 30, Posture = null, WorkflowSecrets = secrets }, CancellationToken.None),
+            _ => await grader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = Guid.NewGuid(), TeamId = Guid.NewGuid(), Branch = "agent/x", Spec = spec, TimeoutSeconds = 30, Posture = null, WorkflowSecrets = secrets }, CancellationToken.None),
+        };
+
+        grade.Passed.ShouldBeFalse();
+        grade.Detail.ShouldStartWith(prefix, Case.Sensitive, "the classifier reads the prefix; masking may not move it");
+        grade.Detail.ShouldNotContain(Secret, Case.Sensitive, $"the {lane} lane kept the secret in its detail: {grade.Detail}");
+        grade.Detail.ShouldContain(PersistenceSecretRedactor.Marker);
+    }
+
     private static async Task<BenchmarkGrade> GradeAsync(RecordingRunner runner, SupervisorAcceptanceGraderTests.FakeArtifactStore artifacts, string[] command, string[]? setup, IReadOnlyList<string>? secrets)
     {
         var directory = Directory.CreateTempSubdirectory("cs-grade-mask-").FullName;
@@ -95,6 +125,14 @@ public sealed class AcceptanceEvidenceSecretMaskingTests
             return await grader.GradeDirectoryAsync(new DirectoryAcceptanceGradeRequest { Directory = directory, Spec = spec, TeamId = Guid.NewGuid(), TimeoutSeconds = 30, Posture = null, WorkflowSecrets = secrets }, CancellationToken.None);
         }
         finally { Directory.Delete(directory, recursive: true); }
+    }
+
+    /// <summary>A resolver whose every resolve fails the way a clone does (or with any other fault), quoting the failure.</summary>
+    private sealed class FailingResolver(Exception failure) : IAgentWorkspaceResolver
+    {
+        public Task<WorkspaceProvisionRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken) => throw failure;
+
+        public Task<WorkspaceRequest?> ResolveByRepositoryIdAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken, string? @ref = null, bool softFallback = false, string? pinnedSha = null) => throw failure;
     }
 
     /// <summary>Records every spec it runs; a spec carrying the setup argv answers <see cref="Setup"/>, any other <see cref="Check"/>.</summary>

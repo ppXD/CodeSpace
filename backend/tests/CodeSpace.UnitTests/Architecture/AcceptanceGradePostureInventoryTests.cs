@@ -58,6 +58,20 @@ public sealed class AcceptanceGradePostureInventoryTests
     }
 
     [Fact]
+    public void Every_production_grade_request_names_the_secrets_its_evidence_must_mask()
+    {
+        // The other half of what a grade keeps. An acceptance argv can carry a workflow secret (an operator floor, or
+        // one a model authored from a goal that resolved it), the check runs it exactly, and the grade repeats the argv
+        // and the check's output into a team artifact, its tail and its detail. Only a request that names the
+        // producer's secrets gets them masked — a lane that leaves WorkflowSecrets out stores them in plaintext, and
+        // compiles. The supervisor's nine lanes did, until this was pinned.
+        // MUTATION this pins: drop `WorkflowSecrets = …` from any lane's request → that lane is named here → red.
+        var unmasked = GradeCalls().Where(call => !call.Text.Contains("WorkflowSecrets = ", StringComparison.Ordinal)).Select(call => $"{call.File}:{call.Line}").ToList();
+
+        unmasked.ShouldBeEmpty("these grade requests carry no WorkflowSecrets, so the grader cannot mask a secret their argv or output carries: pass the producing run's (its opened task's AgentTask.WorkflowSecrets, plus the scope secrets the spec carries):\n  " + string.Join("\n  ", unmasked));
+    }
+
+    [Fact]
     public void The_set_of_grade_lanes_is_pinned()
     {
         var found = GradeCalls().GroupBy(call => call.File).ToDictionary(group => group.Key, group => group.Count(), StringComparer.Ordinal);
@@ -114,9 +128,9 @@ public sealed class AcceptanceGradePostureInventoryTests
     }
 
     /// <summary>Every grade call in a production file that holds the acceptance grader, minus the declarations and the local-verifier hand-off. Comment lines are text about a call, not a call.</summary>
-    private static List<(string File, int Line, string Argument)> GradeCalls()
+    private static List<(string File, int Line, string Argument, string Text)> GradeCalls()
     {
-        var calls = new List<(string, int, string)>();
+        var calls = new List<(string, int, string, string)>();
 
         foreach (var file in Directory.EnumerateFiles(Path.Combine(RepositoryRoot(), ScannedRoot), "*.cs", SearchOption.AllDirectories))
         {
@@ -133,7 +147,7 @@ public sealed class AcceptanceGradePostureInventoryTests
 
                 if (line.StartsWith("//", StringComparison.Ordinal) || line.StartsWith('*') || line.Contains(LocalVerifierHandOff, StringComparison.Ordinal)) continue;
 
-                foreach (Match match in GradeCall.Matches(line)) calls.Add((relative, i + 1, match.Groups["argument"].Value.TrimStart()));
+                foreach (Match match in GradeCall.Matches(line)) calls.Add((relative, i + 1, match.Groups["argument"].Value.TrimStart(), line));
             }
         }
 
