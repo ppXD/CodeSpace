@@ -67,6 +67,9 @@ public sealed class RecurringJobWorkerHostFactory : WebApplicationFactory<CodeSp
     /// <summary>The per-run GUID database.</summary>
     public string DatabaseName { get; }
 
+    /// <summary>The started host, so a test can stop it the way a worker pod is stopped — its job servers leave the server table — while the database stays for the test to read.</summary>
+    public IHost? StartedHost { get; private set; }
+
     /// <summary>The per-run database's connection string, so the test can open its OWN Hangfire storage handle onto the rows this host's job servers drain, rather than reading through the process-wide <c>JobStorage.Current</c>.</summary>
     public string ConnectionString => _testConnectionString;
 
@@ -151,6 +154,6 @@ public sealed class RecurringJobWorkerHostFactory : WebApplicationFactory<CodeSp
     {
         builder.UseSerilog(new LoggerConfiguration().MinimumLevel.Warning().MinimumLevel.Override(typeof(LocalProcessRunner).FullName!, LogEventLevel.Information).WriteTo.Sink(_logSink).CreateLogger(), dispose: true);
 
-        return base.CreateHost(builder);
+        return StartedHost = base.CreateHost(builder);
     }
 }

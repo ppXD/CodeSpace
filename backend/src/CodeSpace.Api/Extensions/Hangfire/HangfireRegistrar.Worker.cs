@@ -3,7 +3,7 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Core.Jobs;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
-using CodeSpace.Core.Services.Jobs;
+using CodeSpace.Core.Services.Fleet;
 using Hangfire;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -46,7 +46,7 @@ public class WorkerHangfireRegistrar : HangfireRegistrarBase
         {
             opt.WorkerCount = ControlWorkerCount;
             opt.ServerName = $"codespace-control-{Environment.MachineName}";
-            opt.Queues = new[] { HangfireConstants.DefaultQueue };
+            opt.Queues = ControlQueues;
         });
 
         // Agent pool — the long IAgentRunExecutor jobs. (WorkerCount preserves the prior agent concurrency; tune
@@ -55,9 +55,22 @@ public class WorkerHangfireRegistrar : HangfireRegistrarBase
         {
             opt.WorkerCount = Environment.ProcessorCount * 2;
             opt.ServerName = $"codespace-agents-{Environment.MachineName}";
-            opt.Queues = new[] { HangfireConstants.AgentQueue };
+            opt.Queues = AgentQueues;
         });
+
+        // Heals the recurring entries a previous-version worker's scheduler disables during a rolling deploy.
+        services.AddHostedService<RecurringJobScheduleKeeper>();
     }
+
+    /// <summary>
+    /// Each pool's own queue, then the fleet capability markers this build advertises: queue names nothing is ever
+    /// enqueued to, which the server table carries to every peer so it can tell this build's workers from a previous
+    /// build's (<see cref="FleetCapabilityMarkers"/>). Both pools list them — a server without a marker reads to the
+    /// fleet gate as a previous-version worker.
+    /// </summary>
+    internal static readonly string[] ControlQueues = [HangfireConstants.DefaultQueue, .. FleetCapabilityMarkers.Advertised];
+
+    internal static readonly string[] AgentQueues = [HangfireConstants.AgentQueue, .. FleetCapabilityMarkers.Advertised];
 
     /// <summary>Dedicated control-plane workers — a deliberate small FLOOR (control jobs are short + low-volume + self-drain at the 2s poll interval, so they need little). Raise it if control-plane latency is ever observed under a recovery burst (many simultaneous resumes / reconciler re-dispatches / decision-expiry).</summary>
     private const int ControlWorkerCount = 4;
@@ -84,37 +97,20 @@ public class WorkerHangfireRegistrar : HangfireRegistrarBase
 
     /// <summary>
     /// Resolve every <see cref="IRecurringJob"/> from DI and register each with Hangfire's
-    /// scheduler. The registered call is <c>IJobSafeRunner.Run(jobId, jobType)</c> — Hangfire
-    /// serialises that call; on each tick a fresh lifetime scope resolves the concrete job
+    /// scheduler (<see cref="RecurringJobSchedule"/>). The registered call is <c>IJobSafeRunner.Run(jobId, jobType)</c> —
+    /// Hangfire serialises that call; on each tick a fresh lifetime scope resolves the concrete job
     /// type from DI + invokes <see cref="IJob.Execute"/> with <c>JobId</c> in the log context.
     /// </summary>
     private static void ScanHangfireRecurringJobs(IApplicationBuilder app)
     {
-        var backgroundJobClient = app.ApplicationServices.GetRequiredService<ICodeSpaceBackgroundJobClient>();
+        foreach (var skip in RecurringJobSchedule.Assert(app.ApplicationServices)) LogSkip(skip);
+    }
 
-        var recurringJobTypes = typeof(IRecurringJob).Assembly.GetTypes()
-            .Where(type => type.IsClass && !type.IsAbstract && typeof(IRecurringJob).IsAssignableFrom(type))
-            .ToList();
-
-        foreach (var type in recurringJobTypes)
-        {
-            var job = (IRecurringJob)app.ApplicationServices.GetRequiredService(type);
-
-            // A conditionally-registered job (feature-gated, e.g. a flag-OFF lane's reaper) is skipped ENTIRELY when it
-            // opts out — no recurring entry is created, so flag-OFF is byte-identical (no tick ever fires).
-            if (job is IConditionalRecurringJob { ShouldRegister: false })
-            {
-                Log.Information("Recurring job {Job} skipped — conditional registration is off", job.GetType().FullName);
-                continue;
-            }
-
-            if (string.IsNullOrEmpty(job.CronExpression))
-            {
-                Log.Error("Recurring job cron expression empty, {Job}", job.GetType().FullName);
-                continue;
-            }
-
-            backgroundJobClient.AddOrUpdateRecurringJob<IJobSafeRunner>(job.JobId, r => r.Run(job.JobId, type), job.CronExpression, job.TimeZone);
-        }
+    private static void LogSkip(RecurringJobSkip skip)
+    {
+        if (skip.Reason == RecurringJobSkipReason.ConditionallyOff)
+            Log.Information("Recurring job {Job} skipped — conditional registration is off", skip.JobType.FullName);
+        else
+            Log.Error("Recurring job cron expression empty, {Job}", skip.JobType.FullName);
     }
 }
