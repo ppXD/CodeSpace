@@ -46,9 +46,9 @@ internal static class StorageProfileRules
 
     /// <summary>
     /// The identity of the PHYSICAL namespace a configuration reaches: the provider's own canonical projection of it,
-    /// hashed. The one derivation behind the fingerprint a revision stores and behind the retention reaper's later
-    /// comparison of two revisions' objects (<see cref="TryObjectIdentity"/>), so the two cannot disagree about what
-    /// "the same namespace" means.
+    /// hashed. The derivation behind the retention reaper's comparison of two revisions' objects
+    /// (<see cref="TryObjectIdentity"/>), made at sweep time from each revision's configuration. Not yet what a revision
+    /// stores: see <see cref="StoredNamespaceFingerprint"/>.
     /// </summary>
     public static string NamespaceFingerprint(IStorageProviderModule module, JsonElement nonSecretConfiguration)
     {
@@ -57,6 +57,48 @@ internal static class StorageProfileRules
             throw new InvalidOperationException($"Storage provider '{module.TypeKey}' namespace configuration projection must be a JSON object.");
 
         return NamespaceFingerprint(module.TypeKey, namespaceConfig);
+    }
+
+    /// <summary>
+    /// The fingerprint every build before physical namespaces stored: the hash of the configuration exactly as written,
+    /// which is what their provider modules' default <c>GetNamespaceConfiguration</c> projected. Needs no module, so
+    /// it can be recomputed for any stored revision.
+    /// </summary>
+    public static string LegacyNamespaceFingerprint(string providerTypeKey, JsonElement canonicalConfig)
+    {
+        if (canonicalConfig.ValueKind != JsonValueKind.Object)
+            throw new InvalidOperationException($"Storage provider '{providerTypeKey}' namespace configuration projection must be a JSON object.");
+
+        return NamespaceFingerprint(providerTypeKey, canonicalConfig);
+    }
+
+    /// <summary>
+    /// The fingerprint a NEW revision stores, the one value admission, the agent-run-log bootstrap and the
+    /// deployment-default materializer write.
+    ///
+    /// <para>For this release it is <see cref="LegacyNamespaceFingerprint"/>, not the physical identity. The previous
+    /// build's retention reaper decides whether one object key is one object across teams by comparing these STORED
+    /// values, and a rolling deploy or a rollback runs it over revisions this build admits: a stored physical identity
+    /// would differ from the hash that build stored for the same text, and it would collect another team's live
+    /// bytes. This build never decides on the column (its reaper derives <see cref="NamespaceFingerprint(IStorageProviderModule, JsonElement)"/>
+    /// at sweep time), so the legacy value costs it nothing.</para>
+    ///
+    /// <para>The physical projection is still taken, so a configuration that reaches no namespace is refused exactly
+    /// as before. Switching the stored value to the physical identity is a later release, once no build that reads the
+    /// column can run against this database; that change also deletes the
+    /// <see cref="IStorageNamespaceFingerprintBackfillService"/> pass, which restores this value.</para>
+    ///
+    /// <para>Deleting the pass must also remove its schedule. The worker registrar only adds recurring entries, so a
+    /// deleted job class leaves <c>StorageNamespaceFingerprintBackfillRecurringJob</c> registered, and every ten-minute
+    /// tick then fails to load its type. Remove the entry at worker boot with
+    /// <c>ICodeSpaceBackgroundJobClient.RemoveRecurringJobIfExists("StorageNamespaceFingerprintBackfillRecurringJob")</c>,
+    /// or keep the job class as a no-op for one more release and remove both then.</para>
+    /// </summary>
+    public static string StoredNamespaceFingerprint(IStorageProviderModule module, JsonElement canonicalConfig)
+    {
+        _ = NamespaceFingerprint(module, canonicalConfig);
+
+        return LegacyNamespaceFingerprint(module.TypeKey, canonicalConfig);
     }
 
     /// <summary>

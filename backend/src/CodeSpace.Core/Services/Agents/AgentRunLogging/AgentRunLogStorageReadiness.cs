@@ -74,11 +74,11 @@ public sealed class AgentRunLogStorageReadiness : IAgentRunLogStorageReadiness
         }
     }
 
-    /// <summary>The same derivation admission uses, so this bootstrap's revision names its namespace exactly as a Settings-created one would.</summary>
+    /// <summary>The value admission stores (<see cref="StorageProfileRules.StoredNamespaceFingerprint"/>), so this bootstrap's revision carries exactly what a Settings-created one for the same root would.</summary>
     private string NamespaceFingerprint(string canonicalConfig)
     {
         using var document = JsonDocument.Parse(canonicalConfig);
-        return StorageProfileRules.NamespaceFingerprint(_modules.Require(LocalRwxArtifactStorageDriverFactory.TypeKey), document.RootElement);
+        return StorageProfileRules.StoredNamespaceFingerprint(_modules.Require(LocalRwxArtifactStorageDriverFactory.TypeKey), document.RootElement);
     }
 
     private static StorageProfile BuildProfile(Guid teamId, string canonicalConfig, string namespaceFingerprint, DateTimeOffset now)

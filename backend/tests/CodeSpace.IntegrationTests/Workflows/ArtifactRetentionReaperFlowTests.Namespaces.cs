@@ -254,18 +254,17 @@ public sealed partial class ArtifactRetentionReaperFlowTests : IDisposable
     /// pointing row, and an Available location at the production key. Each team owns its own object row for the same
     /// bytes, exactly as two independent routed writes produce.
     /// </summary>
-    private async Task<SeededPlacement> SeedPlacementAsync(World world, byte[] bytes, string providerTypeKey, string config)
+    private async Task<SeededPlacement> SeedPlacementAsync(World world, byte[] bytes, string providerTypeKey, string config) =>
+        await SeedPlacementUnderAsync(world, bytes, await SeedRevisionAdmittedBeforeCanonicalAsync(world, providerTypeKey, config));
+
+    /// <summary>An Active profile whose one revision carries what admission stored before namespaces were canonical.</summary>
+    private async Task<Guid> SeedRevisionAdmittedBeforeCanonicalAsync(World world, string providerTypeKey, string config)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var now = DateTimeOffset.UtcNow;
-        var digest = SHA256.HashData(bytes);
         var profileId = Guid.NewGuid();
         var revisionId = Guid.NewGuid();
-        var objectId = Guid.NewGuid();
-        var artifactId = Guid.NewGuid();
-        var locationId = Guid.NewGuid();
-        var key = ObjectKeyOf(bytes);
 
         db.StorageProfile.Add(new StorageProfile
         {
@@ -281,6 +280,26 @@ public sealed partial class ArtifactRetentionReaperFlowTests : IDisposable
                 },
             },
         });
+        await db.SaveChangesAsync();
+
+        return revisionId;
+    }
+
+    /// <summary>
+    /// One team's routed artifact under an existing revision of its own: the team's own <c>artifact_object</c> for the
+    /// digest, the pointing row, and an Available location at the production key.
+    /// </summary>
+    private async Task<SeededPlacement> SeedPlacementUnderAsync(World world, byte[] bytes, Guid revisionId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+        var digest = SHA256.HashData(bytes);
+        var objectId = Guid.NewGuid();
+        var artifactId = Guid.NewGuid();
+        var locationId = Guid.NewGuid();
+        var key = ObjectKeyOf(bytes);
+
         db.ArtifactObject.Add(new ArtifactObject
         {
             Id = objectId, TeamId = world.TeamId, DigestAlgorithm = ArtifactDigestAlgorithm.Sha256, Digest = digest,
