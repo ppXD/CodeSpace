@@ -43,7 +43,7 @@ public sealed class StorageDefaultCredentialConfiguration : IEntityTypeConfigura
     {
         builder.ToTable("storage_default_credential", table =>
         {
-            table.HasCheckConstraint("ck_storage_default_credential_encrypted_payload", "btrim(encrypted_payload) <> ''");
+            table.HasCheckConstraint("ck_storage_default_credential_encrypted_payload", "encrypted_payload = '' OR btrim(encrypted_payload) <> ''");
             table.HasCheckConstraint("ck_storage_default_credential_envelope_fingerprint", "envelope_fingerprint ~ '^sha256:[0-9a-f]{64}$'");
             table.HasCheckConstraint("ck_storage_default_credential_provider_type_key", "provider_type_key ~ '^[a-z0-9][a-z0-9.-]*/v[1-9][0-9]*$'");
             table.HasCheckConstraint("ck_storage_default_credential_safe_hint", "safe_hint IS NULL OR (char_length(safe_hint) BETWEEN 1 AND 32 AND btrim(safe_hint) <> '' AND safe_hint !~ '[[:cntrl:]]')");

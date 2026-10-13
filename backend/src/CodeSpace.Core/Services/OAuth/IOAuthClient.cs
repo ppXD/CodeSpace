@@ -65,6 +65,14 @@ public sealed record OAuthRevokeInput
 
     /// <summary>"access_token" or "refresh_token" — providers use this only as a hint.</summary>
     public string? TokenTypeHint { get; init; }
+
+    /// <summary>
+    /// True ends the user's whole grant to the OAuth app where a provider revokes per grant: on GitHub, every token it ever
+    /// issued that user under <see cref="ClientId"/>, wherever it is held — including a token another team connected
+    /// through the same app. False ends only <see cref="Token"/>. A provider that revokes per token (GitLab, RFC 7009)
+    /// sends the same request either way. Default true: a Disconnect ends the grant, as it always has.
+    /// </summary>
+    public bool WholeGrant { get; init; } = true;
 }
 
 public sealed record OAuthTokenResponse

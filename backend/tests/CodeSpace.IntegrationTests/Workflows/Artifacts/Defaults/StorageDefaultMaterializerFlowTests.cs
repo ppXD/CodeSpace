@@ -226,7 +226,65 @@ public sealed class StorageDefaultMaterializerFlowTests : IDisposable
         outcome.ShouldBeOfType<StorageMaterialization.TeamNotFound>("authoring a template and fixing the caller are opposite responses");
     }
 
+    /// <summary>
+    /// Rotating the template's secret appends a new envelope and blanks the one it replaced; clearing it blanks the one it
+    /// named. The materializer decrypts only the envelope its template points at, so neither old one has a reader left,
+    /// and a deployment-wide cloud key kept decryptable forever is what rotating it was meant to end. A team materialized
+    /// after the rotation is the proof the blanking took nothing a reader needs.
+    /// </summary>
+    [Fact]
+    public async Task Rotating_or_clearing_the_templates_secret_blanks_the_envelope_it_replaced()
+    {
+        await AuthorTemplateAsync(NewRoot());
+        var replaced = await SetTemplateSecretAsync(clear: false);
+        var current = await SetTemplateSecretAsync(clear: false);
+
+        current.ShouldNotBe(replaced, "fixture check: a supplied secret appends a new envelope");
+        (await EnvelopeAsync(replaced!.Value)).ShouldBe(string.Empty, "the rotated-out envelope has no reader left and must not stay decryptable");
+        (await EnvelopeAsync(current!.Value)).ShouldNotBeNullOrEmpty("the envelope the template names is the one the materializer decrypts");
+
+        (await MaterializeAsync(await SeedTeamAsync(), automatic: true)).ShouldBeOfType<StorageMaterialization.Materialized>("a team materialized after a rotation reads the new envelope; a reader of the blanked one would halt as DestinationUnusable");
+
+        (await SetTemplateSecretAsync(clear: true)).ShouldBeNull("fixture check: the credential was cleared");
+        (await EnvelopeAsync(current.Value)).ShouldBe(string.Empty, "a cleared envelope has no reader left either");
+    }
+
     // ─── World + helpers ─────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Supplies a new secret to the shared template through its own service — or clears the one it has — keeping the rest
+    /// of it as it is, and returns the envelope it names afterwards. The local provider takes an empty secret object.
+    /// </summary>
+    private async Task<Guid?> SetTemplateSecretAsync(bool clear)
+    {
+        using var scope = _fixture.BeginScope();
+        var service = scope.Resolve<IStorageDefaultService>();
+        var actorId = await SeedOperatorAsync(scope);
+        var existing = (await service.ListAsync(CancellationToken.None)).Single(row => row.DataClassTypeKey == AgentRunLogClass);
+        var template = (await service.GetAsync(existing.Id, CancellationToken.None))!;
+
+        await service.UpdateAsync(actorId, new UpdateStorageDefaultCommand
+        {
+            DefaultId = template.Id,
+            ExpectedXmin = template.Xmin,
+            ExpectedRevision = template.Revision,
+            ProviderTypeKey = template.ProviderTypeKey,
+            NonSecretConfig = template.NonSecretConfig,
+            NamespaceRoot = template.NamespaceRoot,
+            AdoptionPolicy = template.AdoptionPolicy,
+            Secret = clear ? null : JsonDocument.Parse("{}").RootElement,
+            ClearCredential = clear,
+        }, CancellationToken.None);
+
+        return await scope.Resolve<CodeSpaceDbContext>().StorageDefault.AsNoTracking().Where(row => row.Id == template.Id).Select(row => row.CredentialId).SingleAsync();
+    }
+
+    private async Task<string> EnvelopeAsync(Guid credentialId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().StorageDefaultCredential.AsNoTracking().Where(row => row.Id == credentialId).Select(row => row.EncryptedPayload).SingleAsync();
+    }
 
     private async Task<StorageMaterialization> MaterializeAsync(World world, bool automatic, string? dataClass = null)
     {

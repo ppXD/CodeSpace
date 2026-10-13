@@ -73,12 +73,15 @@ public sealed class StorageDefaultService : IStorageDefaultService, IScopedDepen
 
         var prepared = PrepareTemplate(Input(command, template.DataClassTypeKey));
         var now = _clock.GetUtcNow();
+        var previousCredentialId = template.CredentialId;
         var credentialId = await ResolveCredentialAsync(template, command, actorId, now).ConfigureAwait(false);
         Apply(template, prepared, actorId, now);
         template.Revision = checked(template.Revision + 1);
         template.CredentialId = credentialId;
 
         await SaveAsync("The deployment storage default changed before this edit could be applied.", cancellationToken).ConfigureAwait(false);
+        await ShredReplacedEnvelopeAsync(previousCredentialId, credentialId, cancellationToken).ConfigureAwait(false);
+
         return await RequireAsync(template.Id, cancellationToken).ConfigureAwait(false);
     }
 
@@ -140,7 +143,8 @@ public sealed class StorageDefaultService : IStorageDefaultService, IScopedDepen
 
     /// <summary>
     /// Which envelope the edited template points at: a newly appended one when a secret is supplied, none when the
-    /// operator clears it, otherwise the one it already had. Superseded envelopes are never overwritten in place.
+    /// operator clears it, otherwise the one it already had. A superseded envelope is never rewritten, only blanked once
+    /// the edit has saved (<see cref="ShredReplacedEnvelopeAsync"/>).
     ///
     /// <para>A RETAINED envelope must still belong to the template's provider. Repointing a template at a different
     /// provider while silently keeping the old provider's secret would leave a template that reads as complete and
@@ -156,6 +160,24 @@ public sealed class StorageDefaultService : IStorageDefaultService, IScopedDepen
 
         await EnsureRetainedCredentialMatchesAsync(retained, command.ProviderTypeKey).ConfigureAwait(false);
         return retained;
+    }
+
+    /// <summary>
+    /// Blanks the envelope an edit stopped naming: the one a new secret replaced, or the one a clear detached. Only the
+    /// materializer decrypts an envelope, and only the one its template names, under a share lock on that template, so
+    /// this one has no reader left; kept, it would leave a deployment-wide cloud key decryptable from every copy of the
+    /// database for good. Its fingerprint and hint stay as history. Runs after the repoint has saved, because 0249's guard
+    /// admits the blanking only once no template names the envelope, and asks the same here so an envelope some other
+    /// template still names is left alone rather than failing the edit.
+    /// </summary>
+    private async Task ShredReplacedEnvelopeAsync(Guid? previousCredentialId, Guid? credentialId, CancellationToken cancellationToken)
+    {
+        if (previousCredentialId is not { } replaced || replaced == credentialId) return;
+
+        await _db.StorageDefaultCredential
+            .Where(envelope => envelope.Id == replaced && envelope.EncryptedPayload != string.Empty && !_db.StorageDefault.Any(template => template.CredentialId == envelope.Id))
+            .ExecuteUpdateAsync(setters => setters.SetProperty(envelope => envelope.EncryptedPayload, string.Empty), cancellationToken)
+            .ConfigureAwait(false);
     }
 
     private async Task EnsureRetainedCredentialMatchesAsync(Guid credentialId, string providerTypeKey)

@@ -10,4 +10,11 @@ namespace CodeSpace.Core.Services.OAuth;
 public interface ICredentialPayloadReader
 {
     Task<string> ReadEncryptedPayloadAsync(Guid credentialId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// True once the credential is soft-deleted — a retirement: a connection delete, a member's departure or a relink,
+    /// each of which blanks the token and takes the row out of the team's list — or gone. False while the row is listed,
+    /// a Disconnected one included: a Disconnect blanks the token and leaves the row Revoked in the list.
+    /// </summary>
+    Task<bool> IsRetiredAsync(Guid credentialId, CancellationToken cancellationToken);
 }

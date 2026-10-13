@@ -16,8 +16,12 @@ namespace CodeSpace.Messages.Commands.ProviderInstances;
 /// "Unbind all and remove" one-click path the UI offers when the operator explicitly
 /// confirms the impact.
 ///
-/// Active credentials are always cascade-revoked in the same transaction — they're
-/// useless once the provider is gone, and leaving them as Active would lie to the UI.
+/// The connection's group hooks are deleted at the provider first, best effort, while the
+/// tokens that registered them still work; the hook rows it keeps are out of service and lose
+/// their secrets. Active credentials are then retired in the same transaction — token blanked,
+/// Revoked, soft-deleted — and the instance's OAuth client secret is blanked with it, so nothing
+/// the connection held stays decryptable. Each OAuth grant is then revoked at the provider, best
+/// effort, after the transaction commits.
 /// </summary>
 public sealed record DeleteProviderInstanceCommand : ICommand<DeleteProviderInstanceResult>, IRequireTeamPermission
 {
