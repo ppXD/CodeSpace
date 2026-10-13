@@ -8,6 +8,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows.Artifacts.Profiles;
+using CodeSpace.Core.Services.Workflows.Artifacts.Providers.Local;
 using CodeSpace.Core.Services.Workflows.Artifacts.Runtime;
 using CodeSpace.Core.Settings;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -213,11 +214,12 @@ public sealed class AgentRunLogRuntimeTests
     }
 
     [Fact]
-    public async Task The_bootstrap_destination_names_its_namespace_exactly_as_settings_admission_names_that_directory()
+    public async Task The_bootstrap_destination_stores_the_fingerprint_settings_admission_stores_for_that_root()
     {
-        // The bootstrap writes its revision without going through admission, so it must derive the namespace the way
-        // admission does. Reached through a link here, the deployment root's TEXT differs from the directory an operator
-        // types into Settings, while the directory itself is one: a fingerprint of the text would name two namespaces.
+        // The bootstrap writes its revision without going through admission, so it must derive the stored fingerprint the
+        // way admission does: for this release the hash of the configuration as written, which is the value the previous
+        // build's retention reaper compares. Reached through a link here, so the directory's physical identity is a
+        // different value and a bootstrap that stored it would split from that build's own revisions of this root.
         if (OperatingSystem.IsWindows()) return;
 
         var world = await SeedWorldAsync();
@@ -231,13 +233,14 @@ public sealed class AgentRunLogRuntimeTests
             using var scope = _fixture.BeginScope();
 
             var bootstrap = (await scope.Resolve<IAgentRunLogStorageResolver>().ResolveAsync(world.TeamId, CancellationToken.None)).ShouldBeOfType<AgentRunLogStorageResolution.Ready>();
-            using var typed = JsonDocument.Parse(JsonSerializer.Serialize(new { rootPath = real + "/" }));
-            var admitted = await scope.Resolve<IStorageProfileService>().CreateAsync(world.TeamId, world.ActorId, new CreateStorageProfileCommand { StableName = $"admitted-{Guid.NewGuid():N}", ProviderTypeKey = "local-rwx/v1", NonSecretConfig = typed.RootElement }, CancellationToken.None);
+            var stored = await scope.Resolve<CodeSpaceDbContext>().StorageProfileRevision.AsNoTracking()
+                .Where(value => value.StorageProfileId == bootstrap.StorageProfileId).Select(value => new { value.NonSecretConfigJson, value.NamespaceFingerprint }).SingleAsync();
+            using var config = JsonDocument.Parse(stored.NonSecretConfigJson);
+            var admitted = await scope.Resolve<IStorageProfileService>().CreateAsync(world.TeamId, world.ActorId, new CreateStorageProfileCommand { StableName = $"admitted-{Guid.NewGuid():N}", ProviderTypeKey = "local-rwx/v1", NonSecretConfig = config.RootElement }, CancellationToken.None);
 
-            var bootstrapFingerprint = await scope.Resolve<CodeSpaceDbContext>().StorageProfileRevision.AsNoTracking()
-                .Where(value => value.StorageProfileId == bootstrap.StorageProfileId).Select(value => value.NamespaceFingerprint).SingleAsync();
-
-            bootstrapFingerprint.ShouldBe(admitted.Revisions.ShouldHaveSingleItem().NamespaceFingerprint, $"'{link}' and '{real}/' are one directory, so the bootstrap and admission must name one namespace");
+            StorageProfileRules.NamespaceFingerprint(new LocalRwxStorageProviderModule(), config.RootElement).ShouldNotBe(stored.NamespaceFingerprint, $"the precondition: '{link}' is a link, so its physical identity is not the hash of its text");
+            stored.NamespaceFingerprint.ShouldBe(admitted.Revisions.ShouldHaveSingleItem().NamespaceFingerprint, "the bootstrap and admission must store one fingerprint for one root as written");
+            stored.NamespaceFingerprint.ShouldBe(StorageProfileRules.LegacyNamespaceFingerprint("local-rwx/v1", config.RootElement), "what the previous build stored for this configuration");
         }
         finally
         {

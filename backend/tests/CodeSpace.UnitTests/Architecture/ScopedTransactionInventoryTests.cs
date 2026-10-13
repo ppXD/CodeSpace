@@ -71,6 +71,7 @@ public class ScopedTransactionInventoryTests
         ["Supervisor/Observation/SupervisorPlanObservationLeafReader.cs"] = (1, "already joins, same RepeatableRead snapshot."),
         ["Tasks/RoutePreview/TaskRouteSnapshotService.cs"] = (1, "already joins through a savepoint branch taken before this line; this arm runs only when nothing is ambient."),
         ["Workflows/Artifacts/Defaults/StorageDefaultMaterializer.cs"] = (1, "already joins, but through a SAVEPOINT: a refused destination must not leave the profile and credential it wrote behind in the caller's commit."),
+        ["Workflows/Artifacts/Profiles/StorageNamespaceFingerprintBackfillService.cs"] = (1, "switches the revision immutability trigger off for its own writes and back on before its own commit; joined, the trigger would stay off for the rest of the caller's transaction and the table's write lock would be held until the caller commits."),
         ["Workflows/Artifacts/Retention/ArtifactRetentionReaper.cs"] = (3, "the same private CreateDb() context; nothing ambient can reach it."),
         ["Workflows/Artifacts/Runtime/ArtifactCasRuntimeCoordinator.cs"] = (1, "the same private CreateDb() context; nothing ambient can reach it."),
         ["Workflows/Artifacts/Runtime/ArtifactCasRuntimeCoordinator.Purge.cs"] = (1, "the same private CreateDb() context; nothing ambient can reach it."),
