@@ -58,6 +58,9 @@ public sealed partial class GoalChannelE2ETests(ITestOutputHelper output) : IDis
     [InlineData("/security-review")]
     public Task A_claude_goal_that_opens_with_a_slash_word_reaches_the_model_as_text(string word) => SlashWordReachesTheModelAsync(word, AgentAutonomyLevel.Confined, lane: "root");
 
+    [Fact]
+    public Task A_claude_session_masked_as_the_executor_keeps_it_still_resumes() => MaskedSessionResumesAsync(AgentAutonomyLevel.Confined, lane: "root");
+
     /// <summary>
     /// The mention arm, for either lane: a goal naming a secret in every place a mention reaches — the config home by
     /// <c>~</c> and by its absolute path, a directory outside the workspace, a workspace symlink out of it, a workspace
@@ -115,6 +118,47 @@ public sealed partial class GoalChannelE2ETests(ITestOutputHelper output) : IDis
         AssertTheModelAnsweredIt(run, fixture);
 
         output.WriteLine($"{RanMarker} {LanePrefix(lane)}resume claude-code {tier} uid={NonRootWorker.EffectiveUid()} confined={Confined} controlRead={expected.Count}/{expected.Count}");
+    }
+
+    /// <summary>
+    /// The MASKED-RESUME arm: a session the executor keeps is masked with the run's secrets
+    /// (<see cref="SessionTranscriptRedaction"/>) before a later attempt — a respawn, a checkpoint resume — restores it,
+    /// so the pinned CLI must still load the masked file and continue. The first run's goal carries a canary, which the
+    /// CLI writes into its session as the user's turn: that restored turn reaches the model masked. The continuation's
+    /// own goal carries the canary again, as a respawn re-sends its sealed goal, so the agent still has the value it was
+    /// given. (A warm revise round in the same process is handed the conversation unmasked, and never stores it.)
+    /// </summary>
+    internal async Task MaskedSessionResumesAsync(AgentAutonomyLevel tier, string lane)
+    {
+        if (!ReviewerReadsItsDiffE2ETests.Armed(ClaudeCodeHarness.HarnessKind) || OperatingSystem.IsWindows()) return;
+
+        await ReviewerReadsItsDiffE2ETests.RequirePinnedBinaryAsync(Harness, ClaudeCodeHarness.HarnessKind);
+
+        var fixture = PlantFixture();
+        var canary = $"CANARY-masked-{fixture.Nonce}";
+        var first = await RunAsync(fixture, tier, _ => $"Say hello. GOAL-first-{fixture.Nonce} deploy key {canary}", Structured);
+        var session = SessionOf(first, fixture);
+
+        session.Transcript.ShouldContain(canary, Case.Sensitive, $"fixture check: the CLI must have written the goal into its session, or masking it proves nothing. {Diagnosis(first)}");
+
+        var masked = session with { Transcript = SessionTranscriptRedaction.Redact(session.Transcript, new SecretRedactor([canary])) };
+        masked.Transcript.ShouldNotContain(canary);
+
+        var run = await RunAsync(fixture, tier, _ => $"Say hello again. GOAL-again-{fixture.Nonce} deploy key {canary}", Structured, masked);
+
+        run.Spec.Args.ShouldContain("--resume", "fixture check: the continuation must ride --resume");
+        (string.Join('\n', run.Lines) + run.Result.Stderr).ShouldNotContain("No conversation found", Case.Insensitive, $"the CLI must load the masked session. {Diagnosis(run)}");
+
+        var requests = MainRequests(run);
+        requests.ShouldNotBeEmpty($"the model must have been asked. {Diagnosis(run)}");
+        var request = requests[0].GetRawText();
+        request.ShouldContain($"GOAL-first-{fixture.Nonce}", Case.Sensitive, $"the continuation must carry the restored conversation, or it started cold. {Diagnosis(run)}");
+        request.ShouldContain($"GOAL-first-{fixture.Nonce} deploy key {SecretRedactor.Placeholder}", Case.Sensitive, $"the restored turn reaches the model masked. {Diagnosis(run)}");
+        request.ShouldNotContain($"GOAL-first-{fixture.Nonce} deploy key {canary}", Case.Sensitive, $"the masked value never reaches the model from the restored turn. {Diagnosis(run)}");
+        request.ShouldContain($"GOAL-again-{fixture.Nonce} deploy key {canary}", Case.Sensitive, $"the goal the continuation re-sends still hands the agent the value. {Diagnosis(run)}");
+        AssertTheModelAnsweredIt(run, fixture);
+
+        output.WriteLine($"{RanMarker} {LanePrefix(lane)}masked-resume claude-code {tier} uid={NonRootWorker.EffectiveUid()} confined={Confined}");
     }
 
     /// <summary>The session a finished run left: its id off the result line, and its transcript read where the executor captures it (<see cref="ClaudeCodeHarness.SessionTranscriptRelativePath"/>).</summary>

@@ -470,8 +470,10 @@ public sealed class AgentCodeNode : INodeRuntime
     /// <para>ONE cause inverts the resume decision: a gateway FORMAT fault
     /// (<see cref="Supervisor.AgentRetryCauses.GatewayFormatFault"/>) is the failure whose repair is to DROP the
     /// conversation rather than continue it, so the respawn takes the shared mitigation instead — see below.</para>
+    ///
+    /// <para>Internal so the resume E2E builds a continuation exactly as a respawn does, from a real resume payload.</para>
     /// </summary>
-    private static AgentTask ApplyRespawnResumeHint(AgentTask task, JsonElement? priorAttemptPayload)
+    internal static AgentTask ApplyRespawnResumeHint(AgentTask task, JsonElement? priorAttemptPayload)
     {
         if (priorAttemptPayload is not { } payload) return task;
 

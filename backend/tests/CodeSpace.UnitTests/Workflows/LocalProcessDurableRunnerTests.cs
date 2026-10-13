@@ -683,6 +683,55 @@ public sealed class LocalProcessDurableRunnerTests : IDisposable
     }
 
     [Fact]
+    public async Task The_spool_and_the_raw_output_logs_it_holds_are_owner_only()
+    {
+        if (OperatingSystem.IsWindows()) return;   // unix modes (Rule 12.1)
+
+        // SX-16: out.log is the agent's stdout BEFORE redaction — an echoed model key, a broker token, a workflow secret
+        // in a tool result — and the spool sat at the default umask: a 0755 directory around a 0644 out.log, readable by
+        // every local account on the worker, beside the 0700 agent-home that was already locked down.
+        // MUTATION this pins: drop the spool's owner-only create at launch → the directory reads 0755 → red; drop the
+        // copiers' umask → out.log/err.log read 0644 → red.
+        var handle = await LaunchAsync(ContractSpecs.MultiLine("alpha", "beta"));
+
+        var (result, lines) = await AttachCollectAsync(handle);
+
+        result.Status.ShouldBe(SandboxStatus.Success, Why(handle, result));
+        string.Join(",", lines).ShouldBe("alpha,beta", "the run still spools and is still read back — the modes changed, the capture did not");
+
+        File.GetUnixFileMode(handle.SpoolDirectory).ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute, $"the per-run spool {handle.SpoolDirectory} must be owner-only, as its agent-home is");
+
+        foreach (var log in new[] { "out.log", "err.log" })
+            File.GetUnixFileMode(Path.Combine(handle.SpoolDirectory, log)).ShouldBe(UnixFileMode.UserRead | UnixFileMode.UserWrite, $"{log} holds the agent's raw, unredacted output and must be owner-only (0600)");
+    }
+
+    [Fact]
+    public async Task The_agent_keeps_the_workers_umask_for_the_files_it_writes()
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // The other half of the copiers' owner-only umask: it is THEIRS. The agent's own files — a build artifact, a
+        // report a later step or a reviewer reads — keep the mode the worker would give them.
+        // MUTATION this pins: set `umask 077` at the top of the supervisor script instead of inside copy_spool → the
+        // agent reports 0077 → red.
+        var (worker, _) = await RunShellAsync("umask");
+        var (result, lines) = await AttachCollectAsync(await LaunchAsync(ContractSpecs.EchoStdin(null) with { Args = ["-c", "umask"], TimeoutSeconds = 20 }));
+
+        result.Status.ShouldBe(SandboxStatus.Success);
+        lines.ShouldHaveSingleItem().ShouldBe(worker.Trim(), "the agent runs with the worker's umask, not the copiers' 077");
+    }
+
+    private static async Task<(string Stdout, int ExitCode)> RunShellAsync(string command)
+    {
+        using var process = Process.Start(new ProcessStartInfo("/bin/sh", ["-c", command]) { RedirectStandardOutput = true, UseShellExecute = false })!;
+        var stdout = await process.StandardOutput.ReadToEndAsync();
+
+        await process.WaitForExitAsync();
+
+        return (stdout, process.ExitCode);
+    }
+
+    [Fact]
     public async Task A_run_under_the_spool_cap_spools_byte_identical_output()
     {
         if (OperatingSystem.IsWindows()) return;

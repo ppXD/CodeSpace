@@ -694,7 +694,7 @@ public sealed partial class SupervisorTurnService
             // gate IS the floor — so its own program file(s) are the run's oracle inventory (C3 narrowing).
             var spec = new SupervisorAcceptanceSpec { Command = command };
             var oracleFloorPrograms = AcceptanceOracleProtection.ProgramCandidates(command);
-            var posture = resolver is null ? null : await ProducerPostureAsync(resolver.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+            var producer = await ProducerGradingAsync(resolver?.AgentRunId, teamId, spec, cancellationToken).ConfigureAwait(false);
 
             // The branch arm carries the SAME inventory the patch arm below does. The floor-less overload compiles
             // and greens, but it silently reduces the grade to authored-only protection — which on this lane means
@@ -702,12 +702,12 @@ public sealed partial class SupervisorTurnService
             // saying it went unanchored. There is no base sha to pair it with here (this lane resolves none), and
             // the anchor is what keeps that from reading as an oversight.
             if (!string.IsNullOrEmpty(resolver?.ProducedBranch))
-                return await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, Branch = resolver.ProducedBranch, Spec = spec, TimeoutSeconds = SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = new OracleAnchor(null, oracleFloorPrograms), ProducerModel = ProducerModelOf(resolver!), Posture = posture }, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, Branch = resolver.ProducedBranch, Spec = spec, TimeoutSeconds = SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = new OracleAnchor(null, oracleFloorPrograms), ProducerModel = ProducerModelOf(resolver!), Posture = producer.Posture, WorkflowSecrets = producer.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
 
             var manifest = resolver is not null ? await ResolveUnitManifestAsync(resolver.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false) : null;
 
             if (manifest is { PatchArtifactId: not null, BaseSha: not null })
-                return await _acceptanceGrader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, PatchArtifactId = manifest.PatchArtifactId, Spec = spec, TimeoutSeconds = SupervisorLane.AcceptanceGradeTimeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, ProducerModel = ProducerModelOf(resolver!), Posture = posture }, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, PatchArtifactId = manifest.PatchArtifactId, Spec = spec, TimeoutSeconds = SupervisorLane.AcceptanceGradeTimeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, ProducerModel = ProducerModelOf(resolver!), Posture = producer.Posture, WorkflowSecrets = producer.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
 
             return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
         }
@@ -722,7 +722,7 @@ public sealed partial class SupervisorTurnService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Acceptance grade for resolve decision {DecisionId} failed unexpectedly; recording not-accepted", decision.Id);
-            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+            return new BenchmarkGrade { Passed = false, Detail = MaskedDetail($"grade-error: {ex.Message}"), Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
         }
     }
 
@@ -966,19 +966,19 @@ public sealed partial class SupervisorTurnService
 
             if (repositoryId is null) return await GradeCapturedUnitAsync(result, spec, timeoutSeconds, teamId, cancellationToken).ConfigureAwait(false);
 
-            var posture = await ProducerPostureAsync(result.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+            var producer = await ProducerGradingAsync(result.AgentRunId, teamId, spec, cancellationToken).ConfigureAwait(false);
 
             if (!string.IsNullOrEmpty(result.ProducedBranch))
             {
                 var anchor = await OracleAnchorAsync(result.AgentRunId, repositoryId.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
 
-                return await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, Branch = result.ProducedBranch, Spec = spec, TimeoutSeconds = timeoutSeconds, Anchor = anchor, ProducerModel = ProducerModelOf(result), Posture = posture }, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, Branch = result.ProducedBranch, Spec = spec, TimeoutSeconds = timeoutSeconds, Anchor = anchor, ProducerModel = ProducerModelOf(result), Posture = producer.Posture, WorkflowSecrets = producer.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
             }
 
             var manifest = await ResolveUnitManifestAsync(result.AgentRunId, repositoryId.Value, teamId, cancellationToken).ConfigureAwait(false);
 
             if (manifest is { PatchArtifactId: not null, BaseSha: not null })
-                return await _acceptanceGrader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, PatchArtifactId = manifest.PatchArtifactId, Spec = spec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, ProducerModel = ProducerModelOf(result), Posture = posture }, cancellationToken).ConfigureAwait(false);
+                return await _acceptanceGrader.GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, PatchArtifactId = manifest.PatchArtifactId, Spec = spec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, ProducerModel = ProducerModelOf(result), Posture = producer.Posture, WorkflowSecrets = producer.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
 
             return NotApplicableOrFailed(expectsChanges);
         }
@@ -993,7 +993,7 @@ public sealed partial class SupervisorTurnService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Per-unit acceptance grade for agent {AgentRunId} in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, decisionId);
-            return new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+            return new BenchmarkGrade { Passed = false, Detail = MaskedDetail($"grade-error: {ex.Message}"), Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
         }
     }
 
@@ -1016,9 +1016,9 @@ public sealed partial class SupervisorTurnService
         if (!Agents.AgentAcceptanceContract.GradesFromDeliverables(spec))
             return new BenchmarkGrade { Passed = false, Detail = "no-branch-or-repo" };
 
-        var posture = await ProducerPostureAsync(result.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+        var producer = await ProducerGradingAsync(result.AgentRunId, teamId, spec, cancellationToken).ConfigureAwait(false);
 
-        var grade = await _acceptanceGrader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = result.AgentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, ProducerModel = ProducerModelOf(result), Posture = posture }, cancellationToken).ConfigureAwait(false);
+        var grade = await _acceptanceGrader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = result.AgentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, ProducerModel = ProducerModelOf(result), Posture = producer.Posture, WorkflowSecrets = producer.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
 
         return grade.Detail == ISupervisorAcceptanceGrader.NoDeliverablesCaptured ? DisambiguateEmptyWorld(result, grade) : grade;
     }
@@ -1080,16 +1080,16 @@ public sealed partial class SupervisorTurnService
 
             // The baseline runs under the CANDIDATE's posture: a differential between a base graded with network and
             // a candidate graded without it would measure the two sandboxes, not the work.
-            var posture = await ProducerPostureAsync(result.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+            var producer = await ProducerGradingAsync(result.AgentRunId, teamId, spec, cancellationToken).ConfigureAwait(false);
 
             // The memo key is the FULL spec identity, not just the argv: Kind routes a different oracle, and
             // SetupCommand/Rubric/Schema change what the same argv means — two subtasks may share a Command yet
             // measure different contracts (adversarial-scan M1). The posture is part of it for the reason above.
-            var key = $"{repositoryId}@{manifest.BaseSha}#{System.Text.Json.JsonSerializer.Serialize(spec, Agents.AgentJson.Options)}#{System.Text.Json.JsonSerializer.Serialize(posture, Agents.AgentJson.Options)}";
+            var key = $"{repositoryId}@{manifest.BaseSha}#{System.Text.Json.JsonSerializer.Serialize(spec, Agents.AgentJson.Options)}#{System.Text.Json.JsonSerializer.Serialize(producer.Posture, Agents.AgentJson.Options)}";
 
             if (baselines.TryGetValue(key, out var memoized)) return memoized;
 
-            var grade = await _acceptanceGrader.GradeBaseAsync(new BaseAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Posture = posture }, cancellationToken).ConfigureAwait(false);
+            var grade = await _acceptanceGrader.GradeBaseAsync(new BaseAcceptanceGradeRequest { RepositoryId = repositoryId.Value, TeamId = teamId, BaseSha = manifest.BaseSha!, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Posture = producer.Posture, WorkflowSecrets = producer.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
 
             // A MEASURED baseline is shareable; an infra-classed one (a transient clone fault) is not — stamping it
             // onto every sibling off the same base would spread one blip across the whole fan-out.
@@ -1121,7 +1121,7 @@ public sealed partial class SupervisorTurnService
 
         if (targets.Count == 0) return NotApplicableOrFailed(expectsChanges);
 
-        var posture = await ProducerPostureAsync(result.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+        var producer = await ProducerGradingAsync(result.AgentRunId, teamId, spec, cancellationToken).ConfigureAwait(false);
 
         foreach (var target in targets)
         {
@@ -1130,7 +1130,7 @@ public sealed partial class SupervisorTurnService
             {
                 var anchor = await OracleAnchorAsync(result.AgentRunId, target.RepositoryId!.Value, spec, oracleFloorPrograms, teamId, cancellationToken).ConfigureAwait(false);
 
-                grade = await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId!.Value, TeamId = teamId, Branch = target.ProducedBranch!, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = anchor, ProducerModel = ProducerModelOf(result), Posture = posture }, cancellationToken).ConfigureAwait(false);
+                grade = await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId!.Value, TeamId = teamId, Branch = target.ProducedBranch!, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = anchor, ProducerModel = ProducerModelOf(result), Posture = producer.Posture, WorkflowSecrets = producer.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
             }
             catch (Workflows.Llm.LlmBudgetExceededException refused)
         {
@@ -1143,7 +1143,7 @@ public sealed partial class SupervisorTurnService
         catch (Exception ex) when (ex is not OperationCanceledException)
             {
                 _logger.LogWarning(ex, "Per-unit multi-repo acceptance grade for agent {AgentRunId} repo '{Alias}' in decision {DecisionId} failed unexpectedly; recording not-accepted", result.AgentRunId, target.Alias, decisionId);
-                return new BenchmarkGrade { Passed = false, Detail = $"repo '{target.Alias}': grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+                return new BenchmarkGrade { Passed = false, Detail = MaskedDetail($"repo '{target.Alias}': grade-error: {ex.Message}"), Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
             }
 
             // P5-2: re-emit the failing repo's grade via `with` (only the detail gains the repo tag) so its Class,
@@ -1390,7 +1390,7 @@ public sealed partial class SupervisorTurnService
             // must too.
             _logger.LogWarning(ex, "Stop acceptance target resolution for run {RunId} failed unexpectedly; recording not-accepted", context.SupervisorRunId);
 
-            return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, false, $"grade-error: {ex.Message}") };
+            return execution with { OutcomeJson = SupervisorOutcome.AppendAcceptanceGrade(execution.OutcomeJson, false, MaskedDetail($"grade-error: {ex.Message}")) };
         }
 
         // C1 — a branchless stop is no longer an unconditional skip. A DELIVERABLE-kind gate does not need a head to
@@ -1486,9 +1486,9 @@ public sealed partial class SupervisorTurnService
         {
             foreach (var unit in units)
             {
-                var posture = await ProducerPostureAsync(unit.AgentRunId, teamId, cancellationToken).ConfigureAwait(false);
+                var producer = await ProducerGradingAsync(unit.AgentRunId, teamId, spec, cancellationToken).ConfigureAwait(false);
 
-                var grade = await _acceptanceGrader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = unit.AgentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, ProducerModel = ProducerModelOf(unit), Posture = posture }, cancellationToken).ConfigureAwait(false);
+                var grade = await _acceptanceGrader.GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = unit.AgentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, ProducerModel = ProducerModelOf(unit), Posture = producer.Posture, WorkflowSecrets = producer.WorkflowSecrets }, cancellationToken).ConfigureAwait(false);
 
                 if (grade.Passed) return (grade, false);
 
@@ -1504,7 +1504,7 @@ public sealed partial class SupervisorTurnService
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
             _logger.LogWarning(ex, "Branchless stop acceptance grade for run {RunId} failed unexpectedly; recording not-accepted", context.SupervisorRunId);
-            return (new BenchmarkGrade { Passed = false, Detail = $"grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault }, false);
+            return (new BenchmarkGrade { Passed = false, Detail = MaskedDetail($"grade-error: {ex.Message}"), Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault }, false);
         }
 
         if (everCaptured) return (firstFailure!, false);
@@ -1545,7 +1545,7 @@ public sealed partial class SupervisorTurnService
             ProducerModel = new ReviewModelIdentity { ModelCredentialModelId = context.SupervisorModelId, ConfiguredModel = decision.Usage?.RequestedModel, ObservedModel = decision.Usage?.ObservedModel },
         }, cancellationToken).ConfigureAwait(false);
 
-        if (verdict.Failed) return (new BenchmarkGrade { Passed = false, Detail = $"grade-error: {verdict.FailureDetail}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault }, false);
+        if (verdict.Failed) return (new BenchmarkGrade { Passed = false, Detail = MaskedDetail($"grade-error: {verdict.FailureDetail}"), Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault }, false);
 
         var grade = Agents.Eval.Benchmark.Graders.LlmJudgeGrader.Aggregate(rubric, verdict);
 
@@ -1679,7 +1679,7 @@ public sealed partial class SupervisorTurnService
                     // by rewriting the check script the operator's floor runs. The floor's inventory gates BOTH
                     // gates: the model's own tightening command can name a file the goal required editing, and
                     // restoring that would void the very work the stop is shipping.
-                    grade = await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId, TeamId = teamId, Branch = target.Branch, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = new OracleAnchor(oracleBaseShas.GetValueOrDefault(target.RepositoryId), oracleFloorPrograms), Posture = posture }, cancellationToken).ConfigureAwait(false);
+                    grade = await _acceptanceGrader.GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = target.RepositoryId, TeamId = teamId, Branch = target.Branch, Spec = spec, TimeoutSeconds = spec.TimeoutSeconds ?? SupervisorLane.AcceptanceGradeTimeoutSeconds, Anchor = new OracleAnchor(oracleBaseShas.GetValueOrDefault(target.RepositoryId), oracleFloorPrograms), Posture = posture, WorkflowSecrets = SecretsIn(spec) }, cancellationToken).ConfigureAwait(false);
                 }
                 catch (Workflows.Llm.LlmBudgetExceededException refused)
         {
@@ -1692,7 +1692,7 @@ public sealed partial class SupervisorTurnService
         catch (Exception ex) when (ex is not OperationCanceledException)
                 {
                     _logger.LogWarning(ex, "Stop acceptance {Gate} grade for repo {Repo} failed unexpectedly; recording not-accepted", label, target.Alias);
-                    return new BenchmarkGrade { Passed = false, Detail = $"{repoTag}{label}: grade-error: {ex.Message}", Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
+                    return new BenchmarkGrade { Passed = false, Detail = MaskedDetail($"{repoTag}{label}: grade-error: {ex.Message}"), Class = Messages.Agents.Benchmark.GradeFailureClass.GraderFault };
                 }
 
                 // C3: re-emit via `with` so the graded object's Class, EvidenceArtifactId, EvidenceTail and
@@ -1775,16 +1775,37 @@ public sealed partial class SupervisorTurnService
     }
 
     /// <summary>
-    /// The posture a grade of <paramref name="agentRunId"/>'s work runs under, read off the unit's own stored task: the
-    /// tier and permissions it ran with, as admitted. Null when the row is not this team's or its task cannot be read,
-    /// and the grader then grades fail-closed. Every per-unit lane reads it for the unit whose bytes it runs.
+    /// What a grade of <paramref name="agentRunId"/>'s work runs under, read off the unit's own stored task. The posture:
+    /// the tier and permissions it ran with, as admitted — null when the row is not this team's or its task cannot be
+    /// read, and the grader then grades fail-closed. The workflow secrets the grade must keep out of everything it
+    /// stores: the ones the unit's sealed task embeds, and the ones this node's scope resolved into
+    /// <paramref name="spec"/> — an operator-floor argv or a model-authored acceptance that carries one runs exactly,
+    /// and its evidence repeats the argv and the check's output. Every per-unit lane reads it for the unit whose bytes
+    /// it runs; a null <paramref name="agentRunId"/> (no unit) reads the spec's secrets alone.
     /// </summary>
-    private async Task<AcceptanceGradingPosture?> ProducerPostureAsync(Guid agentRunId, Guid teamId, CancellationToken cancellationToken)
+    private async Task<ProducerGrading> ProducerGradingAsync(Guid? agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, CancellationToken cancellationToken)
     {
-        var taskJson = await _db.AgentRun.AsNoTracking().Where(r => r.Id == agentRunId && r.TeamId == teamId).Select(r => r.TaskJson).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+        var stored = agentRunId is not { } id ? null : await _db.AgentRun.AsNoTracking().Where(r => r.Id == id && r.TeamId == teamId).Select(r => new StoredTask(r.TaskJson, r.SealedTaskCiphertext)).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
-        return AcceptanceGradingPosturePolicy.ForStoredTask(taskJson);
+        return new ProducerGrading(AcceptanceGradingPosturePolicy.ForStoredTask(stored?.TaskJson), [.. OpenedTaskSecrets(stored).Concat(SecretsIn(spec)).Distinct(StringComparer.Ordinal)]);
     }
+
+    /// <summary>The posture a unit's grade runs under, and the workflow secrets it masks in what it keeps.</summary>
+    private sealed record ProducerGrading(AcceptanceGradingPosture? Posture, IReadOnlyList<string> WorkflowSecrets);
+
+    private sealed record StoredTask(string TaskJson, string? SealedTaskCiphertext);
+
+    /// <summary>The workflow secrets a unit's sealed task embeds (<c>AgentTask.WorkflowSecrets</c>, the values its executor masked); none for an unsealed task, or without a sealer to open it.</summary>
+    private IReadOnlyList<string> OpenedTaskSecrets(StoredTask? stored) =>
+        stored?.SealedTaskCiphertext is not { } ciphertext || _sealer is null ? [] : _sealer.Open(stored.TaskJson, ciphertext).Secrets;
+
+    /// <summary>The secrets of this node's scope (the ambient capture redactor the engine pushes for the node) that an acceptance spec carries — the floor's argv the operator configured, or the one the model authored from a goal that resolved a secret.</summary>
+    private static IReadOnlyList<string> SecretsIn(SupervisorAcceptanceSpec spec) =>
+        Workflows.Llm.LlmCallContext.Current?.CaptureRedactor?.FoundIn(JsonSerializer.SerializeToElement(spec, AgentJson.Options)) ?? [];
+
+    /// <summary>A fail-closed grade detail quoting what failed, masked with this node's scope secrets before the tape keeps it.</summary>
+    private static string MaskedDetail(string detail) =>
+        Workflows.Llm.LlmCallContext.Current?.CaptureRedactor?.Redact(detail).Value ?? detail;
 
     /// <summary>
     /// The posture of the run-level STOP grade, whose head mixes every unit's work: the run's own autonomy grant, which

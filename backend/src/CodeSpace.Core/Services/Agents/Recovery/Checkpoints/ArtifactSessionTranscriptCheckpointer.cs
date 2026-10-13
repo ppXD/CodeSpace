@@ -21,6 +21,13 @@ namespace CodeSpace.Core.Services.Agents.Recovery.Checkpoints;
 /// <para>Bounded by <see cref="AgentRunExecutor.MaxSessionTranscriptBytes"/> — the SAME cap the end-of-run capture
 /// reads, deliberately not a second knob. Over it the checkpoint skips exactly as that capture does.</para>
 ///
+/// <para>Masked with the run's redactor (<see cref="SessionTranscriptCheckpointRequest.Redactor"/>) before it is stored,
+/// as the end-of-run capture is: the agent can write its key or a workflow secret into its own session, and a checkpoint
+/// is a team artifact a retry restores. The mask keeps every line valid JSON (<see cref="SessionTranscriptRedaction"/>),
+/// so the restored conversation still resumes. The checkpoint's <see cref="SessionTranscriptCheckpoint.Bytes"/> stays
+/// the length of the FILE's complete prefix, not of the masked copy: it is the growth watermark the next tick measures
+/// the file against.</para>
+///
 /// <para>STATELESS, and resolved in a DI scope of the caller's own. The executor dispatches this OFF its drain tick,
 /// and the tick is using the executor's scoped <c>DbContext</c> every 250 ms for its event flush and spool-offset
 /// write — so a checkpointer sharing that context would put two operations on one EF context concurrently. EF refuses
@@ -117,7 +124,7 @@ public sealed class ArtifactSessionTranscriptCheckpointer : IAgentSessionTranscr
 
         if (request.PreviousBytes is { } previous && complete <= previous) return null;   // the growth was entirely inside the torn tail
 
-        var write = await _artifacts.PutDeclaredAsync(new ArtifactRetentionWriteRequest(request.TeamId, buffer.AsMemory(0, complete), TranscriptContentType, ArtifactRetentionClass.SessionTranscriptCheckpoint, CheckpointHolderKind, runId), cancellationToken).ConfigureAwait(false);
+        var write = await _artifacts.PutDeclaredAsync(new ArtifactRetentionWriteRequest(request.TeamId, Masked(buffer.AsMemory(0, complete), request.Redactor), TranscriptContentType, ArtifactRetentionClass.SessionTranscriptCheckpoint, CheckpointHolderKind, runId), cancellationToken).ConfigureAwait(false);
         var checkpoint = new SessionTranscriptCheckpoint(write.ArtifactId, _clock.GetUtcNow(), complete);
 
         if (!await _runs.StampSessionTranscriptCheckpointAsync(request.Owner, checkpoint, request.SessionId, cancellationToken).ConfigureAwait(false))
@@ -130,6 +137,17 @@ public sealed class ArtifactSessionTranscriptCheckpointer : IAgentSessionTranscr
         _logger.LogDebug("Agent run {RunId}: checkpointed {Bytes} bytes of session transcript as artifact {ArtifactId}; another host can continue this conversation if this one dies", runId, checkpoint.Bytes, checkpoint.ArtifactId);
 
         return checkpoint;
+    }
+
+    /// <summary>The complete prefix as it may be stored: masked with the run's secrets, and the read bytes themselves when there was nothing to mask.</summary>
+    private static ReadOnlyMemory<byte> Masked(ReadOnlyMemory<byte> prefix, SecretRedactor redactor)
+    {
+        if (redactor.IsEmpty) return prefix;
+
+        var text = System.Text.Encoding.UTF8.GetString(prefix.Span);
+        var masked = SessionTranscriptRedaction.Redact(text, redactor);
+
+        return ReferenceEquals(masked, text) ? prefix : System.Text.Encoding.UTF8.GetBytes(masked);
     }
 
     /// <summary>

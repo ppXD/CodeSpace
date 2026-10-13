@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Harnesses.Claude;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
@@ -187,13 +188,45 @@ public class AgentRunExecutorSessionTranscriptTests
         Encoding.UTF8.GetBytes(captured.SessionTranscript).ShouldBe(spool.SessionBytes, "under the cap the session is captured byte-for-byte; without this the skip test would pass on a capture that never works");
     }
 
+    // ─── SX-13: what the capture KEEPS is masked, and still resumes ─────────────────────────────────
+    //
+    // The session file is the agent's own: a tool call that printed its environment, or a goal that carried a
+    // workflow secret, puts the value there verbatim. The capture is the result's sessionTranscript, the offloaded
+    // artifact and the resume payload a retry restores, so it is masked with the run's redactor — and masked inside
+    // the JSON values, because the next attempt hands these exact lines to `--resume`.
+
+    [Fact]
+    public async Task A_captured_session_is_masked_with_the_runs_secrets_and_every_line_still_parses()
+    {
+        // MUTATION this pins: read the file into SessionTranscript without SessionTranscriptRedaction (the shape before
+        // this fix) → the key and the workflow secret are in the captured transcript → red.
+        const string key = "CANARY-G2-capture-sk-ant-91b2c3d4e5";
+        const string workflowSecret = "CANARY-G2-capture-wf-\"quoted\"-7a8b";
+        var session = JsonSerializer.Serialize(new { type = "user", tool_result = $"ANTHROPIC_API_KEY={key}" }) + "\n"
+                      + JsonSerializer.Serialize(new { type = "assistant", text = $"deploying with {workflowSecret}" }) + "\n";
+        using var spool = new SessionSpool(Encoding.UTF8.GetBytes(session));
+
+        var captured = await CaptureAsync(spool, Result(), new SecretRedactor([key, workflowSecret]));
+
+        var lines = captured.SessionTranscript.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        lines.Length.ShouldBe(2, "the mask works line by line; the session keeps its turns");
+        foreach (var line in lines)
+        {
+            using var parsed = JsonDocument.Parse(line);   // throws on a line the mask broke — --resume would refuse it
+            parsed.RootElement.ToString().ShouldNotContain(key);
+        }
+
+        captured.SessionTranscript.ShouldNotContain(key, Case.Sensitive, "the model key the agent echoed must not be kept");
+        JsonDocument.Parse(lines[1]).RootElement.GetProperty("text").GetString().ShouldBe("deploying with ***", "the workflow secret is masked inside its value, escaped quotes and all");
+    }
+
     /// <summary>Run the production capture over a staged spool and return the result it produced.</summary>
-    private static async Task<AgentRunResult> CaptureAsync(SessionSpool spool, AgentRunResult result)
+    private static async Task<AgentRunResult> CaptureAsync(SessionSpool spool, AgentRunResult result, SecretRedactor? redactor = null)
     {
         var executor = new AgentRunExecutor(null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, null!, NullLogger<AgentRunExecutor>.Instance);
         var task = new AgentTask { Goal = "Fix the failing billing tests", Harness = ClaudeCodeHarness.HarnessKind, WorkspaceDirectory = SessionSpool.WorkspaceDirectory };
 
-        return await executor.CaptureSessionTranscriptAsync(new AgentRunExecutor.SessionCapture(Guid.NewGuid(), task, new ClaudeCodeHarness(), spool.Handle), result, CancellationToken.None);
+        return await executor.CaptureSessionTranscriptAsync(new AgentRunExecutor.SessionCapture(Guid.NewGuid(), task, new ClaudeCodeHarness(), spool.Handle, redactor ?? SecretRedactor.None), result, CancellationToken.None);
     }
 
     private static AgentRunResult Result() => new() { Status = AgentRunStatus.Succeeded, ExitReason = "completed", SessionId = "sess-cap-boundary" };
@@ -205,7 +238,9 @@ public class AgentRunExecutorSessionTranscriptTests
 
         private readonly string _root = Path.Combine(Path.GetTempPath(), $"cs-spool-{Guid.NewGuid():N}");
 
-        public SessionSpool(long atLeastBytes)
+        public SessionSpool(long atLeastBytes) : this(BuildSession(atLeastBytes)) { }
+
+        public SessionSpool(byte[] session)
         {
             var configHome = LocalProcessRunner.ConfigHomePath(_root);
             var relative = ((IAgentSessionTranscript)new ClaudeCodeHarness()).SessionTranscriptRelativePath(configHome, WorkspaceDirectory, "sess-cap-boundary")
@@ -213,7 +248,7 @@ public class AgentRunExecutorSessionTranscriptTests
             var path = Path.Combine(configHome, relative.Replace('/', Path.DirectorySeparatorChar));
 
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            SessionBytes = BuildSession(atLeastBytes);
+            SessionBytes = session;
             File.WriteAllBytes(path, SessionBytes);
 
             Handle = new SandboxHandle { Kind = "local", ProcessId = 4242, SpoolDirectory = _root, Deadline = DateTimeOffset.UtcNow.AddHours(1) };
