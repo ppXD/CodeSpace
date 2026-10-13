@@ -33,19 +33,11 @@ public static class AgentTaskSecrets
         return secrets.Length == 0 ? task : task with { WorkflowSecrets = secrets };
     }
 
-    /// <summary>The task as the store persists it: the masked <c>task_jsonb</c> and, when the task names secrets it embeds, the sealed exact copy. Both are the column-safe text (<see cref="PersistedText.SanitizeJson"/>), so the copy a run executes is the one its public row describes.</summary>
-    public static SealedPayload Seal(AgentTask task, WorkflowSensitivePayloadSealer? sealer)
-    {
-        var exact = PersistedText.SanitizeJson(JsonSerializer.Serialize(task, AgentJson.Options))!;
+    /// <summary>The task as the store persists it: the masked <c>task_jsonb</c> and, when the task names secrets it embeds, the sealed exact copy. Both are the column-safe text (<see cref="PersistedText.SanitizeJson"/>), so the copy a run executes is the one its public row describes. While a previous-version worker is live the sealer writes the exact task unsealed instead (<see cref="WorkflowSensitivePayloadSealer"/>) — the row that worker launches from.</summary>
+    public static SealedPayload Seal(AgentTask task, WorkflowSensitivePayloadSealer? sealer) => Persist(task, sealer, throughFleetGate: true);
 
-        if (task.WorkflowSecrets is not { Count: > 0 } secrets) return new SealedPayload(exact, null);
-
-        var seal = sealer ?? throw new InvalidOperationException("An agent task embeds workflow secrets but no payload sealer is available to persist it masked.");
-
-        using var document = JsonDocument.Parse(exact);
-
-        return seal.Seal(document.RootElement, new PersistenceSecretRedactor(secrets));
-    }
+    /// <summary>A task <see cref="Open"/>ed from its row, written back onto that row by the current worker running it: in the shape it was opened from — sealed again when it names secrets (only an opened sealed copy does), whatever the fleet gate says, else exact. A previous-version worker never launches a Running row, and the launch's redactor fingerprint names exactly these secrets, which a re-attach rebuilds from the row.</summary>
+    public static SealedPayload Reseal(AgentTask task, WorkflowSensitivePayloadSealer? sealer) => Persist(task, sealer, throughFleetGate: false);
 
     /// <summary>The exact task a run executes — opened from its sealed copy, naming the secrets it embeds, when the row was sealed; else its <c>task_jsonb</c>, which is then itself exact. Null for an empty envelope.</summary>
     public static AgentTask? Open(AgentRun run, WorkflowSensitivePayloadSealer? sealer)
@@ -56,5 +48,19 @@ public static class AgentTaskSecrets
         var opened = seal.Open(run.TaskJson, run.SealedTaskCiphertext);
 
         return JsonSerializer.Deserialize<AgentTask>(opened.Json, AgentJson.Options) is { } task ? task with { WorkflowSecrets = opened.Secrets } : null;
+    }
+
+    private static SealedPayload Persist(AgentTask task, WorkflowSensitivePayloadSealer? sealer, bool throughFleetGate)
+    {
+        var exact = PersistedText.SanitizeJson(JsonSerializer.Serialize(task, AgentJson.Options))!;
+
+        if (task.WorkflowSecrets is not { Count: > 0 } secrets) return new SealedPayload(exact, null);
+
+        var seal = sealer ?? throw new InvalidOperationException("An agent task embeds workflow secrets but no payload sealer is available to persist it masked.");
+
+        using var document = JsonDocument.Parse(exact);
+        var redactor = new PersistenceSecretRedactor(secrets);
+
+        return throughFleetGate ? seal.Seal(document.RootElement, redactor) : seal.Reseal(document.RootElement, redactor);
     }
 }
