@@ -40,7 +40,7 @@ public sealed class StorageCredentialRevisionConfiguration : IEntityTypeConfigur
     {
         builder.ToTable("storage_credential_revision", table =>
         {
-            table.HasCheckConstraint("ck_storage_credential_revision_encrypted_payload", "btrim(encrypted_payload) <> ''");
+            table.HasCheckConstraint("ck_storage_credential_revision_encrypted_payload", "encrypted_payload = '' OR btrim(encrypted_payload) <> ''");
             table.HasCheckConstraint("ck_storage_credential_revision_envelope_fingerprint", "envelope_fingerprint ~ '^sha256:[0-9a-f]{64}$'");
             table.HasCheckConstraint("ck_storage_credential_revision_number", "revision > 0");
             table.HasCheckConstraint("ck_storage_credential_revision_provider_type_key", "provider_type_key ~ '^[a-z0-9][a-z0-9.-]*/v[1-9][0-9]*$'");

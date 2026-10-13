@@ -37,7 +37,8 @@ public sealed record CreateStorageDefaultCommand : ICommand<StorageDefaultDetail
 /// <summary>
 /// Replaces the template's configuration and advances its revision. Omitting <c>Secret</c> keeps the attached
 /// envelope; supplying one appends a new envelope and repoints the template at it; <c>ClearCredential</c> detaches
-/// the envelope for a provider that needs none. Superseded envelopes are never overwritten in place.
+/// the envelope for a provider that needs none. A replaced or detached envelope is never rewritten: it keeps its
+/// fingerprint and hint as history, and its payload is blanked, since nothing reads it any more.
 /// </summary>
 public sealed record UpdateStorageDefaultCommand : ICommand<StorageDefaultDetail?>, IRequireGlobalPermission
 {

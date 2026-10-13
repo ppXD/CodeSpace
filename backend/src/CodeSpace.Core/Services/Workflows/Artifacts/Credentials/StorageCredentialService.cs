@@ -130,8 +130,25 @@ public sealed class StorageCredentialService : IStorageCredentialService, IScope
         credential.RevokedBy = actorId;
 
         await SaveConcurrentAsync("The storage credential changed before it could be revoked.", cancellationToken).ConfigureAwait(false);
+        await ShredRevisionsAsync(teamId, credential.Id, cancellationToken).ConfigureAwait(false);
         return Metadata(Projection(credential, current));
     }
+
+    /// <summary>
+    /// Blank the encrypted payload of every revision of a credential that has just been revoked; revision, provider,
+    /// hint, envelope fingerprint and authorship stay for the audit trail. Nothing reads them again — the resolver admits
+    /// only an Active credential, revocation is terminal, and it was refused while a stored location or a live profile
+    /// still resolved through the credential — so the ciphertext could only ever be opened from a database copy.
+    ///
+    /// <para>After the revocation is saved, and as its own statement, because the revision guard admits the blanking only
+    /// once it sees the credential Revoked. Superseded revisions of an Active credential are never blanked: a profile
+    /// pins an exact revision, so each of them still decrypts the bytes stored through it.</para>
+    /// </summary>
+    private async Task ShredRevisionsAsync(Guid teamId, Guid credentialId, CancellationToken cancellationToken) =>
+        await _db.StorageCredentialRevision
+            .Where(value => value.TeamId == teamId && value.StorageCredentialId == credentialId && value.EncryptedPayload != string.Empty)
+            .ExecuteUpdateAsync(setters => setters.SetProperty(value => value.EncryptedPayload, string.Empty), cancellationToken)
+            .ConfigureAwait(false);
 
     /// <summary>
     /// Revocation is terminal and the secret resolver admits none but an Active credential, so revoking one a stored

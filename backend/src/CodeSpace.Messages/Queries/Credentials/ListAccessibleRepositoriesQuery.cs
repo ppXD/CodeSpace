@@ -4,7 +4,12 @@ using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Queries.Credentials;
 
-public sealed record ListAccessibleRepositoriesQuery : IQuery<RemoteRepositoryPage>, IRequireCredentialAccess
+/// <summary>
+/// Lists the repositories a credential's account can see at its provider — the picker a bind feeds from. It presents the
+/// credential to the provider, so it is <see cref="IRequireCredentialSpend"/>: the owner of a Personal credential, or a
+/// repos.manage holder; never a member spending a teammate's or the team's token on membership alone.
+/// </summary>
+public sealed record ListAccessibleRepositoriesQuery : IQuery<RemoteRepositoryPage>, IRequireCredentialSpend
 {
     /// <summary>Default page size — matches the PR-list default and keeps the picker snappy even on accounts with thousands of repos.</summary>
     public const int DefaultPerPage = 30;

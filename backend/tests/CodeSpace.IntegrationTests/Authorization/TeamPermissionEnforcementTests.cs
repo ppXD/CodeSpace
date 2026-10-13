@@ -14,6 +14,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Queries.Credentials;
 using CodeSpace.Messages.Queries.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -211,6 +212,41 @@ public class TeamPermissionEnforcementTests
 
         thrown.ShouldBeNull();
         (await LoadCredentialStatusAsync(credentialId).ConfigureAwait(false)).ShouldBe(CredentialStatus.Revoked);
+    }
+
+    /// <summary>
+    /// Listing what a credential reaches presents it to the provider, so on membership alone a Viewer could spend the
+    /// Owner's personal token to enumerate everything the Owner's account can see there — private repositories outside
+    /// the team included. Below Admin only the caller's own Personal credential lists; a teammate's and the team's own
+    /// take repos.manage, the bar of the bind the listing feeds. The allow path reaches the provider lookup, which the Git
+    /// kind cannot answer — anything but a denial is past the gate.
+    /// </summary>
+    [Theory]
+    [MemberData(nameof(RevokesByRoleAndHolder))]
+    public async Task Below_Admin_only_the_callers_own_personal_credential_lists_what_it_reaches(TeamRole role, CredentialHolder holder, bool denied)
+    {
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var caller = team.UserFor(role);
+        var teammate = role == TeamRole.Owner ? team.Admin : team.Owner;
+        var credentialId = await SeedCredentialAsync(team.TeamId, holder switch { CredentialHolder.Caller => caller, CredentialHolder.Teammate => teammate, _ => null }).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(caller, team.TeamId);
+        var thrown = await Record.ExceptionAsync(() => scope.Resolve<IMediator>().Send(new ListAccessibleRepositoriesQuery { CredentialId = credentialId })).ConfigureAwait(false);
+
+        AssertDenial(thrown, denied, role, TeamPermissions.ReposManage);
+    }
+
+    [Fact]
+    public async Task An_instance_Admin_outside_the_team_lists_through_a_members_personal_credential()
+    {
+        // The instance Admin role has an Owner's standing in every team (TeamStanding), membership row or not.
+        var team = await SeedTeamAsync().ConfigureAwait(false);
+        var credentialId = await SeedCredentialAsync(team.TeamId, team.Member).ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScopeAs(Guid.NewGuid(), team.TeamId, Roles.Admin);
+        var thrown = await Record.ExceptionAsync(() => scope.Resolve<IMediator>().Send(new ListAccessibleRepositoriesQuery { CredentialId = credentialId })).ConfigureAwait(false);
+
+        thrown.ShouldNotBeOfType<TenantAccessDeniedException>();
     }
 
     [Fact]

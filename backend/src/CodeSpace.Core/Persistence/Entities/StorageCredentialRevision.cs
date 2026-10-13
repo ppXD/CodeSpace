@@ -18,7 +18,8 @@ public class StorageCredentialRevision : IEntity<Guid>
 
     /// <summary>
     /// Self-contained ciphertext produced by the established payload-encryption primitive. It is never plaintext JSON,
-    /// an individual key/token, or a model-credential reference.
+    /// an individual key/token, or a model-credential reference. Empty once the credential is Revoked — the one change a
+    /// revision ever admits (0249).
     /// </summary>
     public string EncryptedPayload { get; set; } = string.Empty;
 

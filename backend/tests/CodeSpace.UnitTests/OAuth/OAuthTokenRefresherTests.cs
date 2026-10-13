@@ -172,21 +172,29 @@ public class OAuthTokenRefresherTests
         refusal.Error.ShouldBe("invalid_grant");
     }
 
-    [Fact]
-    public async Task A_credential_revoked_while_the_provider_rotated_is_not_written_back()
+    /// <summary>
+    /// Revocation empties the row without taking the refresh lock — here while the provider answers the refresh. The pair
+    /// it issued must not land in the revoked row, and since nothing stores it, it is revoked at the provider — the way the
+    /// write that emptied the row ends tokens. A Disconnect ends the user's grant, so the pair goes with the grant. A
+    /// retirement (connection delete, departure, relink) also soft-deletes the row and ends tokens, never the grant, which
+    /// on GitHub also carries the user's tokens in every other team connected through the same OAuth App.
+    /// </summary>
+    [Theory]
+    [InlineData(false, true)]   // Disconnect: blanked, still listed → the whole grant
+    [InlineData(true, false)]   // retirement: blanked and soft-deleted → only the pair
+    public async Task A_credential_revoked_while_the_provider_rotated_is_not_written_back(bool retired, bool expectedWholeGrant)
     {
-        // Revocation empties the row without taking the refresh lock — here while the provider answers the refresh. The
-        // pair it issued must not land in the revoked row, and since nothing stores it, it is revoked at the provider.
         var ctx = BuildContext();
         var stale = new OAuthPayload { AccessToken = "old", RefreshToken = "r-0", ExpiresAt = Now.AddSeconds(-1) };
         var row = new StoredRow(stale);
-        var provider = new RecordingOAuthClient("new", "r-1", Now.AddHours(2), onRefreshing: row.Revoke);
+        var provider = new RecordingOAuthClient("new", "r-1", Now.AddHours(2), onRefreshing: retired ? row.Retire : row.Revoke);
 
         var failure = await Should.ThrowAsync<InvalidOperationException>(() => RunAsync(stale, ctx, row, provider));
 
         failure.Message.ShouldContain("was revoked");
         row.IsEmpty.ShouldBeTrue();
         provider.RevokedTokens.ShouldBe(new[] { "r-1", "new" });
+        provider.WholeGrants.ShouldBe(new[] { expectedWholeGrant, expectedWholeGrant }, ignoreOrder: false, customMessage: "the issued pair ends the way the write that emptied the row ends tokens — check OAuthTokenRefresher.RevokeIssuedTokensAsync");
     }
 
     [Fact]
@@ -283,13 +291,25 @@ public class OAuthTokenRefresherTests
 
         public void Store(CredentialPayload payload) => _ciphertext = Serializer.Serialize(payload);
 
+        private bool _retired;
+
+        /// <summary>A Disconnect: the token blanked, the row still in the team's list.</summary>
         public void Revoke() => _ciphertext = string.Empty;
+
+        /// <summary>A retirement — connection delete, departure, relink: the token blanked and the row soft-deleted.</summary>
+        public void Retire()
+        {
+            Revoke();
+            _retired = true;
+        }
 
         public bool IsEmpty => _ciphertext.Length == 0;
 
         public OAuthPayload Read() => (OAuthPayload)Serializer.Deserialize(AuthType.OAuth, _ciphertext);
 
         public Task<string> ReadEncryptedPayloadAsync(Guid credentialId, CancellationToken cancellationToken) => Task.FromResult(_ciphertext);
+
+        public Task<bool> IsRetiredAsync(Guid credentialId, CancellationToken cancellationToken) => Task.FromResult(_retired);
 
         /// <summary>The writer's compare-and-swap: stores only if the row still holds <paramref name="expected"/>.</summary>
         public bool StoreIfUnchanged(string expected, CredentialPayload payload)
@@ -336,6 +356,9 @@ public class OAuthTokenRefresherTests
 
         public List<string> RevokedTokens { get; } = new();
 
+        /// <summary><see cref="OAuthRevokeInput.WholeGrant"/> of each revoke, in the order of <see cref="RevokedTokens"/>.</summary>
+        public List<bool> WholeGrants { get; } = new();
+
         public ProviderKind Kind => ProviderKind.GitLab;
 
         public Uri BuildAuthorizeUrl(OAuthAuthorizeInput input) => throw new NotSupportedException();
@@ -366,6 +389,7 @@ public class OAuthTokenRefresherTests
         public Task RevokeAsync(OAuthRevokeInput input, CancellationToken cancellationToken)
         {
             RevokedTokens.Add(input.Token);
+            WholeGrants.Add(input.WholeGrant);
             return Task.CompletedTask;
         }
     }

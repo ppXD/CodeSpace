@@ -3,9 +3,11 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Services.Redaction;
 using CodeSpace.Core.Services.RepositoryBinding;
+using CodeSpace.Core.Services.Webhooks.Registration;
 using CodeSpace.Core.Services.Webhooks.Scope;
 using CodeSpace.Messages.Commands.ProviderInstances;
 using CodeSpace.Messages.Dtos.ProviderInstances;
@@ -17,7 +19,7 @@ using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.ProviderInstances;
 
-public sealed class ProviderInstanceService : IProviderInstanceService, IScopedDependency
+public sealed partial class ProviderInstanceService : IProviderInstanceService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
@@ -25,11 +27,14 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
     private readonly IPayloadEncryptor _encryptor;
     private readonly IRepositoryBindingService _binding;
     private readonly IWebhookScopeTransitionService _webhookScope;
+    private readonly IConnectionWebhookProvisioner _connectionHooks;
+    private readonly ICredentialRevocationService _revocation;
+    private readonly IOAuthGrantRevoker _grants;
     private readonly IPostCommitActions _postCommit;
     private readonly TimeProvider _clock;
     private readonly ILogger<ProviderInstanceService> _logger;
 
-    public ProviderInstanceService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, IRepositoryBindingService binding, IWebhookScopeTransitionService webhookScope, IPostCommitActions postCommit, TimeProvider clock, ILogger<ProviderInstanceService> logger)
+    public ProviderInstanceService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, IRepositoryBindingService binding, IWebhookScopeTransitionService webhookScope, IConnectionWebhookProvisioner connectionHooks, ICredentialRevocationService revocation, IOAuthGrantRevoker grants, IPostCommitActions postCommit, TimeProvider clock, ILogger<ProviderInstanceService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
@@ -37,6 +42,9 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
         _encryptor = encryptor;
         _binding = binding;
         _webhookScope = webhookScope;
+        _connectionHooks = connectionHooks;
+        _revocation = revocation;
+        _grants = grants;
         _postCommit = postCommit;
         _clock = clock;
         _logger = logger;
@@ -230,8 +238,10 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
 
         var instance = await LoadOwnedInstanceAsync(providerInstanceId, teamId, cancellationToken).ConfigureAwait(false);
         var unboundCount = await ResolveBoundRepositoriesAsync(instance, force, cancellationToken).ConfigureAwait(false);
-        var revokedCount = await CascadeRevokeCredentialsAsync(instance.Id, cancellationToken).ConfigureAwait(false);
+        await RetireConnectionWebhooksAsync(instance, cancellationToken).ConfigureAwait(false);
+        var revokedCount = await RetireCredentialsAsync(instance, cancellationToken).ConfigureAwait(false);
 
+        instance.OauthClientSecretEnc = null;
         instance.DeletedDate = _clock.GetUtcNow();
 
         return new DeleteProviderInstanceResult
@@ -353,24 +363,6 @@ public sealed class ProviderInstanceService : IProviderInstanceService, IScopedD
         }
 
         return activeRepoIds.Count;
-    }
-
-    private async Task<int> CascadeRevokeCredentialsAsync(Guid providerInstanceId, CancellationToken cancellationToken)
-    {
-        var now = _clock.GetUtcNow();
-
-        var activeCredentials = await _db.Credential
-            .Where(c => c.ProviderInstanceId == providerInstanceId && c.DeletedDate == null && c.Status == CredentialStatus.Active)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        foreach (var credential in activeCredentials)
-        {
-            credential.Status = CredentialStatus.Revoked;
-            credential.DeletedDate = now;
-            credential.LastError = "Provider instance deleted";
-        }
-
-        return activeCredentials.Count;
     }
 
     /// <summary>Empty / whitespace-only client IDs collapse to null so the form's "not yet configured" state and a literal empty string aren't treated as distinct identities by the unique index.</summary>
