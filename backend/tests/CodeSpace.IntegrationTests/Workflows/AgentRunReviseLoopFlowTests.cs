@@ -11,7 +11,9 @@ using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Supervisor;
+using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.Core.Services.Workflows.Planning.Planners;
+using CodeSpace.IntegrationTests.Agents.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
@@ -94,6 +96,48 @@ public sealed class AgentRunReviseLoopFlowTests
 
         using var scope = _fixture.BeginScope();
         (await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, run.TeamId, afterSequence: 0, CancellationToken.None)).ShouldContain(e => e.Text == AgentRunExecutor.ReviseRanColdNote);
+    }
+
+    [Fact]
+    public async Task A_warm_revision_continues_the_exact_conversation_while_every_kept_copy_of_it_is_masked()
+    {
+        // Tier: high — the real executor, runner, grader, capture, checkpointer and artifact store, and the real Claude
+        // adapter's spec (restore file, --resume, stdin goal); only the executable is a shell. The goal carries a workflow
+        // secret, sealed out of task_jsonb, which round 0 writes into its session as its user turn, as the CLI does. A WARM
+        // revision continues that conversation in this process, and its goal says only "continue" — so the conversation
+        // is the one place the agent still sees the secret, and it must be handed it exactly. Every copy that is KEPT —
+        // result_jsonb, the resume payload, each round's checkpoints — holds it masked.
+        // MUTATIONS this pins: restore the masked copy into the warm round → the revision cannot read its token, exits 4,
+        // and the run fails; drop the redactor from the revise round's capture → result_jsonb carries the secret.
+        if (OperatingSystem.IsWindows()) return;
+
+        var secret = $"CANARY-G2-revise-{Guid.NewGuid():N}";
+        var (teamId, userId) = await SeedTeamAsync();
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+        var task = TaskWith(repoId) with { Goal = $"Configure the deploy token {secret} and make feature.txt say the right thing", MaxReviseRounds = 1, WorkflowSecrets = [secret], CheckpointSessionTranscript = true };
+        var runId = await CreateRunAsync(teamId, userId, task);
+        var harness = new SecretSessionHarness();
+
+        await ExecuteAsync(runId, harness, clock: new CheckpointEveryTickClock());
+
+        var (run, result) = await LoadAsync(runId);
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, $"the warm revision must read its token back from the conversation it continues: {run.Error}");
+        result.ReviseRounds.ShouldBe(1);
+        harness.Built.Count.ShouldBe(2, "fixture check: round 0 and one revision");
+        harness.Built[1].Spec.Args.ShouldContain("--resume", customMessage: "fixture check: the revision continued the conversation");
+        harness.Built[1].Spec.ConfigHomeFiles.ShouldContain(file => file.Content.Contains(secret, StringComparison.Ordinal), "the warm round restores the conversation exactly as the agent wrote it");
+        run.TaskJson!.ShouldNotContain(secret, Case.Sensitive, "the exact conversation stays in the process: the persisted envelope never carries it");
+
+        AssertMaskedSession("result_jsonb.sessionTranscript", result.SessionTranscript, secret);
+        result.SessionTranscript.ShouldContain($"{SecretSessionHarness.RevisedLine} {SecretRedactor.Placeholder}", Case.Sensitive, "the kept session is the revision's, with the token it wrote again masked");
+        WorkflowResumeAgentRunCompletionNotifier.BuildResumePayload(run).ShouldNotContain(secret, Case.Sensitive, "nor does the resume payload a retry is handed carry it");
+
+        var checkpoints = await SessionKeepingCli.KeptCheckpointsAsync(_fixture, teamId, runId, landed: text => text.Contains(SecretSessionHarness.RevisedLine, StringComparison.Ordinal));
+        checkpoints.ShouldContain(text => text.Contains(SecretSessionHarness.RevisedLine, StringComparison.Ordinal), "fixture check: the revision's own session was checkpointed, or this proves nothing about its checkpoints");
+
+        foreach (var checkpoint in checkpoints) AssertMaskedSession("a checkpoint artifact", checkpoint, secret);
     }
 
     [Fact]
@@ -709,7 +753,7 @@ public sealed class AgentRunReviseLoopFlowTests
 
     // ─── Execution ───────────────────────────────────────────────────────────
 
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, ISandboxRunner? runner = null)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, ISandboxRunner? runner = null, TimeProvider? clock = null)
     {
         using var scope = _fixture.BeginScope();
         var executor = new AgentRunExecutor(
@@ -728,7 +772,10 @@ public sealed class AgentRunReviseLoopFlowTests
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
             scope.Resolve<IEnumerable<CodeSpace.Core.Services.Agents.Publish.IPublishGuard>>(),
-            NullLogger<AgentRunExecutor>.Instance);
+            NullLogger<AgentRunExecutor>.Instance,
+            sessionCheckpointer: scope.Resolve<CodeSpace.Core.Services.Agents.Recovery.IAgentSessionTranscriptCheckpointer>(),
+            clock: clock,
+            sealer: scope.Resolve<CodeSpace.Core.Services.Workflows.Runtime.WorkflowSensitivePayloadSealer>());
 
         await executor.ExecuteAsync(runId, CancellationToken.None);
     }
@@ -746,6 +793,15 @@ public sealed class AgentRunReviseLoopFlowTests
         var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
         var events = await scope.Resolve<IAgentRunService>().GetEventsAsync(runId, run.TeamId, afterSequence: 0, CancellationToken.None);
         return events.Select(e => e.Text).ToList();
+    }
+
+    /// <summary>A kept copy of the session: the user turn the agent wrote is there with its secret masked, the secret is nowhere, and every line still parses for --resume.</summary>
+    private static void AssertMaskedSession(string where, string? session, string secret)
+    {
+        session.ShouldNotBeNullOrEmpty($"{where} must hold the captured session — an empty one would pass every check below");
+        session!.ShouldNotContain(secret, Case.Sensitive, $"{where} carries the workflow secret");
+        session.ShouldContain($"deploy token {SecretRedactor.Placeholder} and make", Case.Sensitive, $"{where}: the user turn is kept, its secret masked");
+        SessionKeepingCli.ParseLines(session);
     }
 
     // ─── Git helpers ─────────────────────────────────────────────────────────
@@ -854,6 +910,69 @@ public sealed class AgentRunReviseLoopFlowTests
         public IAgentEventFolder CreateFolder() => _real.CreateFolder();
 
         public string? SessionTranscriptRelativePath(string configHome, string? workspaceDirectory, string? sessionId) => _real.SessionTranscriptRelativePath(configHome, workspaceDirectory, sessionId);
+    }
+
+    /// <summary>
+    /// A "scripted" harness whose spec, stream parse, fold, run-fact keys and transcript location are the REAL Claude
+    /// adapter's; only the executable is a shell. Round 0 writes its stdin — the user turn, which carries the goal — into
+    /// its session as the CLI does, and drafts work the check fails. A revision reads the deploy token back out of the
+    /// conversation it was restored, refuses to go on when that conversation holds the mask instead, writes the token
+    /// into its session again and writes the fixed work. Each round names its session early and stays up long enough
+    /// for the drain tick to checkpoint it.
+    /// </summary>
+    private sealed class SecretSessionHarness : IAgentHarness, IAgentHarnessRunFactKeys, IAgentSessionTranscript
+    {
+        /// <summary>What a revision writes into its session ahead of the token it read back.</summary>
+        public const string RevisedLine = "deploying with";
+
+        private const string SessionId = "sess-secret-revise";
+
+        /// <summary>Names the session early, so the drain tick can address it while the round is still running.</summary>
+        private const string NamesTheSession = $$"""printf '%s\n' '{"type":"system","subtype":"init","session_id":"{{SessionId}}"}'""";
+
+        private const string Finishes = $$"""printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"done","session_id":"{{SessionId}}"}'""";
+        private readonly ClaudeCodeHarness _real = new();
+
+        public string Kind => "scripted";
+        public string Version => "test";
+        public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
+        public AgentRunFactKeys RunFactKeys => _real.RunFactKeys;
+
+        public List<(AgentTask Task, SandboxSpec Spec)> Built { get; } = new();
+
+        public SandboxSpec BuildInvocation(AgentTask task)
+        {
+            var spec = _real.BuildInvocation(task);
+            Built.Add((task, spec));
+
+            var session = $"\"$CLAUDE_CONFIG_DIR/{ClaudeTranscriptPath.For(task.WorkspaceDirectory!, SessionId)}\"";
+            var work = task.Goal.StartsWith(AgentRunExecutor.ReviseInstructionPrefix, StringComparison.Ordinal) ? Revise(session) : Draft(session);
+
+            return spec with { Command = "/bin/sh", Args = new[] { "-c", $"{work} && {NamesTheSession} && sleep 2 && {Finishes}" } };
+        }
+
+        /// <summary>Keep the user turn — the goal, with the token in it — as the session's first line, and draft failing work.</summary>
+        private static string Draft(string session) =>
+            $$"""mkdir -p "$(dirname {{session}})" && cat >> {{session}} && printf 'draft\n' > feature.txt""";
+
+        /// <summary>Read the token back out of the restored conversation, refuse the mask, write it into the session again, and fix the work.</summary>
+        private static string Revise(string session) =>
+            $$"""cat >/dev/null && token=$(sed -n 's/.*deploy token \([^ ]*\) and make.*/\1/p' {{session}} | head -n 1) && case "$token" in ''|'***') echo "the restored conversation does not hold the deploy token: $token" >&2; exit 4;; esac && printf '{"type":"assistant","text":"{{RevisedLine}} %s"}\n' "$token" >> {{session}} && printf 'revised clean\n' > feature.txt""";
+
+
+        public IReadOnlyList<AgentEvent> ParseEvents(string rawLine) => _real.ParseEvents(rawLine);
+
+        public IAgentEventFolder CreateFolder() => _real.CreateFolder();
+
+        public string? SessionTranscriptRelativePath(string configHome, string? workspaceDirectory, string? sessionId) => _real.SessionTranscriptRelativePath(configHome, workspaceDirectory, sessionId);
+    }
+
+    /// <summary>A clock on which the session-checkpoint cadence has always elapsed — each read is one interval past the last — so a revision's session is checkpointed within its seconds rather than a minute after round 0's. Timers and timestamps stay the system's.</summary>
+    private sealed class CheckpointEveryTickClock : TimeProvider
+    {
+        private long _reads;
+
+        public override DateTimeOffset GetUtcNow() => base.GetUtcNow() + Interlocked.Increment(ref _reads) * AgentRunExecutor.SessionCheckpointInterval;
     }
 
     /// <summary>A "scripted" harness whose spec is the REAL Codex adapter's — its own input cap included — with only the executable swapped; round 0 writes draft work, a revision the fixed work.</summary>

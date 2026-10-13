@@ -70,6 +70,7 @@ public sealed partial class LocalProcessRunner
         ValidateLaunchKey(request);
         var hash = NativeLaunchProtocol.SpecHash(spec);
         var spool = SpoolDirectoryFor(request.SpoolKey);
+        CreateOwnerOnlyDirectory(spool);   // its out.log/err.log are the agent's output before redaction
         var directory = NativeLaunchFiles.DirectoryFor(spool);
         Directory.CreateDirectory(directory);
         if (!OperatingSystem.IsWindows()) File.SetUnixFileMode(directory, UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);

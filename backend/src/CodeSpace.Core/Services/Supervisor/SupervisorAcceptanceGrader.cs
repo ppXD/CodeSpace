@@ -65,7 +65,10 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
     public Task<BenchmarkGrade> GradeAsync(Guid repositoryId, Guid teamId, string branch, SupervisorAcceptanceSpec spec, int timeoutSeconds, OracleAnchor anchor, CancellationToken cancellationToken) =>
         GradeAsync(new RepositoryAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, Branch = branch, Spec = spec, TimeoutSeconds = timeoutSeconds, Anchor = anchor, Posture = null }, cancellationToken);
 
-    public async Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
+    public async Task<BenchmarkGrade> GradeAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        MaskedGrade(await GradeBranchAsync(request, cancellationToken).ConfigureAwait(false), request.WorkflowSecrets);
+
+    private async Task<BenchmarkGrade> GradeBranchAsync(RepositoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
         var (repositoryId, teamId, branch, spec, timeoutSeconds, anchor) = (request.RepositoryId, request.TeamId, request.Branch, request.Spec, request.TimeoutSeconds, request.Anchor);
 
@@ -110,7 +113,10 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
     public Task<BenchmarkGrade> GradeDirectoryAsync(string directory, SupervisorAcceptanceSpec spec, Guid teamId, int timeoutSeconds, CancellationToken cancellationToken) =>
         GradeDirectoryAsync(new DirectoryAcceptanceGradeRequest { Directory = directory, Spec = spec, TeamId = teamId, TimeoutSeconds = timeoutSeconds, Posture = null }, cancellationToken);
 
-    public async Task<BenchmarkGrade> GradeDirectoryAsync(DirectoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
+    public async Task<BenchmarkGrade> GradeDirectoryAsync(DirectoryAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        MaskedGrade(await GradeLiveDirectoryAsync(request, cancellationToken).ConfigureAwait(false), request.WorkflowSecrets);
+
+    private async Task<BenchmarkGrade> GradeLiveDirectoryAsync(DirectoryAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
         if (!Directory.Exists(request.Directory))
             return new BenchmarkGrade { Passed = false, Detail = "grade-error: the workspace directory no longer exists", Class = Messages.Agents.Benchmark.GradeFailureClass.Environment };
@@ -121,7 +127,10 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
     public Task<BenchmarkGrade> GradeCapturedAsync(Guid agentRunId, Guid teamId, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
         GradeCapturedAsync(new CapturedAcceptanceGradeRequest { AgentRunId = agentRunId, TeamId = teamId, Spec = spec, TimeoutSeconds = timeoutSeconds, Posture = null }, cancellationToken);
 
-    public async Task<BenchmarkGrade> GradeCapturedAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken)
+    public async Task<BenchmarkGrade> GradeCapturedAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        MaskedGrade(await GradeRebuiltWorldAsync(request, cancellationToken).ConfigureAwait(false), request.WorkflowSecrets);
+
+    private async Task<BenchmarkGrade> GradeRebuiltWorldAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
         var (agentRunId, teamId, spec, timeoutSeconds) = (request.AgentRunId, request.TeamId, request.Spec, request.TimeoutSeconds);
         var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "captured-" + Guid.NewGuid().ToString("N"));
@@ -135,7 +144,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
                 return Failed(ISupervisorAcceptanceGrader.NoDeliverablesCaptured, GradeFailureClass.Genuine);
             }
 
-            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.Posture, request.ProducerModel), cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.Posture, request.ProducerModel, WorkflowSecrets: request.WorkflowSecrets), cancellationToken).ConfigureAwait(false);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -239,7 +248,10 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
     public Task<BenchmarkGrade> GradePatchAsync(Guid repositoryId, Guid teamId, string baseSha, string inlinePatch, Guid? patchArtifactId, SupervisorAcceptanceSpec spec, int timeoutSeconds, IReadOnlyList<string>? oracleFloorPrograms, CancellationToken cancellationToken) =>
         GradePatchAsync(new PatchAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, BaseSha = baseSha, InlinePatch = inlinePatch, PatchArtifactId = patchArtifactId, Spec = spec, TimeoutSeconds = timeoutSeconds, OracleFloorPrograms = oracleFloorPrograms, Posture = null }, cancellationToken);
 
-    public async Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken)
+    public async Task<BenchmarkGrade> GradePatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        MaskedGrade(await GradeAppliedPatchAsync(request, cancellationToken).ConfigureAwait(false), request.WorkflowSecrets);
+
+    private async Task<BenchmarkGrade> GradeAppliedPatchAsync(PatchAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
         var (repositoryId, teamId, baseSha, inlinePatch, patchArtifactId, spec, timeoutSeconds, oracleFloorPrograms) = (request.RepositoryId, request.TeamId, request.BaseSha, request.InlinePatch, request.PatchArtifactId, request.Spec, request.TimeoutSeconds, request.OracleFloorPrograms);
         var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "grade-" + Guid.NewGuid().ToString("N"));
@@ -302,7 +314,10 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
     public Task<BenchmarkGrade> GradeBaseAsync(Guid repositoryId, Guid teamId, string baseSha, SupervisorAcceptanceSpec spec, int timeoutSeconds, CancellationToken cancellationToken) =>
         GradeBaseAsync(new BaseAcceptanceGradeRequest { RepositoryId = repositoryId, TeamId = teamId, BaseSha = baseSha, Spec = spec, TimeoutSeconds = timeoutSeconds, Posture = null }, cancellationToken);
 
-    public async Task<BenchmarkGrade> GradeBaseAsync(BaseAcceptanceGradeRequest request, CancellationToken cancellationToken)
+    public async Task<BenchmarkGrade> GradeBaseAsync(BaseAcceptanceGradeRequest request, CancellationToken cancellationToken) =>
+        MaskedGrade(await GradeBaseTreeAsync(request, cancellationToken).ConfigureAwait(false), request.WorkflowSecrets);
+
+    private async Task<BenchmarkGrade> GradeBaseTreeAsync(BaseAcceptanceGradeRequest request, CancellationToken cancellationToken)
     {
         var (repositoryId, teamId, baseSha, spec, timeoutSeconds) = (request.RepositoryId, request.TeamId, request.BaseSha, request.Spec, request.TimeoutSeconds);
         var directory = Path.Combine(LocalGitWorkspaceProvider.WorkspacesRoot, "grade-base-" + Guid.NewGuid().ToString("N"));
@@ -314,7 +329,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
 
             await CloneAtBaseAsync(clone, baseSha, directory, cancellationToken).ConfigureAwait(false);
 
-            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.Posture), cancellationToken).ConfigureAwait(false);
+            return await GradeWorkspaceAsync(new WorkspaceGradeRequest(directory, spec, teamId, timeoutSeconds, request.Posture, WorkflowSecrets: request.WorkflowSecrets), cancellationToken).ConfigureAwait(false);
         }
         catch (WorkspaceException ex)
         {
@@ -826,6 +841,11 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
     /// before it is clipped onto the tail and stored as a team artifact a Viewer can download, the oracle note and the
     /// detail (a failed setup's detail carries its stderr). The check ran with the exact argv; only what is kept is
     /// masked. No secrets: the grade unchanged. Internal for direct unit pinning.
+    ///
+    /// <para>Applied twice, and idempotent: at the evidence capture, so the stored artifact is masked, and on every
+    /// lane's way out, so a grade that never reached a check — a failed clone, a patch that would not apply, an oracle
+    /// restore or a fault the lane caught, each quoting what failed (<c>clone-failed:</c>, <c>grade-error:</c>) — is
+    /// masked too.</para>
     /// </summary>
     internal static BenchmarkGrade MaskedGrade(BenchmarkGrade grade, IReadOnlyList<string>? secrets)
     {

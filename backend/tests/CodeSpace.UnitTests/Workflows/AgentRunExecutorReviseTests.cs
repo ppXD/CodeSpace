@@ -135,6 +135,20 @@ public sealed class AgentRunExecutorReviseTests
         revise.Goal.ShouldNotContain("Original goal", customMessage: "a warm resume already holds the goal — only the delta is sent");
     }
 
+    [Fact]
+    public void A_warm_revision_continues_the_exact_conversation_it_is_handed_rather_than_the_masked_kept_copy()
+    {
+        // The kept transcript is masked for storage; the warm goal only says "continue". The executor hands the round
+        // the session as the agent wrote it, so a secret the original goal carried is still in the conversation.
+        var result = AcceptanceFailed("exit 1") with { SessionId = "sess-1", SessionTranscript = "{\"text\":\"deploy with ***\"}" };
+
+        var revise = AgentRunExecutor.BuildReviseTask(TaskWith(), result, "the check failed", conversation: "{\"text\":\"deploy with tok-123\"}");
+
+        revise.RestoredTranscript.ShouldBe("{\"text\":\"deploy with tok-123\"}");
+        revise.ResumeFromSessionId.ShouldBe("sess-1");
+        AgentRunExecutor.BuildReviseTask(TaskWith(), result, "the check failed", mayResume: false, conversation: "{\"text\":\"deploy with tok-123\"}").RestoredTranscript.ShouldBeNull("a round the pipe cannot carry warm restores nothing");
+    }
+
     [Theory]
     [InlineData("sess-1", null)]   // id captured but no transcript — --resume would error on an empty config home
     [InlineData(null, "bytes")]    // transcript without an id — nothing to hand --resume

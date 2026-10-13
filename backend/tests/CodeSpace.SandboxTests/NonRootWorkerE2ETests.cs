@@ -188,6 +188,16 @@ public sealed class NonRootWorkerE2ETests(ITestOutputHelper output)
     }
 
     [Fact]
+    public async Task A_confined_run_spools_owner_only_as_the_worker_uid_and_still_uses_its_config_home()
+    {
+        // The spool and its raw logs are owner-only now: the shipped uid must still bind its config home out of it under
+        // bubblewrap, write there, and read the run back.
+        if (!NonRootWorker.Require()) return;
+
+        await new SpoolPermissionsE2ETests(output).OwnerOnlySpoolAsync(Lane);
+    }
+
+    [Fact]
     public async Task A_standard_claude_agent_that_plants_push_vectors_in_its_git_cannot_reach_the_sink_when_the_platform_publishes()
     {
         // The publish-isolation arm with Claude at Standard, the posture the worker ships it in: bypassPermissions, which the

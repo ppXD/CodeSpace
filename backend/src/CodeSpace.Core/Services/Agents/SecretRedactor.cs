@@ -65,6 +65,9 @@ public sealed class SecretRedactor
     /// </summary>
     public SecretRedactor With(IEnumerable<string> additional) => new(_secrets.Concat(additional));
 
+    /// <summary>This redactor plus every form <paramref name="variants"/> gives each of its secrets — a new instance, for text that holds a secret written another way (escaped inside JSON); the receiver is unchanged.</summary>
+    internal SecretRedactor WithVariants(Func<string, IEnumerable<string>> variants) => With(_secrets.SelectMany(variants));
+
     public string Redact(string text)
     {
         if (string.IsNullOrEmpty(text) || IsEmpty) return text;
