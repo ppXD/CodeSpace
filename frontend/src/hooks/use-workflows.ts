@@ -622,6 +622,11 @@ export function useCancelRun(runId: string) {
   });
 }
 
+/** Reveal a pending Callback wait's URL. Not cached: it is a credential, fetched only when someone asks to see it. */
+export function useRevealCallbackUrl(runId: string) {
+  return useMutation({ mutationFn: (waitId: string) => workflowsApi.revealCallbackUrl(runId, waitId), gcTime: 0 });
+}
+
 /** Approve / reject a run parked on a flow.wait_approval, then resume it. */
 export function useResumeRun(runId: string) {
   const qc = useQueryClient();

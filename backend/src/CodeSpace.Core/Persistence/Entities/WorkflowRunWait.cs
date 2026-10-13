@@ -25,8 +25,26 @@ public class WorkflowRunWait
     /// <summary>Why the run is parked + how it wakes. One of <see cref="WorkflowWaitKinds"/>.</summary>
     public string WaitKind { get; set; } = default!;
 
-    /// <summary>Opaque correlation id an approval / callback signal presents to resolve this wait.</summary>
+    /// <summary>
+    /// Opaque correlation id a signal presents to resolve this wait. For a <c>Callback</c> wait — whose token is a bearer
+    /// credential for an anonymous route — it still holds the token as minted, because a pod on the previous build looks
+    /// the wait up by comparing this column with the presented token. A later release blanks it for Callback rows once no
+    /// such pod can run (see migration 0248); this version looks Callback waits up by <see cref="TokenDigest"/> first.
+    /// </summary>
     public string Token { get; set; } = default!;
+
+    /// <summary>
+    /// A <c>Callback</c> wait's token as lowercase hex SHA-256 (see <c>WorkflowCallbackTokenSealer</c>), which a resume looks
+    /// the wait up by. Null on every other kind, and on a Callback row a previous-version pod parked after migration 0248 ran.
+    /// </summary>
+    public string? TokenDigest { get; set; }
+
+    /// <summary>
+    /// A <c>Callback</c> wait's token, encrypted under the deployment's environment-held variable master key (base64), for the
+    /// RunsControl-gated reveal. Null on every other kind, and on a Callback row minted before migration 0248 or parked by a
+    /// previous-version pod.
+    /// </summary>
+    public string? TokenCiphertext { get; set; }
 
     /// <summary>For <c>Timer</c> waits — the instant the scheduled resume fires. Null for approval/callback.</summary>
     public DateTimeOffset? WakeAt { get; set; }

@@ -2003,7 +2003,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 Id = pending.Id,
                 NodeId = pending.NodeId,
                 Kind = pending.WaitKind,
-                Token = pending.Token,
+                // A Callback's token alone resumes the run anonymously; only the RunsControl-gated reveal hands it out.
+                Token = WorkflowWaitKinds.ProjectedToken(pending.WaitKind, pending.Token),
                 WakeAt = pending.WakeAt,
                 Payload = SafeParseJson(pending.PayloadJson),
             },

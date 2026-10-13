@@ -70,9 +70,10 @@ public sealed class WorkflowRunPendingWaitObservationReader : IWorkflowRunPendin
         }
     }
 
+    /// <summary>A Callback's token alone resumes the run anonymously, so it is never projected; only the RunsControl-gated reveal hands it out.</summary>
     private static WorkflowRunPendingWait ReadWait(DbDataReader reader) => new()
     {
-        Id = reader.GetGuid(1), NodeId = reader.GetString(2), Kind = reader.GetString(3), Token = reader.GetString(4),
+        Id = reader.GetGuid(1), NodeId = reader.GetString(2), Kind = reader.GetString(3), Token = WorkflowWaitKinds.ProjectedToken(reader.GetString(3), reader.GetString(4)),
         WakeAt = reader.IsDBNull(5) ? null : reader.GetFieldValue<DateTimeOffset>(5),
         PromptState = Enum.TryParse<WorkflowRunPendingWaitPromptState>(reader.GetString(6), out var state) ? state : WorkflowRunPendingWaitPromptState.Invalid,
         PromptPrefix = reader.IsDBNull(7) ? null : reader.GetString(7),

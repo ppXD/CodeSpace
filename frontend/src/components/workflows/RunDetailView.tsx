@@ -6,8 +6,9 @@ import { adaptWorkflowRunViewToCanvas, type WorkflowRunViewAvailability, type Wo
 import type { NodeManifestDto, WorkflowRunDetail, WorkflowRunIdentity, WorkflowRunNodeSummary, WorkflowRunPendingWait, WorkflowRunWaitInfo } from "@/api/workflows";
 import { ApiError } from "@/api/request";
 import { useAgentRun } from "@/hooks/use-agents";
+import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { useWorkflowRunViewMetadata } from "@/hooks/use-workflow-run-view-metadata";
-import { isRunActive, useNodeManifests, useResumeRun, useWorkflowRunDetail, useWorkflowRunIdentity, useWorkflowRunPendingWait } from "@/hooks/use-workflows";
+import { isRunActive, useNodeManifests, useResumeRun, useRevealCallbackUrl, useWorkflowRunDetail, useWorkflowRunIdentity, useWorkflowRunPendingWait } from "@/hooks/use-workflows";
 
 import { AgentRunTimeline } from "./AgentRunTimeline";
 import { AgentToolCalls } from "./AgentToolCalls";
@@ -440,7 +441,7 @@ function hasContent(value: unknown): boolean {
 /**
  * The resume affordance for a Suspended run. An Approval wait gets approve/reject + an optional
  * comment (posts the decision, then the live poll shows the run continue). A Timer wait just
- * shows when it'll wake. A Callback wait shows the tokened URL. A Subworkflow wait embeds the live
+ * shows when it'll wake. A Callback wait reveals its URL on request. A Subworkflow wait embeds the live
  * child run inline — including ITS resume affordance, so e.g. an approval deep inside the child is
  * operable right here; resolving it completes the child, which auto-resumes this run.
  */
@@ -491,21 +492,58 @@ export function SuspendedPanel({ runId, wait, depth = 0, onOpenRun }: { runId: s
     );
   }
 
-  if (wait.kind === "Callback") {
-    const url = `${window.location.origin}/api/workflows/callbacks/${wait.token}`;
-    return (
-      <section className="wf-section wf-approval">
-        <h2 className="wf-section-h">Waiting for callback</h2>
-        <div className="wf-approval-prompt">An external system resumes this run by POSTing to:</div>
+  // Keyed by the wait, so a revealed URL never outlives it: when the poll moves to another callback wait while the run
+  // stays Suspended (parallel branches, a loop re-parking), the panel starts over instead of showing a dead URL.
+  if (wait.kind === "Callback") return <CallbackWaitPanel key={wait.id} runId={runId} waitId={wait.id} projectedToken={wait.token} />;
+
+  return null;
+}
+
+/** The shape every API build mints a callback token in. The placeholder an API sends in a token's place never has it. */
+const MINTED_CALLBACK_TOKEN = /^[0-9a-f]{32}$/;
+
+/**
+ * The URL an API from before the reveal existed projects: it hands every member the token itself and has no reveal route.
+ * Such an API serves this page when the page is deployed first, or when the API alone is rolled back; showing its URL keeps
+ * the panel working there as it always had. Every later API sends a placeholder, so this is null.
+ */
+function projectedCallbackUrl(projectedToken: string): string | null {
+  return MINTED_CALLBACK_TOKEN.test(projectedToken) ? new URL(`/api/workflows/callbacks/${projectedToken}`, window.location.origin).toString() : null;
+}
+
+/**
+ * A Callback wait's URL resumes the run without a session, so no run read carries it: a member who can control runs
+ * reveals it on demand (the server logs who did), and everyone else is told who can.
+ */
+function CallbackWaitPanel({ runId, waitId, projectedToken }: { runId: string; waitId: string; projectedToken: string }) {
+  const mayControl = useTeamPermissions().can(TeamPermissions.RunsControl);
+  const reveal = useRevealCallbackUrl(runId);
+  const [url, setUrl] = useState<string | null>(() => projectedCallbackUrl(projectedToken));
+
+  // A refused reveal renders from reveal.error below, so its rejection needs no handler of its own.
+  const show = () => reveal.mutateAsync(waitId).then((revealed) => setUrl(new URL(revealed.path, window.location.origin).toString()), () => undefined);
+  const hide = () => { setUrl(null); reveal.reset(); };
+
+  return (
+    <section className="wf-section wf-approval">
+      <h2 className="wf-section-h">Waiting for callback</h2>
+      <div className="wf-approval-prompt">An external system resumes this run by POSTing to its callback URL. Anyone holding the URL can resume the run, so it is shown only on request.</div>
+      {url != null ? (
         <div className="wf-callback-row">
           <input className="wf-form-input wf-callback-url" readOnly value={url} onFocus={(e) => e.currentTarget.select()} />
           <button className="btn" onClick={() => navigator.clipboard?.writeText(url)}>Copy</button>
+          <button className="btn" onClick={hide}>Hide</button>
         </div>
-      </section>
-    );
-  }
-
-  return null;
+      ) : mayControl ? (
+        <div className="wf-callback-row">
+          <button className="btn" disabled={reveal.isPending} onClick={show}><Ic.Eye size={12} /> {reveal.isPending ? "Revealing…" : "Reveal URL"}</button>
+        </div>
+      ) : (
+        <div className="wf-approval-prompt">Only members who can control runs can reveal it.</div>
+      )}
+      {reveal.error instanceof ApiError && <div className="wf-approval-err">{reveal.error.message}</div>}
+    </section>
+  );
 }
 
 /**

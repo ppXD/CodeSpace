@@ -391,15 +391,27 @@ export interface WorkflowRunNodeSummary {
 
 /** The outstanding wait a Suspended run is parked on — drives the resume affordance. */
 export interface WorkflowRunWaitInfo {
+  /** The wait row's id — what the reissue verb and the callback-URL reveal address. */
+  id: string;
   nodeId: string;
   /** "Timer" | "Approval" | "Callback" | "Subworkflow". */
   kind: string;
-  /** Correlation token — for a Callback wait, the secret the callback URL is built from. */
+  /**
+   * Correlation token — a Subworkflow wait's child run id. Never a Callback wait's token: its token alone resumes the run
+   * without a session, so the server sends a placeholder instead and only `workflowsApi.revealCallbackUrl`
+   * (runs.control) hands the token out.
+   */
   token: string;
   /** When the scheduled resume fires (Timer only). */
   wakeAt?: string | null;
   /** The node's suspend payload (e.g. an approval `prompt`). */
   payload?: unknown;
+}
+
+/** A pending Callback wait's URL path (`/api/workflows/callbacks/{token}`). Whoever holds it resumes the run without signing in. */
+export interface WorkflowCallbackUrl {
+  waitId: string;
+  path: string;
 }
 
 export type WorkflowRunPendingWaitPromptState = "Missing" | "Exact" | "Truncated" | "Invalid";
@@ -414,6 +426,7 @@ export interface WorkflowRunPendingWait {
   id: string;
   nodeId: string;
   kind: string;
+  /** A placeholder for a Callback wait — see `WorkflowRunWaitInfo.token`. */
   token: string;
   wakeAt: string | null;
   promptState: WorkflowRunPendingWaitPromptState;
@@ -1681,6 +1694,10 @@ export const workflowsApi = {
       method: "POST",
       body: JSON.stringify(body),
     }),
+
+  /** The URL of a pending Callback wait. Needs runs.control (a Viewer gets 403); the server logs who revealed it. */
+  revealCallbackUrl: (runId: string, waitId: string) =>
+    fetchJson<WorkflowCallbackUrl>(`/api/workflows/runs/${runId}/waits/${waitId}/callback-url`, { method: "POST" }),
 
   /** Continue a STRANDED Suspended run (no pending wait) on demand — drives the same re-dispatch the reconciler does. Returns whether this call drove it. */
   continueRun: (runId: string) =>
