@@ -15,8 +15,9 @@ namespace CodeSpace.Core.Persistence.Entities;
 ///                                else routes through <see cref="ValuePlain"/>.
 ///
 /// The DB CHECK constraint <c>chk_variable_value_exclusive</c> guarantees exactly one
-/// value column is populated, matching the ValueType. Application code does NOT need to
-/// defensively null-check both columns — the constraint makes inconsistent rows impossible.
+/// value column is populated, matching the ValueType — except on a deleted Secret, whose
+/// ciphertext is dropped (0249) and which no read ever reaches. Application code does NOT
+/// need to defensively null-check both columns of a live row.
 ///
 /// <para><see cref="TeamId"/> is denormalised even for Workflow scope so tenant-filter
 /// sweeps (the X-Team-Id middleware checks) work without joining workflow.</para>
@@ -54,7 +55,8 @@ public class Variable : IEntity<Guid>, IAuditable
 
     /// <summary>
     /// AES-256-GCM envelope <c>[nonce(12) || ciphertext || tag(16)]</c> when
-    /// <see cref="ValueType"/> is <see cref="VariableValueType.Secret"/>. Null otherwise.
+    /// <see cref="ValueType"/> is <see cref="VariableValueType.Secret"/>. Null otherwise, and on a
+    /// deleted Secret (see <c>VariableRetirement</c>).
     /// </summary>
     public byte[]? ValueEncrypted { get; set; }
 

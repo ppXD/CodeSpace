@@ -84,10 +84,7 @@ public sealed class VariableService : IVariableService, IScopedDependency
         var row = await LoadActiveRowAsync(scope, scopeId, name, cancellationToken).ConfigureAwait(false);
         if (row == null) return;   // idempotent — no-op on missing-name
 
-        var now = DateTimeOffset.UtcNow;
-        row.DeletedDate = now;
-        row.LastModifiedDate = now;
-        row.LastModifiedBy = actorUserId;
+        VariableRetirement.Retire(row, DateTimeOffset.UtcNow, actorUserId);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
