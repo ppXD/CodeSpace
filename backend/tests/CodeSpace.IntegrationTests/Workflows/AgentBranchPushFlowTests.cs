@@ -145,24 +145,36 @@ public sealed class AgentBranchPushFlowTests
     {
         // P2.2 end-to-end through the REAL completion pipeline (real Postgres, real git clone + authenticated push
         // against a real bare remote — only the codex/claude binary is faked): the scripted harness writes a REAL
-        // file to the clone, THEN sleeps past the 1s wall clock. CodeSpace force-kills it, but the write already
-        // reached disk before the kill — git ground truth, independent of the kill signal — so it must land as a
-        // real branch on the remote instead of vanishing with the killed process.
+        // file to the clone, says so on stdout, THEN sleeps far past its wall clock. CodeSpace force-kills it, but
+        // the write already reached disk before the kill — git ground truth, independent of the kill signal — so it
+        // must land as a real branch on the remote instead of vanishing with the killed process.
+        //
+        // The wall deadline is armed when the launch is bound, BEFORE the runner host's broker, exec bootstrap and
+        // guardian processes start and /bin/sh runs, so it has to outlast that launch on a loaded host. A 1s deadline
+        // did not: bind-to-script-start measured 1.0-2.0s on a 10x-oversubscribed host, and the kill landed before
+        // the write. The 10s deadline is comfortably above that; the "written" event makes any residual overrun read
+        // as what it is.
         if (OperatingSystem.IsWindows()) return;
         if (!await GitAvailableAsync()) return;
+
+        const int deadlineSeconds = 10;
 
         var teamId = await SeedTeamAsync();
         using var remote = new BareRemote();
         await remote.SeedWithOneCommitAsync();
 
         var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url, defaultBranch: "main");
-        var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: true, timeoutSeconds: 1);
+        var runId = await CreateRepoRunAsync(teamId, repoId, pushProducedBranch: true, timeoutSeconds: deadlineSeconds);
 
-        await ExecuteAsync(runId, new ScriptedHarness("printf 'salvaged edit\\n' > salvaged.txt; sleep 10"));
+        await ExecuteAsync(runId, new ScriptedHarness("printf 'salvaged edit\\n' > salvaged.txt && echo written; sleep 300"));
 
         using var scope = _fixture.BeginScope();
-        var run = await scope.Resolve<IAgentRunService>().GetAsync(runId, CancellationToken.None);
-        run.Status.ShouldBe(AgentRunStatus.TimedOut);
+        var service = scope.Resolve<IAgentRunService>();
+        var run = await service.GetAsync(runId, CancellationToken.None);
+        run.Status.ShouldBe(AgentRunStatus.TimedOut, "the wall deadline, not the script, ended the run — the sleep outlasts it by minutes");
+
+        var events = await service.GetEventsAsync(runId, teamId, 0, CancellationToken.None);
+        events.Select(e => e.Text).ShouldContain("written", $"the agent's write completed before the kill. Missing means the launch took longer than the {deadlineSeconds}s deadline and the agent never reached its edit — the test's precondition failed on an overloaded host, not salvage");
 
         var expectedBranch = AgentRunExecutor.BuildBranchName(runId);
         var result = JsonSerializer.Deserialize<AgentRunResult>(run.ResultJson!, AgentJson.Options)!;
