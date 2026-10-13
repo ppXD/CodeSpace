@@ -177,7 +177,7 @@ describe("RunDetailView — sub-workflow step drill-down", () => {
     useWorkflowRunMock.mockImplementation((runId: string) => {
       if (runId === "parent-1") return ok(detail({
         status: "Suspended",
-        pendingWait: { nodeId: "sub", kind: "Subworkflow", token: "child-1", payload: {} },
+        pendingWait: { id: "wait-sub", nodeId: "sub", kind: "Subworkflow", token: "child-1", payload: {} },
         nodes: [node({ nodeId: "sub", status: "Suspended", childRunId: "child-1" })],
       }));
       if (runId === "child-1") return ok(detail({ id: "child-1", nodes: [node({ nodeId: "child-step" })] }));

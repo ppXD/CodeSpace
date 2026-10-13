@@ -1,3 +1,4 @@
+using CodeSpace.Api.Logging;
 using CodeSpace.Core.Failures;
 using CodeSpace.Messages.Failures;
 using Microsoft.AspNetCore.Mvc;
@@ -69,7 +70,7 @@ public sealed class GlobalExceptionFilter : IExceptionFilter
             context.Exception,
             "{Method} {Path} failed outside the request pipeline: {FailureKind}/{FailureCode}",
             context.HttpContext.Request.Method,
-            context.HttpContext.Request.Path.Value,
+            BearerRouteLogging.PathOf(context.HttpContext),
             failure.Kind,
             failure.Code);
     }

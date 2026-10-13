@@ -9,6 +9,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Mvc.Abstractions;
 using Microsoft.AspNetCore.Mvc.Filters;
 using Microsoft.AspNetCore.Routing;
+using Microsoft.AspNetCore.Routing.Patterns;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -110,10 +111,27 @@ public class FailuresAreAlwaysLoggedTests
         logger.Entries.ShouldBeEmpty();
     }
 
-    private static void Run(Exception exception, CapturingLogger logger)
+    /// <summary>The line names the request, and on a route whose path carries a bearer token that must be the route's template.</summary>
+    [Fact]
+    public void A_failure_on_a_bearer_token_route_is_recorded_with_the_route_template_not_the_token()
+    {
+        const string canary = "CANARY-filter-path-5d8a3c1b";
+        var httpContext = new DefaultHttpContext();
+        httpContext.Request.Method = "POST";
+        httpContext.Request.Path = $"/api/invitations/{canary}/accept";
+        httpContext.SetEndpoint(new RouteEndpoint(_ => Task.CompletedTask, RoutePatternFactory.Parse("api/invitations/{token}/accept"), 0, EndpointMetadataCollection.Empty, "accept"));
+        var logger = new CapturingLogger();
+
+        Run(new InvalidOperationException("thrown in a controller, outside Send"), logger, httpContext);
+
+        logger.Entries.Single().Message.ShouldContain("POST /api/invitations/{token}/accept");
+        logger.Entries.Single().Message.ShouldNotContain(canary);
+    }
+
+    private static void Run(Exception exception, CapturingLogger logger, HttpContext? httpContext = null)
     {
         var filter = new GlobalExceptionFilter(logger);
-        var actionContext = new ActionContext(new DefaultHttpContext(), new RouteData(), new ActionDescriptor());
+        var actionContext = new ActionContext(httpContext ?? new DefaultHttpContext(), new RouteData(), new ActionDescriptor());
         var context = new ExceptionContext(actionContext, new List<IFilterMetadata>()) { Exception = exception };
 
         filter.OnException(context);

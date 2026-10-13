@@ -94,6 +94,28 @@ public static class WorkflowWaitKinds
     /// Pinned by a unit test so widening the set is a conscious, reviewed decision (Rule 8).
     /// </summary>
     public static bool IsOperatorReissuable(string waitKind) => waitKind is Timer or Callback;
+
+    /// <summary>
+    /// The wait kinds whose token is a BEARER credential: presenting it alone, with no session, resolves the wait. Only
+    /// <see cref="Callback"/> — its route is anonymous, so whoever holds the token resumes the run with a body of their
+    /// choosing. Such a token is never projected to a reader (only the RunsControl-gated reveal hands it out), and its row
+    /// also keeps a digest, which a resume looks it up by, and a ciphertext, which the reveal opens. Every other kind's
+    /// token is a run id (<see cref="Subworkflow"/>, <see cref="AgentRun"/>) or is acted on through an authenticated,
+    /// team-scoped verb that needs <c>runs.decide</c>. Pinned per kind by a unit test so adding a kind is a reviewed decision.
+    /// </summary>
+    public static bool HasBearerToken(string waitKind) => waitKind is Callback;
+
+    /// <summary>
+    /// What a run read shows in place of a bearer token (<see cref="HasBearerToken"/>). Not null: every SPA build since the
+    /// pending-wait decoder shipped refuses a wait whose token is not a 1..128-character string, and a previous-version SPA
+    /// served during the deploy would show "Pending action unavailable" for every Callback wait. It says what to do on that
+    /// SPA, whose run page builds the callback URL from it — a URL that resumes nothing: no version mints this shape, and
+    /// this version's callback route admits only 32 characters. Pinned by a unit test, and decoded by the frontend's.
+    /// </summary>
+    public const string WithheldBearerToken = "withheld-reload-the-page-to-reveal";
+
+    /// <summary>The token a run read projects for a wait of <paramref name="waitKind"/>: <see cref="WithheldBearerToken"/> for a bearer token, the stored token otherwise.</summary>
+    public static string ProjectedToken(string waitKind, string token) => HasBearerToken(waitKind) ? WithheldBearerToken : token;
 }
 
 /// <summary>Lifecycle of a <c>workflow_run_wait</c> row. CHECK-constrained at the DB layer. A wait leaves <see cref="Pending"/> one of two ways, and only <see cref="Resolved"/> carries an answer.</summary>

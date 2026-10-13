@@ -8,6 +8,7 @@ using CodeSpace.Api.Extensions;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Workflows.Callbacks;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.E2ETests.Infrastructure;
 using CodeSpace.IntegrationTests.Webhooks;
@@ -491,10 +492,13 @@ public sealed class WebhookOutsiderHardeningE2ETests : IClassFixture<WebhookApiF
         return await scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().Where(r => r.WorkflowId == workflowId).Select(r => r.Id).SingleAsync();
     }
 
+    /// <summary>The token the engine minted, read back the way the reveal does — the row itself holds only its digest and ciphertext.</summary>
     private async Task<string> LoadCallbackTokenAsync(Guid runId)
     {
         using var scope = _factory.Services.CreateScope();
-        return await scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Callback).Select(w => w.Token).SingleAsync();
+        var stored = await scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().Where(w => w.RunId == runId && w.WaitKind == WorkflowWaitKinds.Callback).Select(w => new { w.Token, w.TokenCiphertext }).SingleAsync();
+
+        return scope.ServiceProvider.GetRequiredService<WorkflowCallbackTokenSealer>().Open(stored.Token, stored.TokenCiphertext)!;
     }
 
     private async Task<List<string>> LoadRefusalsAsync(RepositorySeed seed) => (await LoadRejectedRowsAsync(seed)).Select(r => r.Error!).ToList();

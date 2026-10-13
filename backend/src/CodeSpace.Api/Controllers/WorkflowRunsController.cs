@@ -422,6 +422,19 @@ public class WorkflowRunsController : ControllerBase
             : Ok(new { outcome = outcome.ToString(), reissued = outcome == ReissueWaitOutcome.Reissued });
     }
 
+    /// <summary>
+    /// The URL of a pending Callback wait — the one the external system POSTs to. Its token resumes the run without a
+    /// session, so no read projects it: this needs <c>runs.control</c> (a Viewer gets 403) and logs who took it. Team-scoped;
+    /// foreign, not pending or not a Callback → 404; a row that keeps only the token's digest → 409. Returns
+    /// <c>{ waitId, path }</c>.
+    /// </summary>
+    [HttpPost("{runId:guid}/waits/{waitId:guid}/callback-url")]
+    public async Task<IActionResult> RevealCallbackUrl([FromRoute] Guid runId, [FromRoute] Guid waitId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new RevealWorkflowCallbackUrlCommand { RunId = runId, WaitId = waitId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
     /// <summary>Continue a run IN PLACE (same run id, never a fork): a STRANDED Suspended run (the reconciler's re-dispatch twin), a terminal FAILURE run (re-run the halting node[s]), or a terminal CANCELLED run the operator stopped mid-flight (re-run the interrupted frontier). Team-scoped; foreign → 404. Returns <c>{ continued }</c> — false when the state can't continue in place (Success/Running, or nothing incomplete to resume) so the caller falls back to replay / rerun.</summary>
     [HttpPost("{runId:guid}/continue")]
     public async Task<IActionResult> Continue([FromRoute] Guid runId, CancellationToken cancellationToken)

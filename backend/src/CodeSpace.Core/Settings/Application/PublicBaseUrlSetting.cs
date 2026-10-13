@@ -26,6 +26,12 @@ public class PublicBaseUrlSetting : IConfigurationSetting<string>
 
     public const string DevelopmentDefault = "http://localhost:5180";
 
+    /// <summary>The SPA route an invitation link opens, ahead of its token.</summary>
+    public const string InvitePath = "/invite/";
+
+    /// <summary>The SPA route a password-reset link opens, ahead of its token.</summary>
+    public const string PasswordResetPath = "/reset-password/";
+
     public PublicBaseUrlSetting(IConfiguration configuration)
     {
         Value = Resolve(configuration);
@@ -34,10 +40,10 @@ public class PublicBaseUrlSetting : IConfigurationSetting<string>
     public string Value { get; set; }
 
     /// <summary>The link an invitee follows. The path is ours; only the origin is configured.</summary>
-    public string InviteUrl(string token) => $"{Value}/invite/{Uri.EscapeDataString(token)}";
+    public string InviteUrl(string token) => $"{Value}{InvitePath}{Uri.EscapeDataString(token)}";
 
     /// <summary>The link someone locked out follows.</summary>
-    public string PasswordResetUrl(string token) => $"{Value}/reset-password/{Uri.EscapeDataString(token)}";
+    public string PasswordResetUrl(string token) => $"{Value}{PasswordResetPath}{Uri.EscapeDataString(token)}";
 
     private static string Resolve(IConfiguration configuration)
     {
