@@ -50,6 +50,25 @@ public static class AgentAcceptanceContract
     public static string Hash(AgentTask task) =>
         Messages.Contracts.ContractHashing.Hash(new { instruction = task.Goal, acceptance = task.Acceptance, expectsChanges = task.ExpectsChanges }, AgentJson.Options);
 
+    /// <summary>
+    /// P4-U1/U2: the obligations a contract-bearing workflow agent dispatched OUTSIDE the supervisor stakes for its unit
+    /// — acceptance Required plus delivery/output per its change expectation, hashed from THIS task, which must be the
+    /// task as <c>task_jsonb</c> holds it (the completion composer re-derives the hash from that column). Empty for a
+    /// task with no contract or one the supervisor stakes itself (a <c>WorkUnit</c>).
+    ///
+    /// <para>P5-4: the task carries its contract's PROVENANCE (stamped by the projection builder that knows the source
+    /// — the quick tier's spec is the operator's launch floor). Null = unknown/model-authored → the ModelProposal
+    /// default; authority is only ever under-claimed, never inflated. planRef mirrors the composer's workflow-agent
+    /// convention exactly (WorkPlanId = the run, PlanVersion 0) — the same coordinates its attempts and receipts
+    /// already carry. OwesAcceptance is true by construction — only a task with an Acceptance stakes.</para>
+    /// </summary>
+    public static IReadOnlyList<Messages.Contracts.RequirementEnvelope> WorkflowAgentRequirements(AgentTask task, string? nodeId, string iterationKey, Guid workflowRunId)
+    {
+        if (task.Acceptance is null || task.WorkUnit is not null) return [];
+
+        return SupervisorUnitContract.BuildStakedRequirements([(UnitId(nodeId, iterationKey), Hash(task), true, ExpectsChanges(task))], task.AcceptanceAuthority ?? Messages.Contracts.ContractAuthority.ModelProposal, (workflowRunId, 0));
+    }
+
     /// <summary>The <see cref="AgentRunResult.ExitReason"/> a fail-closed acceptance re-grade stamps — the machine-readable marker consumers (the agent.run node's retry verdict) key on to tell a DETERMINISTIC verdict failure from a transient death. Pinned by a unit test (Rule 8) so producer + consumer can't drift.</summary>
     public const string FailClosedExitReason = "acceptance-failed";
 

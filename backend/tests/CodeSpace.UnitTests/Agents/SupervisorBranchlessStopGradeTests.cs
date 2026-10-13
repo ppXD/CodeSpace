@@ -251,7 +251,7 @@ public sealed class SupervisorBranchlessStopGradeTests
         // artifact — so the request must name both, and nothing else of the scope.
         // MUTATIONS this pins: drop WorkflowSecrets from the branchless lane's request; read the unit's secrets without
         // opening its sealed task; or read the spec's without the ambient scope → one of the two canaries goes missing → red.
-        var sealer = new CodeSpace.Core.Services.Workflows.Runtime.WorkflowSensitivePayloadSealer(new CodeSpace.Core.Services.Workflows.Runtime.DataProtectionWorkflowSensitivePayloadProtector(new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider()));
+        var sealer = new CodeSpace.Core.Services.Workflows.Runtime.WorkflowSensitivePayloadSealer(new CodeSpace.Core.Services.Workflows.Runtime.DataProtectionWorkflowSensitivePayloadProtector(new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider()), CodeSpace.UnitTests.Fleet.FixedFleetCapabilities.AllCurrent);
         var db = Infrastructure.EmptyTestDb.New();
         var task = new AgentTask { Goal = $"write the report, deploy key {UnitSecret}", Harness = "codex-cli", WorkflowSecrets = [UnitSecret] };
         var sealedTask = AgentTaskSecrets.Seal(task, sealer);

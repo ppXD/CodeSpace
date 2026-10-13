@@ -8,6 +8,7 @@ using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Rerun;
 using CodeSpace.Core.Services.Workflows.RunSources;
+using CodeSpace.Core.Services.Workflows.Runtime;
 
 namespace CodeSpace.Core.Services.Workflows;
 
@@ -21,19 +22,21 @@ public sealed class WorkflowDefinitionServices : IScopedDependency
 
 public sealed class WorkflowLaunchServices : IScopedDependency
 {
-    public WorkflowLaunchServices(IRunStarter starter, IRunFromSnapshotStarter snapshots, IWorkflowRunDispatcher dispatcher, IPostCommitActions postCommit, IRunRecordLogger records)
+    public WorkflowLaunchServices(IRunStarter starter, IRunFromSnapshotStarter snapshots, IWorkflowRunDispatcher dispatcher, IPostCommitActions postCommit, IRunRecordLogger records, WorkflowSensitivePayloadSealer sealer)
     {
         Starter = starter;
         Snapshots = snapshots;
         Dispatcher = dispatcher;
         PostCommit = postCommit;
         Records = records;
+        Sealer = sealer;
     }
     public IRunStarter Starter { get; }
     public IRunFromSnapshotStarter Snapshots { get; }
     public IWorkflowRunDispatcher Dispatcher { get; }
     public IPostCommitActions PostCommit { get; }
     public IRunRecordLogger Records { get; }
+    public WorkflowSensitivePayloadSealer Sealer { get; }
 }
 
 public sealed class WorkflowControlServices : IScopedDependency

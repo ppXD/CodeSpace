@@ -308,16 +308,9 @@ public sealed partial class AgentRunService : IAgentRunService, IRunningAgentCan
 
         try
         {
-            // P5-4: the task carries its contract's PROVENANCE (stamped by the projection builder that knows the
-            // source — the quick tier's spec is the operator's launch floor). Null = unknown/model-authored → the
-            // ModelProposal default; authority is only ever under-claimed, never inflated.
-            // planRef mirrors the composer's workflow-agent convention exactly (WorkPlanId = the run, PlanVersion 0)
-            // — the same coordinates its attempts and receipts already carry.
-            // OwesAcceptance is true by construction — this method only stakes when task.Acceptance is present.
-            var requirements = Supervisor.SupervisorUnitContract.BuildStakedRequirements(new[]
-            {
-                (AgentAcceptanceContract.UnitId(nodeId, iterationKey), AgentAcceptanceContract.Hash(task), true, AgentAcceptanceContract.ExpectsChanges(task)),
-            }, task.AcceptanceAuthority ?? Messages.Contracts.ContractAuthority.ModelProposal, (runId, 0));
+            // The one builder the pre-rollback unseal re-stakes through too (SealedPayloadUnsealService), so the two
+            // can never stake different shapes for the same unit.
+            var requirements = AgentAcceptanceContract.WorkflowAgentRequirements(task, nodeId, iterationKey, runId);
 
             await _contracts.UpsertRequirementsAsync(runId, teamId, requirements, cancellationToken).ConfigureAwait(false);
         }

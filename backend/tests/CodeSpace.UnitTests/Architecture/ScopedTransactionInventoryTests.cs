@@ -81,6 +81,7 @@ public class ScopedTransactionInventoryTests
         ["Workflows/Budget/BudgetLedger.PhysicalLlm.cs"] = (2, "both physical-POST sites: the receipt authorizing a POST, and the receipt recording what that POST actually cost, must be committed independently of a caller that may roll back."),
         ["Workflows/Engine/WorkflowEngine.cs"] = (5, "three terminal writes that must land whatever their caller decides (two under CancellationToken.None), a redaction fallback whose fresh-scope retry depends on this transaction's discard, and a step's park, whose share lock on the run row is what a Continue's bump waits on and so must end at the park's own commit."),
         ["Workflows/ModelCalls/WorkflowRunModelCallBodyMaterializer.cs"] = (2, "the same private CreateDb() context; nothing ambient can reach it."),
+        ["Workflows/Runtime/SealedPayloadUnsealService.cs"] = (1, "the pre-rollback unseal is a non-transactional sweep: each restored agent task commits together with its unit's re-stake and on its own, so a raced or unopenable row never undoes another; joined, one transaction over the batch would."),
     };
 
     [Fact]

@@ -111,6 +111,8 @@ public class TaskLaunchApiFactory : WebApplicationFactory<CodeSpace.Api.Program>
         {
             // Singleton so deferred jobs survive past the request scope — the test drains them after the POST.
             b.RegisterType<DeferredJobClient>().As<ICodeSpaceBackgroundJobClient>().AsSelf().SingleInstance();
+            // The drain is this host's worker, and the fleet gate must see it as one (a current one).
+            b.RegisterType<DeferredDrainFleetRegistry>().As<CodeSpace.Core.Services.Fleet.IWorkerFleetRegistry>().SingleInstance();
             ConfigureContractTestServices(b);
         });
 

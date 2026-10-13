@@ -12,6 +12,8 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Fleet;
+using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.Messages.Agents;
@@ -1064,6 +1066,75 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         }
     }
 
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_sealed_auto_run_keeps_its_sealed_task_and_a_current_worker_re_attaches_its_tail_whatever_the_fleet_gate_said_at_launch(bool everyLiveWorkerReadsSealedPayloadsAtLaunch)
+    {
+        if (OperatingSystem.IsWindows()) return;
+
+        // An auto run (no pinned model) re-persists its task with the resolved model at launch. Written through the fleet
+        // gate while a previous-version worker was live, that write unsealed the Running row: a re-attach then rebuilt
+        // the launch's redactor without the task's workflow secrets, failed the handle's fingerprint and landed the run
+        // marker-only, its tail lost. No previous-version worker ever launches a Running row, so nothing gained.
+        var secret = $"CANARY-reattach-{Guid.NewGuid():N}";
+        var teamId = await SeedTeamAsync();
+        var credentialId = await SeedModelCredentialAsync(teamId, "scripted-provider", "sk-reattach-gate-5e81d0");
+        await SeedDefaultModelAsync(credentialId, "credential-default-model");
+        var runId = await CreateSealedAutoRunAsync(teamId, credentialId, secret);
+        var gate = Path.Combine(NewSpoolDir(), "release");
+        var harness = new ProjectingHarness("scripted-provider", "SCRIPTED_MODEL_KEY", script: $"echo started; while [ ! -f '{gate}' ]; do sleep 0.1; done; echo recovered");
+        using var originalScope = _fixture.BeginScope();
+        var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var instrumented = new InstrumentedAgentRunService(originalScope.Resolve<IAgentRunService>()) { BeforeOwnedAppendAsync = async _ => { reached.TrySetResult(); await resume.Task; } };
+        using var bounded = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+        var original = BuildExecutor(originalScope, harness, runs: instrumented, sealer: GatedSealer(originalScope, everyLiveWorkerReadsSealedPayloadsAtLaunch)).ExecuteAsync(runId, bounded.Token);
+        Task? successor = null;
+        try
+        {
+            await reached.Task.WaitAsync(bounded.Token);
+            using var reclaim = _fixture.BeginScope();
+            var runs = reclaim.Resolve<IAgentRunService>();
+            var launched = await runs.GetAsync(runId, bounded.Token);
+            var handle = JsonSerializer.Deserialize<SandboxHandle>(launched.RunnerHandleJson!, AgentJson.Options)!;
+            _pidsToKill.Add(handle.ProcessId);
+            _spoolDirs.Add(handle.SpoolDirectory);
+
+            launched.SealedTaskCiphertext.ShouldNotBeNull("the launch re-persisted the resolved model onto a row that was sealed, so it stays sealed");
+            launched.TaskJson.ShouldNotContain(secret);
+            JsonSerializer.Deserialize<AgentTask>(launched.TaskJson, AgentJson.Options)!.Model.ShouldBe("credential-default-model", "precondition: the auto run re-persisted its resolved model");
+
+            await LapseLeaseAsync(runId);
+            _reservations[runId] = (await runs.ReserveReattachAsync(runId, bounded.Token))!;
+            successor = ReattachAsync(runId, harness, sealer: GatedSealer(reclaim, everyLiveWorkerReadsSealedPayloads: true));
+            AgentRun current;
+            do
+            {
+                current = await runs.GetAsync(runId, bounded.Token);
+                if (current.OwnerId is null || current.OwnerId == launched.OwnerId) await Task.Delay(20, bounded.Token);
+            } while (current.OwnerId is null || current.OwnerId == launched.OwnerId);
+            resume.SetResult();
+            await Should.ThrowAsync<CodeSpace.Core.Services.Agents.Exceptions.AgentRunOwnershipLostException>(() => original);
+            await File.WriteAllTextAsync(gate, "release", bounded.Token);
+            await successor.WaitAsync(bounded.Token);
+
+            var completed = await runs.GetAsync(runId, bounded.Token);
+            completed.Status.ShouldBe(AgentRunStatus.Succeeded, "a re-attach that cannot rebuild the launch's redactor (the handle's fingerprint differs) does not read the tail; a later sweep lands the run marker-only");
+            completed.ResultJson.ShouldNotBeNull().ShouldNotContain("reattach-marker-only");
+            var events = await reclaim.Resolve<CodeSpaceDbContext>().AgentRunEvent.AsNoTracking().Where(e => e.AgentRunId == runId).ToListAsync(bounded.Token);
+            events.Count(e => e.Text == "recovered").ShouldBe(1, "the line the agent wrote while no worker observed it is captured exactly once");
+        }
+        finally
+        {
+            resume.TrySetResult();
+            await File.WriteAllTextAsync(gate, "release");
+            bounded.Cancel();
+            try { await original; } catch { }
+            if (successor != null) try { await successor.WaitAsync(TimeSpan.FromSeconds(5)); } catch { }
+        }
+    }
+
     // ── helpers ─────────────────────────────────────────────────────────────────────────────────────────
 
     private async Task LaunchAliveSupervisorAsync(Guid runId)
@@ -1087,13 +1158,13 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             .ExecuteSqlInterpolatedAsync($"UPDATE agent_run SET lease_expires_at = {DateTimeOffset.UtcNow.AddMinutes(-1)} WHERE id = {runId}");
     }
 
-    private async Task ReattachAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null)
+    private async Task ReattachAsync(Guid runId, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, WorkflowSensitivePayloadSealer? sealer = null)
     {
         using var scope = _fixture.BeginScope();
-        await BuildExecutor(scope, harness, logCapture, credentialBroker: credentialBroker).ReattachAsync(_reservations[runId], CancellationToken.None);
+        await BuildExecutor(scope, harness, logCapture, credentialBroker: credentialBroker, sealer: sealer).ReattachAsync(_reservations[runId], CancellationToken.None);
     }
 
-    private static AgentRunExecutor BuildExecutor(ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunService? runs = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null)
+    private static AgentRunExecutor BuildExecutor(ILifetimeScope scope, IAgentHarness harness, IAgentRunLogCaptureBridge? logCapture = null, IAgentRunService? runs = null, CodeSpace.Core.Services.Agents.Credentials.IModelCredentialBroker? credentialBroker = null, WorkflowSensitivePayloadSealer? sealer = null)
     {
         return new AgentRunExecutor(
             runs ?? scope.Resolve<IAgentRunService>(),
@@ -1114,7 +1185,16 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             NullLogger<AgentRunExecutor>.Instance,
             logCapture,
             credentialBroker: credentialBroker,
-            logs: scope.Resolve<CodeSpace.Core.Services.Agents.AgentRunLogging.IAgentRunLogService>());
+            logs: scope.Resolve<CodeSpace.Core.Services.Agents.AgentRunLogging.IAgentRunLogService>(),
+            sealer: sealer);
+    }
+
+    /// <summary>The production sealer over the fixture's Data Protection keys, with the fleet gate's answer fixed — the one a worker would read off a fleet with (false) or without (true) a previous-version worker in it.</summary>
+    private static WorkflowSensitivePayloadSealer GatedSealer(ILifetimeScope scope, bool everyLiveWorkerReadsSealedPayloads) => new(scope.Resolve<IWorkflowSensitivePayloadProtector>(), new FixedFleetGate(everyLiveWorkerReadsSealedPayloads));
+
+    private sealed class FixedFleetGate(bool supported) : IFleetCapabilities
+    {
+        public bool AllWorkersSupport(string capability) => supported;
     }
 
     private sealed class RecordingLogCaptureBridge : IAgentRunLogCaptureBridge
@@ -1167,6 +1247,23 @@ public sealed class AgentRunReattachFlowTests : IDisposable
             new AgentTask { Goal = "scripted", Harness = "scripted-projector", Model = "test-model", ModelCredentialId = modelCredentialId },
             teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None);
         return run.Id;
+    }
+
+    /// <summary>An auto run (no pinned model) whose goal embeds a workflow secret, staged the way a workflow's agent.run stages it: named, so the store seals it.</summary>
+    private async Task<Guid> CreateSealedAutoRunAsync(Guid teamId, Guid modelCredentialId, string secret)
+    {
+        using var scope = await WorkflowsTestSeed.BeginSeedOperatorScopeAsync(_fixture, teamId);
+        var task = new AgentTask { Goal = $"Deploy with {secret}", Harness = "scripted-projector", Model = null, ModelCredentialId = modelCredentialId, TimeoutSeconds = 1800, WorkflowSecrets = [secret] };
+
+        return (await scope.Resolve<IAgentRunService>().CreateAsync(task, teamId, null, null, iterationKey: "", cancellationToken: CancellationToken.None)).Id;
+    }
+
+    private async Task SeedDefaultModelAsync(Guid modelCredentialId, string modelId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = modelCredentialId, ModelId = modelId, IsDefault = true, Enabled = true });
+        await db.SaveChangesAsync();
     }
 
     private async Task<Guid> SeedModelCredentialAsync(Guid teamId, string provider, string plaintextKey)
@@ -1242,20 +1339,23 @@ public sealed class AgentRunReattachFlowTests : IDisposable
         private readonly string _provider;
         private readonly string _envVar;
         private readonly int _maxLineChars;
+        private readonly string _script;
 
         /// <param name="maxLineChars">A longer line becomes no event, as a production CLI parser drops a line it cannot parse.</param>
-        public ProjectingHarness(string provider, string envVar, int maxLineChars = int.MaxValue)
+        /// <param name="script">What the launched agent runs — only a test that launches through this harness needs more than <c>true</c>.</param>
+        public ProjectingHarness(string provider, string envVar, int maxLineChars = int.MaxValue, string script = "true")
         {
             _provider = provider;
             _envVar = envVar;
             _maxLineChars = maxLineChars;
+            _script = script;
         }
 
         public string Kind => "scripted-projector";
         public string Version => "test";
         public IReadOnlyList<string> Models { get; } = new[] { "test-model" };
 
-        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", "true" }, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
+        public SandboxSpec BuildInvocation(AgentTask task) => new() { Command = "/bin/sh", Args = new[] { "-c", _script }, Environment = task.Environment, TimeoutSeconds = task.TimeoutSeconds };
 
         public IReadOnlyList<AgentEvent> ParseEvents(string rawLine)
         {

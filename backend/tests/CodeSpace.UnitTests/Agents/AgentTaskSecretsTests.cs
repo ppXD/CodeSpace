@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Workflows.Runtime;
 using CodeSpace.Messages.Agents;
+using CodeSpace.UnitTests.Fleet;
 using Microsoft.AspNetCore.DataProtection;
 using Shouldly;
 
@@ -18,7 +19,7 @@ public sealed class AgentTaskSecretsTests
 {
     private const string Secret = "CANARY-goal-7d2e91b4c0";
 
-    private static readonly WorkflowSensitivePayloadSealer Sealer = new(new DataProtectionWorkflowSensitivePayloadProtector(new EphemeralDataProtectionProvider()));
+    private static readonly WorkflowSensitivePayloadSealer Sealer = new(new DataProtectionWorkflowSensitivePayloadProtector(new EphemeralDataProtectionProvider()), FixedFleetCapabilities.AllCurrent);
 
     private static AgentTask Task(string goal) => new() { Goal = goal, Harness = "codex-cli" };
 
@@ -88,4 +89,45 @@ public sealed class AgentTaskSecretsTests
 
         Should.Throw<InvalidOperationException>(() => AgentTaskSecrets.Open(run, sealer: null));
     }
+
+    [Fact]
+    public void While_a_previous_version_worker_is_live_a_secret_bearing_task_persists_as_the_previous_build_wrote_it()
+    {
+        var task = Task($"Call the deploy API with bearer token {Secret}") with { WorkflowSecrets = [Secret] };
+        var sealer = new WorkflowSensitivePayloadSealer(new DataProtectionWorkflowSensitivePayloadProtector(new EphemeralDataProtectionProvider()), FixedFleetCapabilities.WithPreviousVersionWorker);
+
+        var written = AgentTaskSecrets.Seal(task, sealer);
+
+        // The previous build's AgentRunService wrote exactly this expression into task_jsonb and its executor
+        // deserialized task_jsonb to launch; WorkflowSecrets is [JsonIgnore], so the list never reaches the column.
+        written.PublicJson.ShouldBe(CodeSpace.Core.Persistence.PersistedText.SanitizeJson(JsonSerializer.Serialize(task, AgentJson.Options)));
+        written.Ciphertext.ShouldBeNull();
+        JsonSerializer.Deserialize<AgentTask>(written.PublicJson, AgentJson.Options)!.Goal.ShouldBe(task.Goal, "the previous build launches the exact goal, never the mask");
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_task_a_current_worker_rewrites_onto_its_own_row_keeps_the_shape_it_was_opened_from(bool openedFromSealedRow)
+    {
+        // The executor re-persists the opened task with its resolved model while the run is Running. A previous-version
+        // worker never launches a Running row, so the fleet gate has nothing to protect there; the row's shape is what
+        // the launch's redactor fingerprint was built from, and a re-attach rebuilds it from that shape.
+        var protector = new DataProtectionWorkflowSensitivePayloadProtector(new EphemeralDataProtectionProvider());
+        var stagedWhileAllCurrent = new WorkflowSensitivePayloadSealer(protector, FixedFleetCapabilities.AllCurrent);
+        var previousVersionWorkerLive = new WorkflowSensitivePayloadSealer(protector, FixedFleetCapabilities.WithPreviousVersionWorker);
+        var staged = AgentTaskSecrets.Seal(Task($"Deploy with {Secret}") with { WorkflowSecrets = openedFromSealedRow ? [Secret] : null }, stagedWhileAllCurrent);
+        var row = new AgentRun { Id = Guid.NewGuid(), TaskJson = staged.PublicJson, SealedTaskCiphertext = staged.Ciphertext, Harness = "codex-cli" };
+        var opened = AgentTaskSecrets.Open(row, previousVersionWorkerLive)!;
+
+        var written = AgentTaskSecrets.Reseal(opened with { Model = "resolved-model" }, previousVersionWorkerLive);
+
+        (written.Ciphertext is not null).ShouldBe(openedFromSealedRow);
+        written.PublicJson.Contains(Secret).ShouldBe(!openedFromSealedRow);
+        var reopened = AgentTaskSecrets.Open(new AgentRun { Id = row.Id, TaskJson = written.PublicJson, SealedTaskCiphertext = written.Ciphertext, Harness = "codex-cli" }, previousVersionWorkerLive)!;
+        reopened.Model.ShouldBe("resolved-model");
+        reopened.Goal.ShouldBe($"Deploy with {Secret}");
+        reopened.WorkflowSecrets.ShouldBe(opened.WorkflowSecrets, "a re-attach rebuilds the launch's redactor from exactly these");
+    }
 }
+
