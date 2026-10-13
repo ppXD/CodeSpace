@@ -44,6 +44,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly IWorkflowRunDispatcher _runDispatcher;
     private readonly Engine.IWorkflowResumeService _resumeService;
     private readonly IPostCommitActions _postCommit;
+    private readonly WorkflowSensitivePayloadSealer _sealer;
     private readonly IAgentRunService _agentRunService;
     private readonly IRunningAgentCancellation _runningAgents;
     private readonly Rerun.IRerunCellSeeder _cellSeeder;
@@ -74,6 +75,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _runDispatcher = launch.Dispatcher;
         _resumeService = control.Resume;
         _postCommit = launch.PostCommit;
+        _sealer = launch.Sealer;
         _agentRunService = control.Agents;
         _runningAgents = control.RunningAgents;
         _cellSeeder = control.Cells;
@@ -606,12 +608,16 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         // first-time run). Every fork of a fork keeps the SAME root, so the whole chain collapses to one Runs-index entry.
         var rootRunId = original.RootRunId ?? original.Id;
 
+        // A fork re-runs with the original's EXACT inputs, sealed again as any new row is: a previous-version worker may
+        // execute the fork, so while one is live the copy is written exact rather than handing it the masked column.
+        var payload = _sealer.SealCopy(original.RunRequest?.NormalizedPayloadJson ?? "{}", original.RunRequest?.SealedPayloadCiphertext);
+
         Guid forkRunId;
         if (original.WorkflowId is null)
             forkRunId = await _snapshotStarter.StageReplayFromSnapshotAsync(
                 original.DefinitionSnapshotJson ?? throw new InvalidOperationException($"Snapshot run {original.Id} has no inline definition to fork."),
                 original.DefinitionSnapshotHash ?? string.Empty,
-                teamId, actorUserId, original.RunRequest?.NormalizedPayloadJson ?? "{}", sourceType,
+                teamId, actorUserId, payload.PublicJson, sourceType,
                 parentRunId: original.Id, rootRunId: rootRunId, rerunFromNodeId: rerunFromNodeId, causationRequestId: original.RunRequestId,
                 original.ScopeRepositoryIds, original.ScopeProjectIds, original.ProjectionKind,
                 session: inheritedSession, idempotencyKey: idempotencyKey, cancellationToken).ConfigureAwait(false);
@@ -624,10 +630,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
                 SourceType = sourceType,
                 ActorType = WorkflowRunActorTypes.User,
                 ActorId = actorUserId,
-                NormalizedPayloadJson = original.RunRequest?.NormalizedPayloadJson ?? "{}",
-                // A fork re-runs with the original's EXACT inputs: a sealed child payload carries its sealed copy over,
-                // never the masked column alone (which would hand the fork [REDACTED] where the secret was).
-                SealedPayloadCiphertext = original.RunRequest?.SealedPayloadCiphertext,
+                NormalizedPayloadJson = payload.PublicJson,
+                SealedPayloadCiphertext = payload.Ciphertext,
                 CreatedBy = actorUserId,
                 CausationRequestId = original.RunRequestId,
                 ParentRunId = original.Id,

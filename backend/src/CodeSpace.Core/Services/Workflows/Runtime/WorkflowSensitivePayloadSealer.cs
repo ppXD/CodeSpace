@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Fleet;
 using CodeSpace.Messages.Workflows;
 
 namespace CodeSpace.Core.Services.Workflows.Runtime;
@@ -13,6 +14,15 @@ namespace CodeSpace.Core.Services.Workflows.Runtime;
 /// <para>A payload that carries none of the given secrets is returned verbatim with no ciphertext, so a row written
 /// for it is byte-identical to one written before sealing existed — and <see cref="Open"/> reads such a row (and every
 /// pre-sealing row) straight from its public column.</para>
+///
+/// <para>A worker of the previous build reads only the public column and would execute the mask. So while any live
+/// worker does not advertise <see cref="FleetCapabilityMarkers.SealedPayloadV1"/> — a rolling deploy, a worker
+/// rollback — a secret-bearing payload for a new row (<see cref="Seal"/>, and a fork's copy, <see cref="SealCopy"/>) is
+/// written verbatim and unsealed too: exactly the row the previous build wrote and the only one it executes correctly.
+/// That row keeps the plaintext at rest and hands the receiving run no secret to keep masking, as the previous build
+/// did; sealing resumes once every live worker reads it. Rows sealed before a previous-version worker joins are opened
+/// back by <c>UnsealNonTerminalPayloadsCommand</c>, the pre-rollback step. A row a current worker is already running
+/// keeps its shape whatever the gate says (<see cref="Reseal"/>): no previous-version worker launches it.</para>
 /// </summary>
 public sealed class WorkflowSensitivePayloadSealer : ISingletonDependency
 {
@@ -20,20 +30,30 @@ public sealed class WorkflowSensitivePayloadSealer : ISingletonDependency
     internal const string EnvelopeKind = "sealed.payload.v1";
 
     private readonly IWorkflowSensitivePayloadProtector _protector;
+    private readonly IFleetCapabilities _fleet;
 
-    public WorkflowSensitivePayloadSealer(IWorkflowSensitivePayloadProtector protector) => _protector = protector;
-
-    /// <summary>Mask the <paramref name="secrets"/> <paramref name="payload"/> embeds for its public column; encrypt the exact payload together with exactly those values when anything was masked.</summary>
-    public SealedPayload Seal(JsonElement payload, PersistenceSecretRedactor secrets)
+    public WorkflowSensitivePayloadSealer(IWorkflowSensitivePayloadProtector protector, IFleetCapabilities fleet)
     {
-        var embedded = secrets.FoundIn(payload);
+        _protector = protector;
+        _fleet = fleet;
+    }
 
-        if (embedded.Count == 0) return new SealedPayload(payload.GetRawText(), null);
+    /// <summary>Mask the <paramref name="secrets"/> <paramref name="payload"/> embeds for its public column; encrypt the exact payload together with exactly those values when anything was masked — once every live worker can read that. Until then, and whenever nothing is embedded, the payload is written verbatim with no ciphertext. For a new row: any worker may be the one that executes it.</summary>
+    public SealedPayload Seal(JsonElement payload, PersistenceSecretRedactor secrets) => Seal(payload, secrets, throughFleetGate: true);
 
-        var masked = secrets.Redact(payload).Value.GetRawText();
-        var envelope = JsonSerializer.Serialize(new SealedEnvelope(EnvelopeKind, payload, embedded));
+    /// <summary><see cref="Seal"/> for the row a current worker is already running, rewritten by that worker (an agent run's resolved model): sealed whenever something is embedded, whatever the fleet gate says. A previous-version worker never launches such a row, and the run's launch built its redactor from the secrets the row names, which a re-attach rebuilds from the same row.</summary>
+    public SealedPayload Reseal(JsonElement payload, PersistenceSecretRedactor secrets) => Seal(payload, secrets, throughFleetGate: false);
 
-        return new SealedPayload(masked, _protector.Protect(envelope));
+    /// <summary>A stored payload copied onto a new row — a replay or rerun fork of a run: its exact copy and secrets opened from <paramref name="publicJson"/> and <paramref name="ciphertext"/>, then sealed again through the fleet gate exactly as a fresh payload is. A copy of an unsealed payload is carried over byte-identical.</summary>
+    public SealedPayload SealCopy(string publicJson, string? ciphertext)
+    {
+        var opened = Open(publicJson, ciphertext);
+
+        if (opened.Secrets.Count == 0) return new SealedPayload(opened.Json, null);
+
+        using var document = JsonDocument.Parse(opened.Json);
+
+        return Seal(document.RootElement, new PersistenceSecretRedactor(opened.Secrets));
     }
 
     /// <summary>The exact payload and the secret values it embeds — read from <paramref name="ciphertext"/> when the row was sealed, else <paramref name="publicJson"/> is itself exact and embeds none.</summary>
@@ -47,6 +67,18 @@ public sealed class WorkflowSensitivePayloadSealer : ISingletonDependency
             throw new InvalidOperationException($"A sealed payload has an unexpected envelope kind '{envelope?.Kind}'.");
 
         return new OpenedPayload(envelope.Payload.GetRawText(), envelope.Secrets);
+    }
+
+    private SealedPayload Seal(JsonElement payload, PersistenceSecretRedactor secrets, bool throughFleetGate)
+    {
+        var embedded = secrets.FoundIn(payload);
+
+        if (embedded.Count == 0 || (throughFleetGate && !_fleet.AllWorkersSupport(FleetCapabilityMarkers.SealedPayloadV1))) return new SealedPayload(payload.GetRawText(), null);
+
+        var masked = secrets.Redact(payload).Value.GetRawText();
+        var envelope = JsonSerializer.Serialize(new SealedEnvelope(EnvelopeKind, payload, embedded));
+
+        return new SealedPayload(masked, _protector.Protect(envelope));
     }
 
     private sealed record SealedEnvelope(string Kind, JsonElement Payload, IReadOnlyList<string> Secrets);
