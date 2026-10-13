@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
+using CodeSpace.Core.Services.Workflows.Callbacks;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
@@ -226,8 +227,14 @@ public sealed class WorkflowResumeService : IWorkflowResumeService, IScopedDepen
 
     public async Task<bool> ResumeByCallbackTokenAsync(string token, string bodyJson, CancellationToken cancellationToken)
     {
+        // By digest, the only form left once a later release blanks the token column; or by the token column itself, for a
+        // row minted before migration 0248 or parked by a previous-version pod, which has no digest. A digest presented as a
+        // token matches neither, so it never resumes its own wait.
+        var digest = WorkflowCallbackTokenSealer.Digest(token);
+        var plaintext = WorkflowCallbackTokenSealer.PlaintextFormOf(token);
+
         var wait = await _db.WorkflowRunWait.AsNoTracking()
-            .Where(w => w.Token == token && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Callback)
+            .Where(w => (w.TokenDigest == digest || w.Token == plaintext) && w.Status == WorkflowWaitStatuses.Pending && w.WaitKind == WorkflowWaitKinds.Callback)
             .FirstOrDefaultAsync(cancellationToken)
             .ConfigureAwait(false);
 

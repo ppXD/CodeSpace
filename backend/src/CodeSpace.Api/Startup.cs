@@ -4,6 +4,7 @@ using CodeSpace.Messages.Failures;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Api.Filters;
+using CodeSpace.Api.Logging;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.OutboundHttp;
 using CodeSpace.Core.Services.Identity;
@@ -102,6 +103,10 @@ public class Startup
 
     public void Configure(IApplicationBuilder app, IWebHostEnvironment env)
     {
+        // First, so every line a request logs — routing's own and the https redirect's ahead of it included, and requests
+        // only the fallback answers — names a bearer route by its template or masks the token's path segment, rather than
+        // carrying the invitation, reset or callback token in its path (see BearerRouteLogging).
+        app.UseBearerRouteLogging();
         app.UseSerilogRequestLogging(opts =>
         {
             opts.EnrichDiagnosticContext = (diag, ctx) =>
@@ -109,6 +114,8 @@ public class Startup
                 var teamId = ctx.Request.Headers[HeaderCurrentTeam.HeaderName].ToString();
                 if (!string.IsNullOrEmpty(teamId)) diag.Set("TeamId", teamId);
             };
+            // An invitation, reset or callback token in the path is logged as its route template, never verbatim.
+            opts.GetMessageTemplateProperties = BearerRouteLogging.RequestCompletionProperties;
         });
         if (!env.IsDevelopment()) app.UseHttpsRedirection();
         app.UseRouting();

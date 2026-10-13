@@ -3062,6 +3062,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             WorkflowWaitKinds.AgentRun => (await StageAgentRunAsync(exec, token, iterationKey, stagingCt).ConfigureAwait(false)).ToString(),
             _ => token.CorrelationToken ?? Guid.NewGuid().ToString("N"),
         };
+        var bearerToken = MintBearerToken(waitKind);
 
         var waitId = Guid.NewGuid();
         var wait = new WorkflowRunWait
@@ -3071,7 +3072,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             NodeId = node.Id,
             IterationKey = iterationKey,
             WaitKind = waitKind,
-            Token = correlationToken,
+            Token = bearerToken?.Token ?? correlationToken,
+            TokenDigest = bearerToken?.Digest,
+            TokenCiphertext = bearerToken?.Ciphertext,
             WakeAt = wakeAt,
             Status = WorkflowWaitStatuses.Pending,
             // Stash the node's suspend payload (e.g. an approval prompt) so the run-detail UI can
@@ -3100,6 +3103,15 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         else if (token.DeadlineAt.HasValue && token.TimeoutPayload is { ValueKind: not JsonValueKind.Undefined and not JsonValueKind.Null } timeoutPayload)
             _backgroundJobClient.Schedule<IWorkflowResumeService>(s => s.ResumeByDeadlineAsync(waitId, timeoutPayload.GetRawText(), CancellationToken.None), token.DeadlineAt.Value);
     }
+
+    /// <summary>
+    /// A wait whose token alone resolves it (a Callback, resumed by an anonymous POST) also keeps the token's digest, which
+    /// a resume looks it up by, and its ciphertext under the environment-held key, which only the RunsControl-gated reveal
+    /// opens. The token itself still goes in the token column, where a previous-version pod looks it up, until a later
+    /// release blanks that column (see migration 0248). Null for every other kind, whose token is stored as minted.
+    /// </summary>
+    private SealedCallbackToken? MintBearerToken(string waitKind) =>
+        WorkflowWaitKinds.HasBearerToken(waitKind) ? _lifetimeScope.Resolve<Callbacks.WorkflowCallbackTokenSealer>().Mint() : null;
 
     /// <summary>
     /// The wait row is a persistence boundary like every ledger row: a Viewer reads it back as the run's pending wait,

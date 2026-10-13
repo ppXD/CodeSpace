@@ -12,10 +12,16 @@ import { SuspendedPanel } from "./RunDetailView";
  *   3. a Timer wait shows a wake hint, NOT approval buttons.
  */
 
-const { mutate, useWorkflowRunMock } = vi.hoisted(() => ({ mutate: vi.fn(), useWorkflowRunMock: vi.fn() }));
+const { mutate, useWorkflowRunMock, reveal, permissions } = vi.hoisted(() => ({
+  mutate: vi.fn(),
+  useWorkflowRunMock: vi.fn(),
+  reveal: { mutateAsync: vi.fn(), reset: vi.fn(), isPending: false, error: null as unknown },
+  permissions: { held: new Set<string>() },
+}));
 
 vi.mock("@/hooks/use-workflows", () => ({
   useResumeRun: () => ({ mutate, isPending: false, isError: false }),
+  useRevealCallbackUrl: () => reveal,
   isRunActive: (status: string) => !["Success", "Failure", "Cancelled"].includes(status),
   // Used by the embedded child RunDetailView for a Subworkflow wait.
   useWorkflowRun: (runId: string) => useWorkflowRunMock(runId),
@@ -24,6 +30,11 @@ vi.mock("@/hooks/use-workflows", () => ({
   useWorkflow: () => ({ data: undefined, isLoading: false }),
   useNodeManifests: () => ({ data: [] }),
   useRunPhases: () => ({ data: undefined }),   // the embedded child is nested → phases query is disabled anyway
+}));
+
+vi.mock("@/hooks/use-team-management", () => ({
+  TeamPermissions: { RunsControl: "runs.control" },
+  useTeamPermissions: () => ({ can: (permission: string) => permissions.held.has(permission), role: null, isPersonal: false }),
 }));
 
 vi.mock("@/hooks/use-workflow-run-view-metadata", () => ({
@@ -45,8 +56,11 @@ vi.mock("@/hooks/use-agents", () => ({
 }));
 
 function approvalWait(prompt: string): WorkflowRunWaitInfo {
-  return { nodeId: "approval", kind: "Approval", token: "tok-1", payload: { prompt } };
+  return { id: "wait-a", nodeId: "approval", kind: "Approval", token: "tok-1", payload: { prompt } };
 }
+
+// A run read never carries a Callback's token: the API sends this placeholder in its place (WorkflowWaitKinds.WithheldBearerToken).
+const callbackWait: WorkflowRunWaitInfo = { id: "wait-cb", nodeId: "cb", kind: "Callback", token: "withheld-reload-the-page-to-reveal", payload: {} };
 
 describe("SuspendedPanel", () => {
   it("approves with the typed comment", () => {
@@ -70,20 +84,63 @@ describe("SuspendedPanel", () => {
   });
 
   it("shows a wake hint for a Timer wait — no approval buttons", () => {
-    const wait: WorkflowRunWaitInfo = { nodeId: "sleep", kind: "Timer", token: "tok-2", wakeAt: "2026-05-30T11:00:00Z", payload: {} };
+    const wait: WorkflowRunWaitInfo = { id: "wait-t", nodeId: "sleep", kind: "Timer", token: "tok-2", wakeAt: "2026-05-30T11:00:00Z", payload: {} };
     render(<SuspendedPanel runId="run-1" wait={wait} />);
 
     expect(screen.queryByText("Approve")).toBeNull();
     expect(screen.getByText(/Resumes around/)).toBeTruthy();
   });
 
-  it("shows the tokened callback URL for a Callback wait — no approval buttons", () => {
-    const wait: WorkflowRunWaitInfo = { nodeId: "cb", kind: "Callback", token: "abc123", payload: {} };
-    render(<SuspendedPanel runId="run-1" wait={wait} />);
+  it("hides the callback URL until a member who can control runs reveals it — then shows the URL the run resumes on", async () => {
+    permissions.held = new Set(["runs.control"]);
+    reveal.mutateAsync.mockResolvedValueOnce({ waitId: "wait-cb", path: "/api/workflows/callbacks/0123456789abcdef0123456789abcdef" });
+    render(<SuspendedPanel runId="run-1" wait={callbackWait} />);
 
     expect(screen.queryByText("Approve")).toBeNull();
-    const url = screen.getByDisplayValue(/\/api\/workflows\/callbacks\/abc123$/);
-    expect(url).toBeTruthy();
+    expect(screen.queryByDisplayValue(/\/api\/workflows\/callbacks\//)).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /Reveal URL/ }));
+
+    expect(await screen.findByDisplayValue(`${window.location.origin}/api/workflows/callbacks/0123456789abcdef0123456789abcdef`)).toBeTruthy();
+    expect(reveal.mutateAsync).toHaveBeenCalledWith("wait-cb");
+  });
+
+  it("drops a revealed URL when the pending callback wait changes — the old URL resumes nothing", async () => {
+    // Parallel callback branches, or a loop that re-parks: the run stays Suspended while the poll moves to another wait.
+    permissions.held = new Set(["runs.control"]);
+    reveal.mutateAsync.mockClear();
+    reveal.reset.mockClear();
+    reveal.mutateAsync.mockResolvedValueOnce({ waitId: "wait-cb", path: "/api/workflows/callbacks/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" });
+    const { rerender } = render(<SuspendedPanel runId="run-1" wait={callbackWait} />);
+
+    fireEvent.click(screen.getByRole("button", { name: /Reveal URL/ }));
+    expect(await screen.findByDisplayValue(/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa$/)).toBeTruthy();
+
+    rerender(<SuspendedPanel runId="run-1" wait={{ ...callbackWait, id: "wait-cb-2", nodeId: "cb2" }} />);
+
+    expect(screen.queryByDisplayValue(/\/api\/workflows\/callbacks\//)).toBeNull();
+    expect(screen.getByRole("button", { name: /Reveal URL/ })).toBeTruthy();
+    expect(reveal.mutateAsync).toHaveBeenCalledTimes(1);
+  });
+
+  it("offers a viewer no reveal, and says who can", () => {
+    permissions.held = new Set();
+    reveal.mutateAsync.mockClear();
+    render(<SuspendedPanel runId="run-1" wait={callbackWait} />);
+
+    expect(screen.queryByRole("button", { name: /Reveal URL/ })).toBeNull();
+    expect(screen.getByText(/Only members who can control runs can reveal it/)).toBeTruthy();
+    expect(reveal.mutateAsync).not.toHaveBeenCalled();
+  });
+
+  it("shows the URL an API from before the reveal still projects — this page served first in a deploy, or the API rolled back alone", () => {
+    // That API has no reveal route and hands every member the token itself, as it always did; asking it would answer 404.
+    permissions.held = new Set(["runs.control"]);
+    reveal.mutateAsync.mockClear();
+    render(<SuspendedPanel runId="run-1" wait={{ ...callbackWait, token: "0123456789abcdef0123456789abcdef" }} />);
+
+    expect(screen.getByDisplayValue(`${window.location.origin}/api/workflows/callbacks/0123456789abcdef0123456789abcdef`)).toBeTruthy();
+    expect(reveal.mutateAsync).not.toHaveBeenCalled();
   });
 
   it("embeds the live child run for a Subworkflow wait, with its approval operable inline", () => {
@@ -96,11 +153,11 @@ describe("SuspendedPanel", () => {
         id: "child-1", workflowId: "w", workflowVersion: 1, sourceType: "workflow.child",
         normalizedPayload: {}, status: "Suspended", error: null, startedAt: null, completedAt: null,
         nodes: [{ nodeId: "review", iterationKey: "", status: "Suspended", inputs: {}, outputs: {}, error: null, startedAt: null, completedAt: null }],
-        pendingWait: { nodeId: "review", kind: "Approval", token: "ctok", payload: { prompt: "Approve the review?" } },
+        pendingWait: { id: "wait-review", nodeId: "review", kind: "Approval", token: "ctok", payload: { prompt: "Approve the review?" } },
       },
     });
 
-    render(<SuspendedPanel runId="parent-1" wait={{ nodeId: "sub", kind: "Subworkflow", token: "child-1", payload: {} }} />);
+    render(<SuspendedPanel runId="parent-1" wait={{ id: "wait-sub", nodeId: "sub", kind: "Subworkflow", token: "child-1", payload: {} }} />);
 
     // The embedded child's bounded pending action is visible…
     expect(screen.getByText("Approve the review?")).toBeTruthy(); // the child's approval prompt
@@ -112,7 +169,7 @@ describe("SuspendedPanel", () => {
   it("stops embedding once nesting is too deep — shows the child run id instead of fetching", () => {
     useWorkflowRunMock.mockClear();
 
-    render(<SuspendedPanel runId="p" wait={{ nodeId: "sub", kind: "Subworkflow", token: "deep-child", payload: {} }} depth={3} />);
+    render(<SuspendedPanel runId="p" wait={{ id: "wait-deep", nodeId: "sub", kind: "Subworkflow", token: "deep-child", payload: {} }} depth={3} />);
 
     expect(screen.getByText("deep-child")).toBeTruthy();
     expect(useWorkflowRunMock).not.toHaveBeenCalled();

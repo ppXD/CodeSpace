@@ -2,7 +2,9 @@
 # SPA image E2E: build the REAL frontend image and start it the way the cluster does (the ConfigMap's .env mounted at
 # /usr/share/nginx/html/.env, the image's own CMD /init.sh), then prove over HTTP what static-hosting.test.ts can only
 # pin as source text: init.sh derives the API origin from the substituted env, nginx accepts the config and reads that
-# origin, and every response carries the CSP, nosniff and Referrer-Policy, with /env.js handing the SPA its env.
+# origin, and every response carries the CSP, nosniff and Referrer-Policy, with /env.js handing the SPA its env. It also
+# reads the container log back: a token in an invitation, reset or callback path, or in a Referer naming one, is logged as
+# {token}, and every other request verbatim.
 #
 # Fidelity: high. The real Dockerfile, init.sh, @import-meta-env/cli (fetched by npx at start, as in production),
 # csp-api-origin.mjs and nginx. The expected CSP is nginx.conf's own header with the derived source filled in, so the
@@ -110,6 +112,37 @@ expect_served() { # $1 = case, $2 = VITE_API_URL, $3 = the CSP source init.sh mu
   echo "    CSP, nosniff and Referrer-Policy on every response; /env.js carries the env"
 }
 
+expect_access_log_redacts() { # the request line and the Referer of a token route reach the log as {token}; others verbatim
+  local name port base logs logged canary="CANARY-spa-log-$$-$(date +%s)"
+
+  echo "==> access-log: token paths and Referers are logged as {token}, every other request verbatim"
+  name="$(start access-log "")"
+  port="$(wait_serving "$name")"
+  base="http://127.0.0.1:$port"
+
+  for path in "/invite/$canary" "/reset-password/$canary" "/api/workflows/callbacks/$canary"; do
+    curl -fsS -o /dev/null "$base$path" || fail "access-log: GET $path failed" "$name"
+  done
+  curl -fsS -o /dev/null -H "Referer: $base/invite/$canary" "$base/env.js" || fail "access-log: GET /env.js with a token link as its Referer failed" "$name"
+  curl -fsS -o /dev/null "$base/teams/demo/runs" || fail "access-log: GET /teams/demo/runs failed" "$name"
+
+  # nginx writes each line as the request ends; the last request's line marks the log complete.
+  for _ in $(seq 1 20); do
+    logs="$(docker logs "$name" 2>&1)"
+    case "$logs" in *'"GET /teams/demo/runs HTTP/1.1"'*) break ;; esac
+    sleep 0.5
+  done
+
+  case "$logs" in *"$canary"*) fail "access-log: a token reached the container log: $(printf '%s\n' "$logs" | grep -F "$canary")" "$name" ;; esac
+
+  for logged in '"GET /invite/{token} HTTP/1.1"' '"GET /reset-password/{token} HTTP/1.1"' '"GET /api/workflows/callbacks/{token} HTTP/1.1"' "\"$base/invite/{token}\"" '"GET /teams/demo/runs HTTP/1.1"'; do
+    case "$logs" in *"$logged"*) ;; *) fail "access-log: no $logged in the container log — is the server still logging with nginx.conf's codespace format? ('docker logs $name')" "$name" ;; esac
+  done
+
+  docker rm -f "$name" >/dev/null 2>&1 || true
+  echo "    token paths and Referers logged as {token}; other requests verbatim"
+}
+
 expect_refused() { # $1 = case, $2 = VITE_API_URL init.sh must stop on, naming the setting, before nginx starts
   local name state="" logs
 
@@ -140,5 +173,6 @@ expect_served api-elsewhere "https://api.example.test/base" "https://api.example
 expect_served api-path "/backend" ""
 expect_served api-protocol-relative "//api.example.test:8443/base" "api.example.test:8443"
 expect_refused api-websocket "wss://api.example.test"
+expect_access_log_redacts
 
-echo "PASS: the SPA image serves its CSP with the API origin init.sh derived, plus nosniff and Referrer-Policy"
+echo "PASS: the SPA image serves its CSP with the API origin init.sh derived, plus nosniff and Referrer-Policy, and logs no path token"

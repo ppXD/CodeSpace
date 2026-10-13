@@ -87,6 +87,9 @@ public static class FailureCodes
     /// <summary>A settled cell's outputs were redacted for persistence and their encrypted recovery payload is not readable, so the originals exist nowhere. Remedy: re-run the workflow from that node — a resume can only ever offer the redaction placeholder.</summary>
     public const string WorkflowOutputsUnrecoverable = "workflow_outputs_unrecoverable";
 
+    /// <summary>A callback wait's row keeps only its token's digest — no ciphertext, no token — so its URL cannot be shown again. The URL already handed out still resumes the run. Remedy: use that URL, or re-issue the wait with a body to resume the run by hand.</summary>
+    public const string CallbackUrlUnrecoverable = "callback_url_unrecoverable";
+
     // ── Invitations ────────────────────────────────────────────────────────────────
     public const string InvitationNotUsable = "invitation_not_usable";
     public const string InvitationEmailMismatch = "invitation_email_mismatch";

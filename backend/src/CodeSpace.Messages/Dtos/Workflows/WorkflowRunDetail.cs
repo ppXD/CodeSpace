@@ -80,8 +80,9 @@ public sealed record WorkflowRunWaitInfo
     public required string Kind { get; init; }
 
     /// <summary>
-    /// The correlation token. For a Callback wait it's the bearer secret the UI builds the
-    /// callback URL from (the run owner shares it with the external system).
+    /// The correlation token — for a Subworkflow wait the child run's id, for an AgentRun wait the agent run's id. For a
+    /// Callback wait it is <c>WorkflowWaitKinds.WithheldBearerToken</c>: the token alone resumes the run without a session,
+    /// so it is handed out only by <c>RevealWorkflowCallbackUrlCommand</c>, which needs <c>runs.control</c>.
     /// </summary>
     public required string Token { get; init; }
 

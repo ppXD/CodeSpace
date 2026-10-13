@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Callbacks;
 using CodeSpace.Core.Services.Workflows.Engine;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -11,6 +12,7 @@ using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -39,8 +41,12 @@ public class ParallelWaitResumeScopeTests
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var runId = await SeedSuspendedRunAsync(teamId, userId);
 
-        const string callbackToken = "cb-tok-only-mine";
-        var callbackWaitId = await AddWaitAsync(runId, "cb", WorkflowWaitKinds.Callback, callbackToken);
+        // Stored the way the engine parks a callback: the token, its digest and its ciphertext; the URL carries the token.
+        SealedCallbackToken callback;
+        using (var mint = _fixture.BeginScope())
+            callback = mint.Resolve<WorkflowCallbackTokenSealer>().Mint();
+        var callbackToken = callback.Token;
+        var callbackWaitId = await AddWaitAsync(runId, "cb", WorkflowWaitKinds.Callback, callback.Token, callback);
         var approvalWaitId = await AddWaitAsync(runId, "appr", WorkflowWaitKinds.Approval, token: "");
 
         bool resumed;
@@ -107,7 +113,7 @@ public class ParallelWaitResumeScopeTests
         return runId;
     }
 
-    private async Task<Guid> AddWaitAsync(Guid runId, string nodeId, string waitKind, string token)
+    private async Task<Guid> AddWaitAsync(Guid runId, string nodeId, string waitKind, string token, SealedCallbackToken? sealedCallback = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -120,6 +126,8 @@ public class ParallelWaitResumeScopeTests
             NodeId = nodeId,
             WaitKind = waitKind,
             Token = token,
+            TokenDigest = sealedCallback?.Digest,
+            TokenCiphertext = sealedCallback?.Ciphertext,
             Status = WorkflowWaitStatuses.Pending,
             CreatedAt = DateTimeOffset.UtcNow,
         });
