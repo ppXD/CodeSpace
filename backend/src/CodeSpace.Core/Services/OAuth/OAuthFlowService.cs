@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Providers.Identity;
 using CodeSpace.Core.Services.Teams;
 using CodeSpace.Core.Settings.Application;
+using CodeSpace.Core.Settings.CorsPolicy;
 using CodeSpace.Core.Settings.OAuth;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Credentials;
@@ -34,9 +35,9 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
     private readonly ICredentialSuccessionService _succession;
     private readonly ITeamMemberService _members;
     private readonly OAuthCallbackUrlSetting _callbackUrlSetting;
-    private readonly PublicBaseUrlSetting _publicBaseUrl;
+    private readonly OAuthReturnOriginsSetting _returnOrigins;
 
-    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, ICredentialSuccessionService succession, ITeamMemberService members, OAuthCallbackUrlSetting callbackUrlSetting, PublicBaseUrlSetting publicBaseUrl)
+    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, ICredentialSuccessionService succession, ITeamMemberService members, OAuthCallbackUrlSetting callbackUrlSetting, OAuthReturnOriginsSetting returnOrigins)
     {
         _db = db;
         _oauthClients = oauthClients;
@@ -50,7 +51,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         _succession = succession;
         _members = members;
         _callbackUrlSetting = callbackUrlSetting;
-        _publicBaseUrl = publicBaseUrl;
+        _returnOrigins = returnOrigins;
     }
 
     public async Task<InitCredentialOAuthResult> InitAsync(Guid providerInstanceId, string displayName, Guid? intendedOwnerUserId, string? returnUrl, IReadOnlyList<string>? scopes, CancellationToken cancellationToken)
@@ -95,7 +96,23 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
 
     public async Task<CompleteCredentialOAuthResult> CompleteAsync(string state, string code, string? browserNonce, CancellationToken cancellationToken)
     {
-        var pending = await ConsumeStateAsync(state, browserNonce, cancellationToken).ConfigureAwait(false);
+        var pending = await ConsumeBrowserBoundStateAsync(state, browserNonce, cancellationToken).ConfigureAwait(false);
+
+        if (pending == null) return await HandOffToInitiatorAsync(state, cancellationToken).ConfigureAwait(false);
+
+        return await FinishAsync(pending, code, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<CompleteCredentialOAuthResult> CompleteAsInitiatorAsync(string state, string code, CancellationToken cancellationToken)
+    {
+        var pending = await ConsumeInitiatorBoundStateAsync(state, cancellationToken).ConfigureAwait(false);
+
+        return await FinishAsync(pending, code, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>Exchanges the code for the consumed state and keeps the token — whichever proof consumed it.</summary>
+    private async Task<CompleteCredentialOAuthResult> FinishAsync(OAuthPendingState pending, string code, CancellationToken cancellationToken)
+    {
         var instance = await LoadInstanceAsync(pending.ProviderInstanceId, cancellationToken).ConfigureAwait(false);
         var (clientId, clientSecret) = ReadOAuthClientCredentials(instance);
 
@@ -116,8 +133,8 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         {
             CredentialId = credential.Id,
             TeamId = pending.TeamId,
-            // Checked again rather than trusted from init: the public origin can change while a connect is pending.
-            ReturnUrl = OAuthReturnUrl.AllowedOrFallback(pending.ReturnUrl, _publicBaseUrl.Value),
+            // Checked again rather than trusted from init: the configured origins can change while a connect is pending.
+            ReturnUrl = OAuthReturnUrl.AllowedOrFallback(pending.ReturnUrl, _returnOrigins.Value),
             BrowserNonceCookiePath = ResolveCallbackUri().AbsolutePath
         };
     }
@@ -129,9 +146,9 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
     /// </summary>
     private void EnsureReturnUrlAllowed(string? returnUrl)
     {
-        if (returnUrl == null || OAuthReturnUrl.IsAllowed(returnUrl, _publicBaseUrl.Value)) return;
+        if (returnUrl == null || OAuthReturnUrl.IsAllowed(returnUrl, _returnOrigins.Value)) return;
 
-        throw new ArgumentException("returnUrl must be a path on this site or an address on its public origin.", nameof(returnUrl));
+        throw new ArgumentException($"returnUrl must be a path on this site, or an address on an origin this deployment serves its web app from — {PublicBaseUrlSetting.ConfigurationKey}, or one listed in {AllowableCorsOriginsSetting.ConfigurationKey}.", nameof(returnUrl));
     }
 
     /// <summary>
@@ -214,22 +231,42 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
     // Complete-internals (callback runs anonymous, no current-team check).
 
     /// <summary>
-    /// Consumes the state only together with the nonce of the browser that started the flow. A callback from any
-    /// other browser — the person an authorize link was forwarded to, or nobody at all — matches no row, so nothing
-    /// is consumed, exchanged or persisted and the starting browser can still finish. One message for every refusal:
-    /// telling "wrong browser" from "no such state" would only confirm which states are live.
+    /// The fast path: consumes the state only together with the nonce of the browser that started the flow. A callback
+    /// from any other browser — the person an authorize link was forwarded to, a browser that could not keep the cookie,
+    /// or nobody at all — matches no row, so nothing is consumed, exchanged or persisted here.
     /// </summary>
-    private async Task<OAuthPendingState> ConsumeStateAsync(string state, string? browserNonce, CancellationToken cancellationToken)
+    private async Task<OAuthPendingState?> ConsumeBrowserBoundStateAsync(string state, string? browserNonce, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrEmpty(browserNonce))
-            throw UnusableState();
+        if (string.IsNullOrEmpty(browserNonce)) return null;
 
-        var row = await _stateStore.ConsumeAsync(state, OAuthBrowserNonce.Hash(browserNonce), cancellationToken).ConfigureAwait(false);
-
-        return row ?? throw UnusableState();
+        return await _stateStore.ConsumeAsync(state, OAuthBrowserNonce.Hash(browserNonce), cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// A callback with no binding for its state still consumes nothing: it is handed to the SPA's completion page, where
+    /// the signed-in person who started the connect finishes it (<see cref="CompleteAsInitiatorAsync"/>). That page is on
+    /// an origin the deployment serves its web app from, never wherever the starter asked — the code rides along, and a
+    /// forwarded authorize link must not deliver someone's code to its starter. A state that is not live is refused with
+    /// the one message every refusal shares: telling "wrong browser" from "no such state" would only confirm which
+    /// states are live.
+    /// </summary>
+    private async Task<CompleteCredentialOAuthResult> HandOffToInitiatorAsync(string state, CancellationToken cancellationToken)
+    {
+        var pending = await _stateStore.FindLiveAsync(state, cancellationToken).ConfigureAwait(false) ?? throw UnusableState();
+
+        return new CompleteCredentialOAuthResult { ReturnUrl = OAuthReturnUrl.CompletionPageFor(pending.ReturnUrl, _returnOrigins.Value), BrowserNonceCookiePath = ResolveCallbackUri().AbsolutePath };
+    }
+
+    /// <summary>
+    /// Consumes the state only for the person who started the connect. Anyone else — the signed-in victim of a forwarded
+    /// authorize link — matches no row, so nothing is consumed and the starter can still finish.
+    /// </summary>
+    private async Task<OAuthPendingState> ConsumeInitiatorBoundStateAsync(string state, CancellationToken cancellationToken) =>
+        await _stateStore.ConsumeForInitiatorAsync(state, _currentUser.Id!.Value, cancellationToken).ConfigureAwait(false) ?? throw NotStartedByCaller();
+
     private static OAuthCallbackException UnusableState() => new("state token missing, expired, already consumed, or not started in this browser");
+
+    private static OAuthCallbackException NotStartedByCaller() => new("state token missing, expired, already consumed, or not started by you");
 
     private async Task<ProviderInstance> LoadInstanceAsync(Guid id, CancellationToken cancellationToken) =>
         await _db.ProviderInstance.FirstOrDefaultAsync(p => p.Id == id && p.DeletedDate == null, cancellationToken).ConfigureAwait(false)

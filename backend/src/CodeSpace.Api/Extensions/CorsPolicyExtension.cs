@@ -15,9 +15,6 @@ public static class CorsPolicyExtension
     /// <summary>Named rather than the default policy so <c>UseCors</c> states which policy it is applying, and a second policy (an admin surface, a webhook origin) can be added later without silently widening this one.</summary>
     public const string PolicyName = "CodeSpaceSpa";
 
-    /// <summary>The Vite dev-server origins, added in Development only. The port is pinned by vite.config.ts — keep these in sync.</summary>
-    private static readonly string[] DevelopmentOrigins = { "http://localhost:5180", "http://127.0.0.1:5180" };
-
     public static IServiceCollection AddCorsPolicy(this IServiceCollection services, IConfiguration configuration, IHostEnvironment environment)
     {
         var origins = ResolveOrigins(configuration, environment);
@@ -46,6 +43,6 @@ public static class CorsPolicyExtension
 
         if (!environment.IsDevelopment()) return configured;
 
-        return configured.Concat(DevelopmentOrigins).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        return configured.Concat(AllowableCorsOriginsSetting.DevelopmentOrigins).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
     }
 }

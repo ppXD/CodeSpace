@@ -445,12 +445,12 @@ public sealed class DepartedMemberCredentialTests
         using (var callback = OAuthScope(oauth, userId: null, teamId: null))
             completed = await callback.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { State = init.State, Code = "code", BrowserNonce = init.BrowserNonce });
 
-        var token = await LoadCredentialAsync(completed.CredentialId);
+        var token = await LoadCredentialAsync(completed.CredentialId.ShouldNotBeNull("the starting browser's callback completes the connect"));
         token.OwnerUserId.ShouldBe(adminId, "the connect is the instance Admin's own");
         token.Status.ShouldBe(CredentialStatus.Active, "an instance Admin has standing in the team, so the callback keeps their token");
         var identity = await ResolveAsync(adminId, world.InstanceA);
         identity.ShouldNotBeNull("the connect links the instance Admin's act-as identity in the team");
-        identity.CredentialId.ShouldBe(completed.CredentialId, "through the token they just connected");
+        identity.CredentialId.ShouldBe(token.Id, "through the token they just connected");
     }
 
     [Fact]

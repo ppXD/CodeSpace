@@ -114,7 +114,7 @@ public class OAuthFlowTests
         }
 
         completeResult.TeamId.ShouldBe(teamId);
-        completeResult.CredentialId.ShouldNotBe(Guid.Empty);
+        var credentialId = completeResult.CredentialId.ShouldNotBeNull();
         completeResult.ReturnUrl.ShouldBe("/");
 
         // Verify the Credential row was persisted with the right shape, and that the
@@ -122,7 +122,7 @@ public class OAuthFlowTests
         using var verify = _fixture.BeginScope();
         var db = verify.Resolve<CodeSpaceDbContext>();
 
-        var cred = await db.Credential.AsNoTracking().SingleAsync(c => c.Id == completeResult.CredentialId).ConfigureAwait(false);
+        var cred = await db.Credential.AsNoTracking().SingleAsync(c => c.Id == credentialId).ConfigureAwait(false);
         cred.TeamId.ShouldBe(teamId);
         cred.ProviderInstanceId.ShouldBe(instanceId);
         cred.OwnerUserId.ShouldBe(userId);
@@ -200,21 +200,22 @@ public class OAuthFlowTests
     [Theory]
     [InlineData(null)]
     [InlineData("a-nonce-this-browser-never-received")]
-    public async Task Complete_from_a_browser_that_did_not_start_the_flow_consumes_nothing(string? browserNonce)
+    public async Task Complete_from_a_browser_that_did_not_start_the_flow_consumes_nothing_and_is_handed_to_the_spa(string? browserNonce)
     {
         // The capture this pins: an admin of one team starts a connect on their own OAuth app and forwards the
         // authorize link; whoever's browser finishes it used to hand that team their provider token. Without the
-        // starting browser's nonce, nothing is consumed, exchanged or persisted — and the starter can still finish.
+        // starting browser's nonce, nothing is consumed, exchanged or persisted — the callback is only pointed at the
+        // SPA's completion page, where the starter alone can finish it — and the starter can still finish.
         var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
         var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("victim-token"));
         var initResult = await InitAsync(userId, teamId, instanceId, stub, returnUrl: null).ConfigureAwait(false);
 
         using (var scope = _fixture.BeginScope(b => b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance()))
         {
-            var act = async () => await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = "victim-code", State = initResult.State, BrowserNonce = browserNonce }).ConfigureAwait(false);
+            var handedOff = await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = "victim-code", State = initResult.State, BrowserNonce = browserNonce }).ConfigureAwait(false);
 
-            var refused = await act.ShouldThrowAsync<OAuthCallbackException>().ConfigureAwait(false);
-            refused.Reason.ShouldContain("not started in this browser");
+            handedOff.CredentialId.ShouldBeNull("a callback without the starting browser's nonce completes nothing");
+            handedOff.ReturnUrl.ShouldBe(OAuthReturnUrl.CompletionPage, "handed to the SPA's completion page on this site");
         }
 
         stub.LastExchange.ShouldBeNull("the code must never reach the token endpoint");
@@ -343,6 +344,167 @@ public class OAuthFlowTests
         first.DeletedDate.ShouldBeNull();
     }
 
+    // ── A callback without the binding cookie: handed to the SPA, finished by the starter signed in ─────────
+
+    [Fact]
+    public async Task A_handed_off_connect_is_finished_by_the_person_who_started_it()
+    {
+        // The SPA and the API on different sites: the browser never keeps the binding cookie, so every callback arrives
+        // without it. The SPA's completion page then finishes the connect as its signed-in starter.
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("access-from-provider", "refresh-from-provider"));
+        var init = await InitAsync(userId, teamId, instanceId, stub, returnUrl: "http://127.0.0.1:5180/oauth-callback").ConfigureAwait(false);
+
+        var handedOff = await CallbackAsync(init.State, "code-from-provider", browserNonce: null, stub).ConfigureAwait(false);
+        handedOff.ReturnUrl.ShouldBe("http://127.0.0.1:5180/oauth-callback", "back to the SPA origin that started it");
+
+        var completed = await CompleteAsInitiatorAsync(userId, init.State, "code-from-provider", stub).ConfigureAwait(false);
+
+        var credentialId = completed.CredentialId.ShouldNotBeNull();
+        completed.TeamId.ShouldBe(teamId);
+        stub.LastExchange.ShouldNotBeNull().Code.ShouldBe("code-from-provider");
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        var cred = await db.Credential.AsNoTracking().SingleAsync(c => c.Id == credentialId).ConfigureAwait(false);
+
+        cred.TeamId.ShouldBe(teamId);
+        cred.OwnerUserId.ShouldBe(userId);
+        cred.CreatedBy.ShouldBe(userId);
+        ((OAuthPayload)verify.Resolve<ICredentialPayloadSerializer>().Deserialize(AuthType.OAuth, verify.Resolve<IPayloadEncryptor>().Decrypt(cred.EncryptedPayload))).AccessToken.ShouldBe("access-from-provider");
+        (await db.OAuthPendingState.AsNoTracking().AnyAsync(s => s.State == init.State).ConfigureAwait(false)).ShouldBeFalse("finishing spends the state");
+    }
+
+    [Fact]
+    public async Task Nobody_but_the_starter_finishes_a_handed_off_connect_and_the_starter_still_can()
+    {
+        // The forwarded-link capture again, one step further: the victim's browser was handed to the SPA, and the
+        // victim is signed in there — in the very team, as an Owner. Their session is not the starter's, so nothing is
+        // consumed, exchanged or persisted, and the connect stays the starter's to finish.
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var victimId = await SeedMemberAsync(teamId, TeamRole.Owner).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("victim-token"));
+        var init = await InitAsync(userId, teamId, instanceId, stub, returnUrl: null).ConfigureAwait(false);
+
+        var act = async () => await CompleteAsInitiatorAsync(victimId, init.State, "victim-code", stub).ConfigureAwait(false);
+
+        var refused = await act.ShouldThrowAsync<OAuthCallbackException>().ConfigureAwait(false);
+        refused.Reason.ShouldContain("not started by you");
+        stub.LastExchange.ShouldBeNull("the victim's code must never reach the token endpoint");
+
+        using (var verify = _fixture.BeginScope())
+        {
+            var db = verify.Resolve<CodeSpaceDbContext>();
+            (await db.Credential.AsNoTracking().AnyAsync(c => c.ProviderInstanceId == instanceId).ConfigureAwait(false)).ShouldBeFalse();
+            (await db.OAuthPendingState.AsNoTracking().AnyAsync(s => s.State == init.State).ConfigureAwait(false)).ShouldBeTrue("a refused finish consumes nothing");
+        }
+
+        (await CompleteAsInitiatorAsync(userId, init.State, "own-code", stub).ConfigureAwait(false)).CredentialId.ShouldNotBeNull("the starter still finishes it");
+    }
+
+    [Fact]
+    public async Task A_handed_off_connect_is_not_finished_without_a_session()
+    {
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("at"));
+        var init = await InitAsync(userId, teamId, instanceId, stub, returnUrl: null).ConfigureAwait(false);
+
+        using var anonymous = _fixture.BeginScope(b =>
+        {
+            b.RegisterInstance(new Infrastructure.TestCurrentUser(null)).As<CodeSpace.Core.Services.Identity.ICurrentUser>().SingleInstance();
+            b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance();
+        });
+
+        var act = async () => await anonymous.Resolve<IMediator>().Send(new CompleteCredentialOAuthAsInitiatorCommand { State = init.State, Code = "code" }).ConfigureAwait(false);
+
+        await act.ShouldThrowAsync<UnauthorizedAccessException>().ConfigureAwait(false);
+        stub.LastExchange.ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task Either_proof_spends_the_state_for_both()
+    {
+        // One connect, one credential: finishing it through the SPA refuses the cookie, and the cookie refuses the SPA.
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("at"));
+
+        var viaSpa = await InitAsync(userId, teamId, instanceId, stub, returnUrl: null).ConfigureAwait(false);
+        await CompleteAsInitiatorAsync(userId, viaSpa.State, "c1", stub).ConfigureAwait(false);
+        await Should.ThrowAsync<OAuthCallbackException>(async () => await CallbackAsync(viaSpa.State, "c2", viaSpa.BrowserNonce, stub).ConfigureAwait(false)).ConfigureAwait(false);
+
+        var viaCookie = await InitAsync(userId, teamId, instanceId, stub, returnUrl: null).ConfigureAwait(false);
+        (await CallbackAsync(viaCookie.State, "c3", viaCookie.BrowserNonce, stub).ConfigureAwait(false)).CredentialId.ShouldNotBeNull();
+        await Should.ThrowAsync<OAuthCallbackException>(async () => await CompleteAsInitiatorAsync(userId, viaCookie.State, "c4", stub).ConfigureAwait(false)).ConfigureAwait(false);
+    }
+
+    [Theory]
+    [InlineData("http://127.0.0.1:5180/settings/credentials", "http://127.0.0.1:5180/oauth-callback")]
+    [InlineData("/settings/credentials", "/oauth-callback")]
+    public async Task A_handed_off_connect_lands_on_the_completion_page_of_the_origin_it_named(string returnUrl, string completionPage)
+    {
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("at"));
+        var init = await InitAsync(userId, teamId, instanceId, stub, returnUrl).ConfigureAwait(false);
+
+        (await CallbackAsync(init.State, "c", browserNonce: null, stub).ConfigureAwait(false)).ReturnUrl.ShouldBe(completionPage);
+    }
+
+    [Fact]
+    public async Task An_expired_connect_is_refused_rather_than_handed_off()
+    {
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("at"));
+        var state = $"expired-{Guid.NewGuid():N}";
+
+        await InsertStateAsAnOlderBuildAsync(state, instanceId, teamId, userId, OAuthBrowserNonce.Hash(OAuthBrowserNonce.Mint()), DateTimeOffset.UtcNow.AddMinutes(-1)).ConfigureAwait(false);
+
+        var refused = await Should.ThrowAsync<OAuthCallbackException>(async () => await CallbackAsync(state, "c", browserNonce: null, stub).ConfigureAwait(false)).ConfigureAwait(false);
+        refused.Reason.ShouldContain("expired");
+
+        // Not left for the deployment-wide expiry sweep, whose tests share this database.
+        using var cleanup = _fixture.BeginScope();
+        await cleanup.Resolve<CodeSpaceDbContext>().OAuthPendingState.Where(s => s.State == state).ExecuteDeleteAsync().ConfigureAwait(false);
+    }
+
+    // ── Mixed versions: rows either build writes are finished by the other ──────────────────────────────────
+
+    /// <summary>
+    /// A rolling deploy puts the start of a connect and its callback on different builds. A row written by the previous
+    /// build (with the nonce hash, #2104) or by one before migration 0246 (without it) — inserted here with exactly the
+    /// columns that build writes — is handed off by this one and finished by its starter. This build adds no column, so
+    /// nothing a previous build leaves out can make a row unreadable here.
+    /// </summary>
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_connect_an_older_build_started_is_finished_here_by_its_starter(bool olderBuildBindsTheBrowser)
+    {
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("at"));
+        var state = $"older-build-{Guid.NewGuid():N}";
+
+        await InsertStateAsAnOlderBuildAsync(state, instanceId, teamId, userId, olderBuildBindsTheBrowser ? OAuthBrowserNonce.Hash(OAuthBrowserNonce.Mint()) : null, DateTimeOffset.UtcNow.AddMinutes(5)).ConfigureAwait(false);
+
+        (await CallbackAsync(state, "c", browserNonce: null, stub).ConfigureAwait(false)).CredentialId.ShouldBeNull("handed off, not refused");
+        (await CompleteAsInitiatorAsync(userId, state, "c", stub).ConfigureAwait(false)).CredentialId.ShouldNotBeNull();
+    }
+
+    [Fact]
+    public async Task A_connect_this_build_started_matches_the_previous_builds_callback_lookup()
+    {
+        // The previous build's callback consumes `state = $1 AND browser_nonce_hash = $2` (OAuthStateStore at #2104).
+        // Run verbatim against a row this build wrote: an older pod that receives the callback still finishes it.
+        var (userId, teamId, instanceId) = await SeedOAuthCapableInstanceAsync(ProviderKind.GitLab).ConfigureAwait(false);
+        var stub = new StubOAuthClient(ProviderKind.GitLab, BuildToken("at"));
+        var init = await InitAsync(userId, teamId, instanceId, stub, returnUrl: "/oauth-callback").ConfigureAwait(false);
+        var hash = OAuthBrowserNonce.Hash(init.BrowserNonce);
+
+        using var verify = _fixture.BeginScope();
+        var matches = await verify.Resolve<CodeSpaceDbContext>().Database.SqlQuery<int>($"SELECT count(*)::int AS \"Value\" FROM oauth_pending_state WHERE state = {init.State} AND browser_nonce_hash = {hash}").SingleAsync().ConfigureAwait(false);
+
+        matches.ShouldBe(1);
+    }
+
     // ── Helpers ────────────────────────────────────────────────────────────────────
 
     private async Task<(Guid UserId, Guid TeamId, Guid InstanceId)> SeedOAuthCapableInstanceAsync(ProviderKind kind)
@@ -389,6 +551,55 @@ public class OAuthFlowTests
         });
 
         return await scope.Resolve<IMediator>().Send(new InitCredentialOAuthCommand { ProviderInstanceId = instanceId, DisplayName = "connect", ReturnUrl = returnUrl }).ConfigureAwait(false);
+    }
+
+    private async Task<CompleteCredentialOAuthResult> CallbackAsync(string state, string code, string? browserNonce, StubOAuthClient stub)
+    {
+        using var scope = _fixture.BeginScope(b => b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance());
+
+        return await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { Code = code, State = state, BrowserNonce = browserNonce }).ConfigureAwait(false);
+    }
+
+    /// <summary>The SPA's completion page posting the handed-off code as <paramref name="callerId"/> — signed in, with no team header in play.</summary>
+    private async Task<CompleteCredentialOAuthResult> CompleteAsInitiatorAsync(Guid callerId, string state, string code, StubOAuthClient stub)
+    {
+        using var scope = _fixture.BeginScope(b =>
+        {
+            b.RegisterInstance(new Infrastructure.TestCurrentUser(callerId, "caller")).As<CodeSpace.Core.Services.Identity.ICurrentUser>().SingleInstance();
+            b.RegisterInstance<IOAuthClientRegistry>(new SingleProviderRegistry(stub)).SingleInstance();
+        });
+
+        return await scope.Resolve<IMediator>().Send(new CompleteCredentialOAuthAsInitiatorCommand { State = state, Code = code }).ConfigureAwait(false);
+    }
+
+    private async Task<Guid> SeedMemberAsync(Guid teamId, TeamRole role)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var user = new User { Id = Guid.NewGuid(), Email = $"m-{Guid.NewGuid():N}@x", Name = $"member-{Guid.NewGuid():N}" };
+
+        db.User.Add(user);
+        db.TeamMembership.Add(new TeamMembership { Id = Guid.NewGuid(), TeamId = teamId, UserId = user.Id, Role = role });
+        await db.SaveChangesAsync().ConfigureAwait(false);
+
+        return user.Id;
+    }
+
+    /// <summary>
+    /// A pending state as an older build writes it: the columns of 0005 plus, from #2104 on, browser_nonce_hash — and
+    /// nothing this build might add (requested_scopes is left NULL, as a connect with default scopes stores it). Raw SQL
+    /// so a new required column could not be filled in by the entity on its behalf.
+    /// </summary>
+    private async Task InsertStateAsAnOlderBuildAsync(string state, Guid instanceId, Guid teamId, Guid initiatorId, string? browserNonceHash, DateTimeOffset expires)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var now = DateTimeOffset.UtcNow;
+
+        if (browserNonceHash == null)
+            await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO oauth_pending_state (state, provider_instance_id, team_id, initiator_user_id, code_verifier, intended_display_name, intended_owner_user_id, return_url, expires_date, created_date, created_by, last_modified_date, last_modified_by) VALUES ({state}, {instanceId}, {teamId}, {initiatorId}, {"verifier"}, {"older build"}, {initiatorId}, {"/oauth-callback"}, {expires}, {now}, {initiatorId}, {now}, {initiatorId})").ConfigureAwait(false);
+        else
+            await db.Database.ExecuteSqlInterpolatedAsync($"INSERT INTO oauth_pending_state (state, provider_instance_id, team_id, initiator_user_id, code_verifier, intended_display_name, intended_owner_user_id, return_url, expires_date, created_date, created_by, last_modified_date, last_modified_by, browser_nonce_hash) VALUES ({state}, {instanceId}, {teamId}, {initiatorId}, {"verifier"}, {"older build"}, {initiatorId}, {"/oauth-callback"}, {expires}, {now}, {initiatorId}, {now}, {initiatorId}, {browserNonceHash})").ConfigureAwait(false);
     }
 
     private static void RegisterTestUserAndTeam(ContainerBuilder b, Guid userId, Guid teamId)
@@ -442,6 +653,6 @@ public class OAuthFlowTests
             BrowserNonce = initResult.BrowserNonce
         }).ConfigureAwait(false);
 
-        return result.CredentialId;
+        return result.CredentialId.ShouldNotBeNull();
     }
 }

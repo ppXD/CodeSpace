@@ -35,7 +35,9 @@ public class OAuthStateCleanupTests
         var cleanup = scope.Resolve<IOAuthStateCleanup>();
         var deleted = await cleanup.DeleteExpiredAsync(CancellationToken.None).ConfigureAwait(false);
 
-        deleted.ShouldBe(1);
+        // A floor, not a tally: the sweep is deployment-wide, and rows other tests in this database left behind can
+        // expire too. What this test owns is asserted below by name.
+        deleted.ShouldBeGreaterThanOrEqualTo(1);
 
         var db = scope.Resolve<CodeSpaceDbContext>();
         var survivors = await db.OAuthPendingState.AsNoTracking()
