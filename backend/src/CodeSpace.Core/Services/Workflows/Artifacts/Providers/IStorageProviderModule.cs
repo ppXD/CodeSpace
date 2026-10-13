@@ -22,11 +22,11 @@ public interface IStorageProviderModule
     JsonElement SecretSchema { get; }
 
     /// <summary>
-    /// Project the non-secret configuration onto the PHYSICAL namespace it reaches, spelled one way. The control plane
-    /// canonicalizes and hashes this server-owned projection into the revision's fingerprint (clients can never submit
-    /// one), and the retention reaper re-derives it from stored revisions to decide whether one object key is one
-    /// physical object across teams — unless the provider names that object itself
-    /// (<see cref="IStorageProviderPhysicalObjects"/>), because its keys can leave the namespace its root names.
+    /// Project the non-secret configuration onto the PHYSICAL namespace it reaches, spelled one way. The retention
+    /// reaper re-derives it from stored revisions to decide whether one object key is one physical object across teams
+    /// — unless the provider names that object itself (<see cref="IStorageProviderPhysicalObjects"/>), because its keys
+    /// can leave the namespace its root names. Admission takes it too, to refuse a configuration that reaches nothing,
+    /// but for one release still stores the hash of the configuration as written (<c>StorageProfileRules.StoredNamespaceFingerprint</c>).
     ///
     /// <para>So two configurations that reach the same namespace MUST project identically — a root with and without a
     /// trailing separator, a host and its alias — and where a provider cannot tell, it projects them together: a

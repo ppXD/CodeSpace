@@ -124,6 +124,33 @@ public sealed class StorageNamespaceSharingE2ETests : IClassFixture<TaskLaunchAp
     }
 
     [Fact]
+    public async Task A_destination_created_now_for_a_root_typed_as_an_earlier_one_stores_the_fingerprint_the_previous_build_compares()
+    {
+        // A rolling deploy or a rollback runs the previous build's reaper over destinations this build creates, and that
+        // reaper decides "one object" by comparing STORED fingerprints. So a root typed exactly as a destination that
+        // build admitted must store what that build stored for it; this build's own sweep keeps the object either way.
+        var world = await SeedTwoTeamsAsync();
+        var root = Root();
+        var payload = Payload("victim deliverable under a root two builds admitted alike");
+
+        await SeedDestinationAdmittedBeforeCanonicalAsync(world.Victim, root + "/");
+        var victimArtifactId = await PutRoutedAsync(world.Victim.TeamId, payload);
+        await CreateDestinationAsync(world.Collector, root + "/");
+        var collectorArtifactId = await PutDeclaredAsync(world.Collector.TeamId, payload);
+
+        (await StoredFingerprintsAsync(world)).Distinct().Count().ShouldBe(1, "one root typed alike must store one fingerprint, or the previous build's reaper reads two namespaces and collects the victim's object");
+
+        await SweepUntilSettledAsync(collectorArtifactId);
+
+        var declaration = (await DeclarationAsync(collectorArtifactId)).ShouldNotBeNull("this build's sweep collected an object two teams reach");
+        declaration.LastErrorCode.ShouldBe("artifact-routed-object-shared");
+
+        var download = await DownloadAsync(world.Victim, victimArtifactId);
+        download.StatusCode.ShouldBe(HttpStatusCode.OK, await download.Content.ReadAsStringAsync());
+        (await download.Content.ReadAsByteArrayAsync()).ShouldBe(payload);
+    }
+
+    [Fact]
     public async Task A_second_team_in_a_root_of_its_own_still_has_its_unreferenced_bytes_collected()
     {
         // The positive control: content addressing gives both teams the same key, so if a different directory also
