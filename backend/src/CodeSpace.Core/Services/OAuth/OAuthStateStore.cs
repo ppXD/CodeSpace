@@ -38,10 +38,31 @@ public sealed class OAuthStateStore : IOAuthStateStore, IScopedDependency
     {
         var row = await _db.OAuthPendingState.FirstOrDefaultAsync(r => r.State == state && r.BrowserNonceHash == browserNonceHash, cancellationToken).ConfigureAwait(false);
 
+        return Spend(row);
+    }
+
+    public async Task<OAuthPendingState?> ConsumeForInitiatorAsync(string state, Guid initiatorUserId, CancellationToken cancellationToken)
+    {
+        var row = await _db.OAuthPendingState.FirstOrDefaultAsync(r => r.State == state && r.InitiatorUserId == initiatorUserId, cancellationToken).ConfigureAwait(false);
+
+        return Spend(row);
+    }
+
+    public async Task<OAuthPendingState?> FindLiveAsync(string state, CancellationToken cancellationToken)
+    {
+        var now = _clock.GetUtcNow();
+
+        return await _db.OAuthPendingState.AsNoTracking().FirstOrDefaultAsync(r => r.State == state && r.ExpiresDate > now, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Always delete on read — one-time-use enforcement. If expired we return null but
+    /// still drop the row so it doesn't accumulate.
+    /// </summary>
+    private OAuthPendingState? Spend(OAuthPendingState? row)
+    {
         if (row == null) return null;
 
-        // Always delete on read — one-time-use enforcement. If expired we return null but
-        // still drop the row so it doesn't accumulate.
         _db.OAuthPendingState.Remove(row);
 
         if (row.ExpiresDate < _clock.GetUtcNow()) return null;

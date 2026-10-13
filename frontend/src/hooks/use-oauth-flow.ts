@@ -2,15 +2,19 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useCallback } from "react";
 
 import { ApiError, oauthApi, type InitOAuthRequest } from "@/api/oauth";
+import type { InitOAuthResponse } from "@/api/types";
 
 /**
  * Runs an OAuth Authorization Code + PKCE flow in a popup. Resolves with the freshly
  * persisted credential id on success; rejects with a typed error otherwise.
  *
  * Mechanism:
- *   1. Call POST /api/credentials/oauth/init → { authorizeUrl }
+ *   1. Call POST /api/credentials/oauth/init → { authorizeUrl } — at the first return address the API accepts
  *   2. window.open(authorizeUrl) — popup with the provider's consent page
- *   3. After consent, provider hits backend /callback, backend hits frontend /oauth-callback
+ *   3. After consent, provider hits backend /callback, backend hits frontend /oauth-callback — with the finished
+ *      credential when the popup carried the binding cookie, or with the code and state to finish signed in when it
+ *      could not (the API on another site, or a connect started on another host than the callback's), which
+ *      /oauth-callback then does
  *   4. /oauth-callback posts { type: 'codespace:oauth-result' } back via window.opener
  *   5. This hook's message listener receives it, closes the popup, resolves
  *
@@ -21,6 +25,7 @@ import { ApiError, oauthApi, type InitOAuthRequest } from "@/api/oauth";
  */
 
 const OAUTH_MESSAGE_TYPE = "codespace:oauth-result";
+const CALLBACK_ROUTE = "/oauth-callback";
 const POPUP_FEATURES = "width=600,height=720,resizable=yes,scrollbars=yes,status=yes";
 const POPUP_POLL_INTERVAL_MS = 500;
 
@@ -49,17 +54,60 @@ export class OAuthFlowError extends Error {
 }
 
 interface RunInput extends Omit<InitOAuthRequest, "returnUrl"> {
-  /** Optional override; defaults to the in-app `/oauth-callback` route on the current origin. */
+  /** Optional override; defaults to the in-app `/oauth-callback` route on this page's origin (see `oauthReturnUrlsFor`). */
   returnUrl?: string;
+}
+
+/** The answer both API builds give, before starting anything, to an argument they refuse — a return address they do not accept among them. */
+const REFUSED_ARGUMENT = "invalid_request";
+
+/**
+ * Where a connect may bring the popup back to, in the order to ask. This page's own origin first: a connect whose
+ * callback cannot find the binding cookie — the API on another site, or a connect started on another host than
+ * OAuth:CallbackUrl names — is handed to the completion page on the origin the connect named, and only this origin
+ * holds the session and the opener that finish it. Vite prints http://127.0.0.1:5180 while the callback names
+ * localhost:5180; a path there brought the popup back to localhost, signed out and unheard by this page.
+ *
+ * A path is the fallback when the API answers on this page's own origin (the dev proxy, or one host fronting both): it
+ * needs no origin configured on the API, so a page on an alias the API does not list — or an API pod from before it
+ * read Cors:AllowedOrigins, which matched App:PublicBaseUrl alone — can still start a connect. It finishes on the
+ * callback's own host, which is this page's only when this page is on that host. In direct mode (VITE_API_URL on another
+ * origin) the callback runs on the API's host and a path would land the popup there; this page's own origin, which the
+ * API lists in Cors:AllowedOrigins for the page to reach it at all, is the one address.
+ */
+export function oauthReturnUrlsFor(pageOrigin: string, apiBase: string): string[] {
+  const apiOrigin = new URL(apiBase || "/", pageOrigin).origin;
+  const ownOrigin = `${pageOrigin}${CALLBACK_ROUTE}`;
+
+  return apiOrigin === pageOrigin ? [ownOrigin, CALLBACK_ROUTE] : [ownOrigin];
+}
+
+/**
+ * Starts the connect at the first return address the API accepts. Only a refused argument moves on to the next: both API
+ * builds refuse a return address that way before starting anything, and the return address is the one argument that
+ * differs between tries, so any other answer — or the last refusal — is the outcome.
+ */
+export async function initAtFirstAcceptedReturnUrl(request: Omit<InitOAuthRequest, "returnUrl">, [returnUrl, ...fallbacks]: string[]): Promise<InitOAuthResponse> {
+  try {
+    return await oauthApi.initOAuth({ ...request, returnUrl });
+  } catch (err) {
+    if (fallbacks.length === 0 || !isRefusedArgument(err)) throw err;
+
+    return initAtFirstAcceptedReturnUrl(request, fallbacks);
+  }
+}
+
+function isRefusedArgument(err: unknown): boolean {
+  return err instanceof ApiError && err.status === 400 && err.code === REFUSED_ARGUMENT;
 }
 
 export function useOAuthFlow() {
   const queryClient = useQueryClient();
 
-  return useCallback(async (input: RunInput): Promise<{ credentialId: string }> => {
-    const returnUrl = input.returnUrl ?? `${window.location.origin}/oauth-callback`;
+  return useCallback(async ({ returnUrl, ...request }: RunInput): Promise<{ credentialId: string }> => {
+    const returnUrls = returnUrl ? [returnUrl] : oauthReturnUrlsFor(window.location.origin, import.meta.env.VITE_API_URL ?? "");
 
-    const init = await initOrThrow({ ...input, returnUrl });
+    const init = await initOrThrow(request, returnUrls);
 
     const popup = window.open(init.authorizeUrl, "codespace-oauth", POPUP_FEATURES);
     if (!popup) throw new OAuthFlowError("popup_blocked", "Popup blocked by the browser. Allow popups for this site and try again.");
@@ -77,9 +125,9 @@ export function useOAuthFlow() {
   }, [queryClient]);
 }
 
-async function initOrThrow(input: InitOAuthRequest) {
+async function initOrThrow(request: Omit<InitOAuthRequest, "returnUrl">, returnUrls: string[]) {
   try {
-    return await oauthApi.initOAuth(input);
+    return await initAtFirstAcceptedReturnUrl(request, returnUrls);
   } catch (err) {
     if (err instanceof ApiError) throw new OAuthFlowError("init_failed", err.message);
     throw new OAuthFlowError("init_failed", err instanceof Error ? err.message : "Failed to start OAuth flow");

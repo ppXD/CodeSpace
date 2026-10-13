@@ -160,7 +160,7 @@ public sealed class CredentialOwnerReachTests
 
         using var callback = OAuthScope(userId: null, teamId: null);
 
-        return (await callback.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { State = init.State, Code = "code", BrowserNonce = init.BrowserNonce })).CredentialId;
+        return (await callback.Resolve<IMediator>().Send(new CompleteCredentialOAuthCommand { State = init.State, Code = "code", BrowserNonce = init.BrowserNonce })).CredentialId.ShouldNotBeNull();
     }
 
     private async Task<Guid> LinkOwnTokenAsync(World world, Guid userId)
