@@ -51,6 +51,10 @@ export interface InitOAuthResponse {
   state: string;
 }
 
+export interface CompleteOAuthResponse {
+  credentialId: string;
+}
+
 export interface RevokeCredentialResponse {
   credentialId: string;
   providerAcknowledged: boolean;

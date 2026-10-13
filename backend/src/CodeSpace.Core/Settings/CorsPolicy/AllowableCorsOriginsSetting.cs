@@ -16,6 +16,12 @@ public class AllowableCorsOriginsSetting : IConfigurationSetting<string[]>
 {
     public const string ConfigurationKey = "Cors:AllowedOrigins";
 
+    /// <summary>
+    /// The Vite dev-server origins, which the CORS policy adds in Development only. The port is pinned by vite.config.ts
+    /// — keep these in sync. Here rather than beside the policy so an OAuth connect may return to exactly the same ones.
+    /// </summary>
+    public static readonly string[] DevelopmentOrigins = { "http://localhost:5180", "http://127.0.0.1:5180" };
+
     public AllowableCorsOriginsSetting(IConfiguration configuration)
     {
         Value = Resolve(configuration);

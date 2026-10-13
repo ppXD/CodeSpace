@@ -26,8 +26,10 @@ public sealed record InitCredentialOAuthCommand : ICommand<InitCredentialOAuthRe
 
     /// <summary>
     /// Where to redirect the browser after success, with query params appended. Must be a path on this site
-    /// (a single leading '/') or an address on the deployment's public origin; anything else is refused here,
-    /// before a flow starts, and checked again at the callback.
+    /// (a single leading '/') or an address on an origin this deployment serves its web app from
+    /// (<c>OAuthReturnOriginsSetting</c>); anything else is refused here with 400 <c>invalid_request</c>, before a
+    /// flow starts, and checked again at the callback. The SPA names its own origin first and asks again with a path
+    /// on that refusal.
     /// </summary>
     public string? ReturnUrl { get; init; }
 
