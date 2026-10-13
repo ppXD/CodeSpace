@@ -34,6 +34,28 @@ describe("Workflow Run pending-wait API", () => {
     await expect(workflowsApi.getRunPendingWait(runId)).rejects.toBeInstanceOf(InvalidWorkflowRunPendingWaitObservationError);
   });
 
+  it("reads a Callback wait whose token the server withholds — the placeholder passes the decoder every SPA build ships", async () => {
+    // The literal the API sends in place of a Callback's token (WorkflowWaitKinds.WithheldBearerToken, pinned by
+    // WorkflowWaitKindsTests). A null here showed "Pending action unavailable" on an SPA built before the reveal existed.
+    const withheld = "withheld-reload-the-page-to-reveal";
+    vi.stubGlobal("fetch", vi.fn(() => json({ runId, wait: { id: waitId, nodeId: "cb", kind: "Callback", token: withheld, wakeAt: null, promptState: "Missing", promptPrefix: null } })));
+
+    const result = await workflowsApi.getRunPendingWait(runId);
+
+    expect(result?.wait).toEqual({ id: waitId, nodeId: "cb", kind: "Callback", token: withheld, wakeAt: null, promptState: "Missing", promptPrefix: null });
+  });
+
+  it("reveals a callback URL through the runs.control-gated command", async () => {
+    vi.stubGlobal("fetch", vi.fn(() => json({ waitId, path: "/api/workflows/callbacks/0123456789abcdef0123456789abcdef" })));
+
+    const revealed = await workflowsApi.revealCallbackUrl(runId, waitId);
+
+    expect(revealed).toEqual({ waitId, path: "/api/workflows/callbacks/0123456789abcdef0123456789abcdef" });
+    const [url, init] = vi.mocked(fetch).mock.calls[0] as [string, RequestInit];
+    expect(String(url).endsWith(`/api/workflows/runs/${runId}/waits/${waitId}/callback-url`)).toBe(true);
+    expect(init.method).toBe("POST");
+  });
+
   it("conflates an inaccessible run with missing", async () => {
     vi.stubGlobal("fetch", vi.fn(() => json({ title: "Not Found" }, 404)));
     await expect(workflowsApi.getRunPendingWait(runId)).resolves.toBeNull();

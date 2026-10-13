@@ -123,6 +123,83 @@ describe("SPA response headers (nginx.conf)", () => {
   });
 });
 
+/** The `map <source> <name> { … }` block for `name`: its regex entries (nginx PCRE, which these named groups share with JS) and its default. */
+function nginxMap(name: string): { entries: Array<{ pattern: RegExp; value: string }>; fallback: string } {
+  const block = new RegExp(`^map\\s+\\$\\w+\\s+\\$${name}\\s*\\{([\\s\\S]*?)^\\}`, "m").exec(nginxConf);
+
+  expect(block, `nginx.conf has no map defining $${name}`).not.toBeNull();
+  const entries = Array.from(block![1].matchAll(/^\s*"~(\*?)(.*)"\s+"(.*)";\s*$/gm), ([, insensitive, source, value]) => ({ pattern: new RegExp(source, insensitive ? "i" : ""), value }));
+  const fallback = /^\s*default\s+(\S+);/m.exec(block![1]);
+
+  expect(fallback, `the $${name} map has no default`).not.toBeNull();
+  return { entries, fallback: fallback![1] };
+}
+
+/** What nginx writes for `$name` when its map's source is `input`: the first matching regex's value with its named captures filled in, else the default. */
+function mapped(name: string, input: string): string {
+  const { entries, fallback } = nginxMap(name);
+  const hit = entries.map(entry => ({ entry, match: entry.pattern.exec(input) })).find(({ match }) => match !== null);
+
+  if (!hit) return fallback.startsWith("$") ? input : fallback;
+  return hit.entry.value.replace(/\$\{(\w+)\}/g, (_, group: string) => hit.match!.groups?.[group] ?? "");
+}
+
+/** The access log format the SPA's server writes with. */
+function accessLogFormat(): string {
+  const directive = /^\s{4}access_log\s+\S+\s+(\w+);/m.exec(nginxConf);
+
+  expect(directive, "the server block names no access_log format — the image's default `main` writes $request and the Referer verbatim").not.toBeNull();
+  const format = new RegExp(`^log_format\\s+${directive![1]}\\s+([\\s\\S]*?);\\s*$`, "m").exec(nginxConf);
+
+  expect(format, `nginx.conf does not define log_format ${directive![1]}`).not.toBeNull();
+  return format![1];
+}
+
+describe("SPA access log (nginx.conf)", () => {
+  const canary = "CANARY-nginx-9f2c41d7e8";
+
+  it("writes the request line and the Referer only through the maps that take a bearer token out", () => {
+    const format = accessLogFormat();
+
+    expect(format).toContain("$codespace_logged_uri");
+    expect(format).toContain("$codespace_logged_referer");
+    expect(format).not.toMatch(/\$request(?![_a-z])/);
+    expect(format).not.toContain("$request_uri");
+    expect(format).not.toContain("$http_referer");
+  });
+
+  it.each([
+    [`/invite/${canary}`, "/invite/{token}"],
+    [`/reset-password/${canary}?from=mail`, "/reset-password/{token}?from=mail"],
+    [`/api/invitations/${canary}/accept`, "/api/invitations/{token}/accept"],
+    [`/api/auth/reset-password/${canary}`, "/api/auth/reset-password/{token}"],
+    [`/api/workflows/callbacks/${canary}`, "/api/workflows/callbacks/{token}"],
+    [`/INVITE/${canary}`, "/INVITE/{token}"],
+    ["/teams/demo/runs/7", "/teams/demo/runs/7"],
+    ["/assets/index-3f2a.js", "/assets/index-3f2a.js"],
+  ])("logs the request for %s as %s", (uri, logged) => {
+    expect(mapped("codespace_logged_uri", uri)).toBe(logged);
+  });
+
+  it.each([
+    [`https://app.example.test/invite/${canary}`, "https://app.example.test/invite/{token}"],
+    [`http://127.0.0.1:8080/reset-password/${canary}`, "http://127.0.0.1:8080/reset-password/{token}"],
+    ["https://app.example.test/teams/demo/runs", "https://app.example.test/teams/demo/runs"],
+    ["", ""],
+  ])("logs the Referer %s as %s — a page at a token link sends its URL with every asset it loads", (referer, logged) => {
+    expect(mapped("codespace_logged_referer", referer)).toBe(logged);
+  });
+
+  it("covers every SPA route whose path carries a $token", () => {
+    // A new token route added to src/routes must be added to the maps too, or its token reaches the log.
+    const routes = Object.keys(import.meta.glob("./routes/*.tsx")).filter(path => !path.includes(".test.") && path.includes("$token"));
+    const prefixes = routes.map(path => "/" + path.replace("./routes/", "").replace(/\.tsx$/, "").split(".$token")[0].split(".").join("/") + "/");
+
+    expect(prefixes).toEqual(expect.arrayContaining(["/invite/", "/reset-password/"]));
+    for (const prefix of prefixes) expect(mapped("codespace_logged_uri", `${prefix}${canary}`), prefix).toBe(`${prefix}{token}`);
+  });
+});
+
 describe("the SPA's runtime env script", () => {
   it("is loaded from /env.js — index.html carries no inline script a strict script-src would block", () => {
     const scripts = indexHtml.match(/<script\b[^>]*>/g) ?? [];

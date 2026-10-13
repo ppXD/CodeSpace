@@ -35,6 +35,8 @@ export const TeamPermissions = {
   // read-only one. The UI still gates its writes on it: a control that can only answer 403 is worse
   // than no control.
   StorageManage: "storage.manage",
+  // Resuming, continuing and cancelling a run and re-issuing its waits — and revealing a callback URL, which resumes it without a session.
+  RunsControl: "runs.control",
 } as const;
 
 /** Pending invitations. Only fetched when the caller may manage members — the endpoint refuses otherwise. */

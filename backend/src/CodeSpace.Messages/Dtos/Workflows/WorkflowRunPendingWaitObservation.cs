@@ -13,6 +13,7 @@ public sealed record WorkflowRunPendingWait
     public required Guid Id { get; init; }
     public required string NodeId { get; init; }
     public required string Kind { get; init; }
+    /// <summary>The correlation token (a Subworkflow wait's child run id, …). <c>WorkflowWaitKinds.WithheldBearerToken</c> for a Callback wait, whose token is a bearer credential handed out only by <c>RevealWorkflowCallbackUrlCommand</c>.</summary>
     public required string Token { get; init; }
     public DateTimeOffset? WakeAt { get; init; }
     public required WorkflowRunPendingWaitPromptState PromptState { get; init; }
