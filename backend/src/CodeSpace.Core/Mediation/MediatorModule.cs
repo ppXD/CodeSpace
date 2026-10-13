@@ -40,6 +40,8 @@ public class MediatorModule : Autofac.Module
         //                             already vetted, this adds the role check for write/action requests
         //   CredentialManagement   — inside Credential (whose marker it extends): the owner of a Personal
         //                             credential passes on membership, anyone else needs credentials.manage
+        //   CredentialSpend        — the same shape for presenting a credential to its provider: the owner of a
+        //                             Personal credential passes on membership, anyone else needs repos.manage
         //   BotVisibility          — opts the request into seeing bot users (IBotInclusive); default excludes
         //   Transactional          — innermost of these, wraps DB writes only after auth has passed
         //
@@ -56,6 +58,7 @@ public class MediatorModule : Autofac.Module
         builder.RegisterGeneric(typeof(RepositoryAccessAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(CredentialAccessAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(CredentialManagementAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
+        builder.RegisterGeneric(typeof(CredentialSpendAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(BotVisibilityBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(TransactionalBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
 

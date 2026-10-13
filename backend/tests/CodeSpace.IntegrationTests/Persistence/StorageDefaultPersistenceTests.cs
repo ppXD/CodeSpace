@@ -161,6 +161,48 @@ public sealed class StorageDefaultPersistenceTests
     }
 
     /// <summary>
+    /// The one change an envelope ever admits (0249): its payload blanked, every other column as it was, once no template
+    /// names it — the materializer decrypts only the envelope its template points at, so a rotated-out or cleared one has
+    /// no reader left, and keeping it would leave a deployment-wide cloud key readable from every backup forever. The
+    /// envelope a template still names is refused, a second blanking is refused, and an envelope is never inserted blank.
+    /// </summary>
+    [Fact]
+    public async Task Credential_envelope_admits_one_blanking_and_only_once_no_template_names_it()
+    {
+        var (_, actorId) = await SeedTeamAsync();
+        var named = Credential(actorId, "CfDJ8-CANARY-named-envelope");
+        var superseded = Credential(actorId, "CfDJ8-CANARY-superseded-envelope");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.StorageDefaultCredential.AddRange(named, superseded);
+            db.StorageDefault.Add(Template(UniqueDataClass(), actorId, named.Id));
+            await db.SaveChangesAsync();
+        }
+
+        (await SetEnvelopeAsync(superseded.Id)).ShouldBe(1, "an envelope no template names has no reader left and may be blanked");
+        (await EnvelopeAsync(superseded.Id)).ShouldBe(string.Empty);
+
+        foreach (var payload in new[] { string.Empty, "CfDJ8-CANARY-refilled" })
+        {
+            var again = await Should.ThrowAsync<PostgresException>(() => SetEnvelopeAsync(superseded.Id, payload));
+            again.MessageText.ShouldContain("append-only", customMessage: "a blanked envelope is final — it is blanked once and nothing writes into it again");
+        }
+
+        var stillNamed = await Should.ThrowAsync<PostgresException>(() => SetEnvelopeAsync(named.Id));
+        stillNamed.MessageText.ShouldContain("no template names it", customMessage: "the materializer still decrypts the envelope its template points at");
+        (await EnvelopeAsync(named.Id)).ShouldBe("CfDJ8-CANARY-named-envelope");
+
+        using (var scope = _fixture.BeginScope())
+        {
+            var db = scope.Resolve<CodeSpaceDbContext>();
+            db.StorageDefaultCredential.Add(Credential(actorId, string.Empty));
+            (await db.SaveChangesAsync().ShouldThrowAsync<DbUpdateException>()).InnerException?.Message.ShouldContain("payload is required");
+        }
+    }
+
+    /// <summary>
     /// One adoption per (team, data class), and the profile it names must belong to that same team — a materialization
     /// that recorded another team's profile would be provenance pointing at storage the team does not own.
     /// </summary>
@@ -253,6 +295,25 @@ public sealed class StorageDefaultPersistenceTests
         db.StorageProfile.Add(profile);
         await db.SaveChangesAsync();
         return profile.Id;
+    }
+
+    /// <summary>Sets an envelope's payload the way a raw UPDATE would — by default to empty, the one change 0249 admits.</summary>
+    private async Task<int> SetEnvelopeAsync(Guid credentialId, string payload = "")
+    {
+        await using var connection = new NpgsqlConnection(_fixture.ConnectionString);
+        await connection.OpenAsync();
+        await using var command = new NpgsqlCommand("UPDATE storage_default_credential SET encrypted_payload = @payload WHERE id = @id", connection);
+        command.Parameters.AddWithValue("payload", payload);
+        command.Parameters.AddWithValue("id", credentialId);
+
+        return await command.ExecuteNonQueryAsync();
+    }
+
+    private async Task<string> EnvelopeAsync(Guid credentialId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().StorageDefaultCredential.AsNoTracking().Where(value => value.Id == credentialId).Select(value => value.EncryptedPayload).SingleAsync();
     }
 
     private async Task<(Guid TeamId, Guid ActorId)> SeedTeamAsync()

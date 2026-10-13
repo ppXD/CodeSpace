@@ -88,14 +88,20 @@ public sealed class GitHubOAuthClient : IOAuthClient, ISingletonDependency
         return await PostTokenAsync(input.Instance, form, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// <c>DELETE /applications/{client_id}/grant</c> for a <see cref="OAuthRevokeInput.WholeGrant"/> revoke: it ends the
+    /// user's grant — every access and refresh token GitHub ever issued that user under the client id, including one
+    /// another team connected through the same OAuth App holds. Otherwise <c>DELETE /applications/{client_id}/token</c>,
+    /// which ends the one access token presented. GitHub has no endpoint that ends a refresh token on its own, so outside
+    /// a whole-grant revoke a refresh token is not sent at all. Both endpoints authenticate as the app and take the token
+    /// as <c>access_token</c>; both are idempotent — a token already gone answers 404 or 422.
+    /// </summary>
     public async Task RevokeAsync(OAuthRevokeInput input, CancellationToken cancellationToken)
     {
-        // DELETE /applications/{client_id}/grant revokes the user's grant entirely — kills
-        // every access + refresh token GitHub ever issued under our client_id for that user.
-        // Surgical alternative is /token (revoke single token) but for a CodeSpace credential
-        // we always want the whole grant gone. Idempotent: subsequent calls return 404.
+        if (!input.WholeGrant && input.TokenTypeHint == "refresh_token") return;
+
         var apiBase = ResolveApiBase(input.Instance);
-        var url = new Uri($"{apiBase}/applications/{Uri.EscapeDataString(input.ClientId)}/grant");
+        var url = new Uri($"{apiBase}/applications/{Uri.EscapeDataString(input.ClientId)}/{(input.WholeGrant ? "grant" : "token")}");
 
         using var http = _httpClientFactory.CreateClient();
         using var request = new HttpRequestMessage(HttpMethod.Delete, url)

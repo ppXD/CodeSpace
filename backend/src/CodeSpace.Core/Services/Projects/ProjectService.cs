@@ -2,6 +2,7 @@ using System.Linq.Expressions;
 using System.Text.RegularExpressions;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Slugs;
+using CodeSpace.Core.Services.Variables;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Constants;
@@ -324,17 +325,13 @@ public sealed class ProjectService : IProjectService, IScopedDependency
         project.LastModifiedBy = actorUserId;
 
         // Cascade: soft-delete every project-scoped variable so {{project.{Slug}.X}} references
-        // resolve to null going forward. We don't hard-delete — operator audit needs the trail.
+        // resolve to null going forward. We don't hard-delete — operator audit needs the trail —
+        // but a Secret's ciphertext goes, as on every variable delete.
         var variableRows = await _db.Variable
             .Where(v => v.Scope == VariableScope.Project && v.ScopeId == projectId && v.DeletedDate == null)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        foreach (var v in variableRows)
-        {
-            v.DeletedDate = now;
-            v.LastModifiedDate = now;
-            v.LastModifiedBy = actorUserId;
-        }
+        foreach (var v in variableRows) VariableRetirement.Retire(v, now, actorUserId);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
         _logger.LogInformation(

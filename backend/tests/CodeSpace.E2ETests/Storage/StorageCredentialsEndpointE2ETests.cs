@@ -85,6 +85,20 @@ public sealed class StorageCredentialsEndpointE2ETests : IClassFixture<TaskLaunc
         rotated.GetProperty("xmin").GetUInt32().ShouldNotBe(created.GetProperty("xmin").GetUInt32());
         AssertSafeWire(rotatedWire, rotatedSecret);
 
+        using var scope = _application.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
+        var revisions = await db.StorageCredentialRevision.AsNoTracking().Where(value => value.StorageCredentialId == credentialId).OrderBy(value => value.Revision).ToListAsync();
+        revisions.Count.ShouldBe(2);
+        var encryptor = scope.ServiceProvider.GetRequiredService<IPayloadEncryptor>();
+        encryptor.Decrypt(revisions[0].EncryptedPayload).ShouldBe("""{"accessKey":"AK-ABCD","mode":"write"}""", "while the credential is Active the superseded revision stays readable: a profile may pin it");
+        encryptor.Decrypt(revisions[1].EncryptedPayload).ShouldBe("""{"accessKey":"AK-WXYZ","mode":"read"}""");
+        revisions[0].EncryptedPayload.ShouldNotContain(firstSecret);
+        revisions[1].EncryptedPayload.ShouldNotContain(rotatedSecret);
+        revisions[0].EnvelopeFingerprint.ShouldBe(Fingerprint(revisions[0].EncryptedPayload));
+        revisions[1].EnvelopeFingerprint.ShouldBe(Fingerprint(revisions[1].EncryptedPayload));
+        createdWire.ShouldNotContain(revisions[0].EncryptedPayload);
+        rotatedWire.ShouldNotContain(revisions[1].EncryptedPayload);
+
         var revoke = await SendAsync(world.UserId, world.TeamId, HttpMethod.Post, $"/api/storage/credentials/{credentialId}/revoke", new
         {
             expectedXmin = rotated.GetProperty("xmin").GetUInt32(), expectedCurrentRevision = 2,
@@ -94,19 +108,9 @@ public sealed class StorageCredentialsEndpointE2ETests : IClassFixture<TaskLaunc
         revoked.GetProperty("state").GetString().ShouldBe("Revoked");
         revoked.GetProperty("revokedDate").ValueKind.ShouldBe(JsonValueKind.String);
 
-        using var scope = _application.Services.CreateScope();
-        var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
-        var revisions = await db.StorageCredentialRevision.AsNoTracking().Where(value => value.StorageCredentialId == credentialId).OrderBy(value => value.Revision).ToListAsync();
-        revisions.Count.ShouldBe(2);
-        var encryptor = scope.ServiceProvider.GetRequiredService<IPayloadEncryptor>();
-        encryptor.Decrypt(revisions[0].EncryptedPayload).ShouldBe("""{"accessKey":"AK-ABCD","mode":"write"}""");
-        encryptor.Decrypt(revisions[1].EncryptedPayload).ShouldBe("""{"accessKey":"AK-WXYZ","mode":"read"}""");
-        revisions[0].EncryptedPayload.ShouldNotContain(firstSecret);
-        revisions[1].EncryptedPayload.ShouldNotContain(rotatedSecret);
-        revisions[0].EnvelopeFingerprint.ShouldBe(Fingerprint(revisions[0].EncryptedPayload));
-        revisions[1].EnvelopeFingerprint.ShouldBe(Fingerprint(revisions[1].EncryptedPayload));
-        createdWire.ShouldNotContain(revisions[0].EncryptedPayload);
-        rotatedWire.ShouldNotContain(revisions[1].EncryptedPayload);
+        var retired = await db.StorageCredentialRevision.AsNoTracking().Where(value => value.StorageCredentialId == credentialId).OrderBy(value => value.Revision).ToListAsync();
+        retired.ShouldAllBe(value => value.EncryptedPayload == string.Empty, "a revoked credential resolves for nobody, so none of its revisions may stay decryptable");
+        retired.Select(value => value.EnvelopeFingerprint).ShouldBe(revisions.Select(value => value.EnvelopeFingerprint), "the fingerprints stay for the audit trail");
     }
 
     [Fact]

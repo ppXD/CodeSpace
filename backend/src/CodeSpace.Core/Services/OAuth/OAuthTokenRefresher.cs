@@ -137,15 +137,20 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
     }
 
     /// <summary>
-    /// The pair the provider issued for a credential revoked meanwhile is stored nowhere; revoke it there too, so the grant
-    /// the user disconnected does not stay live. Best effort, like the revocation itself.
+    /// The pair the provider issued for a credential revoked meanwhile is stored nowhere; revoke it there too, the way the
+    /// write that emptied the row ends tokens. A Disconnect ends the user's grant, so the pair goes with it and the grant
+    /// the user disconnected does not stay live. A retirement — a connection delete, a departure, a relink — soft-deletes
+    /// the row and ends tokens, never the grant: on GitHub the grant also carries the user's tokens in every other team
+    /// connected through the same OAuth App. Best effort, like the revocation itself.
     /// </summary>
     private async Task RevokeIssuedTokensAsync(ProviderContext context, OAuthPayload issued)
     {
         try
         {
-            await RevokeAtProviderAsync(context.Instance, issued.RefreshToken!, "refresh_token").ConfigureAwait(false);
-            await RevokeAtProviderAsync(context.Instance, issued.AccessToken, "access_token").ConfigureAwait(false);
+            var wholeGrant = !await _payloadReader.IsRetiredAsync(context.Credential.Id, CancellationToken.None).ConfigureAwait(false);
+
+            await RevokeAtProviderAsync(context.Instance, issued.RefreshToken!, "refresh_token", wholeGrant).ConfigureAwait(false);
+            await RevokeAtProviderAsync(context.Instance, issued.AccessToken, "access_token", wholeGrant).ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -153,9 +158,9 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
         }
     }
 
-    private async Task RevokeAtProviderAsync(ProviderInstance instance, string token, string tokenTypeHint)
+    private async Task RevokeAtProviderAsync(ProviderInstance instance, string token, string tokenTypeHint, bool wholeGrant)
     {
-        var input = new OAuthRevokeInput { Instance = instance, ClientId = instance.OauthClientId!, ClientSecret = _encryptor.Decrypt(instance.OauthClientSecretEnc!), Token = token, TokenTypeHint = tokenTypeHint };
+        var input = new OAuthRevokeInput { Instance = instance, ClientId = instance.OauthClientId!, ClientSecret = _encryptor.Decrypt(instance.OauthClientSecretEnc!), Token = token, TokenTypeHint = tokenTypeHint, WholeGrant = wholeGrant };
 
         await _oauthClients.Get(instance.Provider).RevokeAsync(input, CancellationToken.None).ConfigureAwait(false);
     }

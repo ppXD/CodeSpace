@@ -26,7 +26,7 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
     private readonly ICurrentUser _currentUser;
     private readonly IPayloadEncryptor _encryptor;
     private readonly ICredentialPayloadSerializer _serializer;
-    private readonly IOAuthClientRegistry _oauthClients;
+    private readonly IOAuthGrantRevoker _grants;
     private readonly IProviderRegistry _registry;
     private readonly IProviderModuleCatalog _modules;
     private readonly IScopeChecker _scopeChecker;
@@ -35,14 +35,14 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
     private readonly ITeamMemberService _members;
     private readonly ILogger<CredentialService> _logger;
 
-    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthClientRegistry oauthClients, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ITeamMemberService members, ILogger<CredentialService> logger)
+    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthGrantRevoker grants, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ITeamMemberService members, ILogger<CredentialService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
         _currentUser = currentUser;
         _encryptor = encryptor;
         _serializer = serializer;
-        _oauthClients = oauthClients;
+        _grants = grants;
         _registry = registry;
         _modules = modules;
         _scopeChecker = scopeChecker;
@@ -272,13 +272,13 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         if (string.IsNullOrWhiteSpace(credential.ProviderInstance.OauthClientId) || string.IsNullOrWhiteSpace(credential.ProviderInstance.OauthClientSecretEnc))
             return (Ok: false, Error: "provider instance missing OAuth client credentials");
 
-        var payload = TryReadOAuthPayload(credential);
+        var payload = _grants.ReadPayload(credential);
 
         if (payload == null) return (Ok: false, Error: "credential payload is not a valid OAuth payload");
 
         try
         {
-            await RevokeOAuthTokensAsync(credential.ProviderInstance, payload, cancellationToken).ConfigureAwait(false);
+            await _grants.RevokeAsync(credential.ProviderInstance, _encryptor.Decrypt(credential.ProviderInstance.OauthClientSecretEnc!), payload, wholeGrant: true, cancellationToken).ConfigureAwait(false);
             return (Ok: true, Error: null);
         }
         catch (Exception ex)
@@ -286,49 +286,6 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
             _logger.LogWarning(ex, "Provider revoke failed for credential {CredentialId}; clearing local payload anyway", credential.Id);
             return (Ok: false, Error: ex.Message);
         }
-    }
-
-    private OAuthPayload? TryReadOAuthPayload(Credential credential)
-    {
-        try
-        {
-            var json = _encryptor.Decrypt(credential.EncryptedPayload);
-            return _serializer.Deserialize(AuthType.OAuth, json) as OAuthPayload;
-        }
-        catch
-        {
-            return null;
-        }
-    }
-
-    private async Task RevokeOAuthTokensAsync(ProviderInstance instance, OAuthPayload payload, CancellationToken cancellationToken)
-    {
-        var client = _oauthClients.Get(instance.Provider);
-        var clientSecret = _encryptor.Decrypt(instance.OauthClientSecretEnc!);
-
-        // Revoke refresh_token first (more durable — kills the grant on most providers), then
-        // access_token. Both are idempotent on the provider side; the caller's catch clears
-        // local payload regardless.
-        if (!string.IsNullOrEmpty(payload.RefreshToken))
-        {
-            await client.RevokeAsync(new OAuthRevokeInput
-            {
-                Instance = instance,
-                ClientId = instance.OauthClientId!,
-                ClientSecret = clientSecret,
-                Token = payload.RefreshToken,
-                TokenTypeHint = "refresh_token"
-            }, cancellationToken).ConfigureAwait(false);
-        }
-
-        await client.RevokeAsync(new OAuthRevokeInput
-        {
-            Instance = instance,
-            ClientId = instance.OauthClientId!,
-            ClientSecret = clientSecret,
-            Token = payload.AccessToken,
-            TokenTypeHint = "access_token"
-        }, cancellationToken).ConfigureAwait(false);
     }
 
     private static void MarkRevokedLocally(Credential credential, string? providerError)
