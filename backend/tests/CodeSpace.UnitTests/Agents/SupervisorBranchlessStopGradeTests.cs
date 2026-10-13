@@ -238,19 +238,64 @@ public sealed class SupervisorBranchlessStopGradeTests
         SupervisorOutcome.ReadAcceptanceGradeJudgedSummary(outcome).ShouldBeFalse();
     }
 
+    // ── F1 residual: what a supervisor grade keeps never carries a workflow secret ──
+
+    private const string UnitSecret = "CANARY-G2-unit-goal-4b5c6d7e";
+    private const string SpecSecret = "CANARY-G2-floor-argv-8f9a0b1c";
+
+    [Fact]
+    public async Task A_branchless_gate_masks_the_units_sealed_secrets_and_the_scope_secrets_its_spec_carries()
+    {
+        // The unit's sealed task names the value its goal embedded; the node scope resolved another into the
+        // model-authored acceptance argv. Both run exactly, and the grade repeats the argv and its output into a team
+        // artifact — so the request must name both, and nothing else of the scope.
+        // MUTATIONS this pins: drop WorkflowSecrets from the branchless lane's request; read the unit's secrets without
+        // opening its sealed task; or read the spec's without the ambient scope → one of the two canaries goes missing → red.
+        var sealer = new CodeSpace.Core.Services.Workflows.Runtime.WorkflowSensitivePayloadSealer(new CodeSpace.Core.Services.Workflows.Runtime.DataProtectionWorkflowSensitivePayloadProtector(new Microsoft.AspNetCore.DataProtection.EphemeralDataProtectionProvider()));
+        var db = Infrastructure.EmptyTestDb.New();
+        var task = new AgentTask { Goal = $"write the report, deploy key {UnitSecret}", Harness = "codex-cli", WorkflowSecrets = [UnitSecret] };
+        var sealedTask = AgentTaskSecrets.Seal(task, sealer);
+        db.AgentRun.Add(new CodeSpace.Core.Persistence.Entities.AgentRun { Id = UnitId, TeamId = TeamId, Harness = task.Harness, Status = AgentRunStatus.Succeeded, TaskJson = sealedTask.PublicJson, SealedTaskCiphertext = sealedTask.Ciphertext });
+        await db.SaveChangesAsync();
+        var grader = new CapturingGrader(new BenchmarkGrade { Passed = true, Detail = "artifact-present" });
+
+        using (InNodeScope(SpecSecret, "a-scope-secret-no-spec-carries"))
+            await GradeAsync(grader, StopWith(BenchmarkGradingKind.ArtifactPresent, command: $"REPORT-{SpecSecret}.md"), db: db, sealer: sealer);
+
+        grader.WorkflowSecrets.ShouldHaveSingleItem().ShouldBe([UnitSecret, SpecSecret], ignoreOrder: true, "the grade masks what the unit was handed and what its acceptance argv carries — and no other scope secret");
+    }
+
+    [Fact]
+    public async Task A_branchless_gate_that_faults_masks_the_fault_it_quotes()
+    {
+        // MUTATION this pins: record `grade-error: {ex.Message}` without MaskedDetail → the decision tape keeps the canary → red.
+        var grader = new CapturingGrader(new InvalidOperationException($"judge endpoint refused bearer {SpecSecret}"));
+
+        string outcome;
+        using (InNodeScope(SpecSecret))
+            outcome = await GradeAsync(grader, StopWith(BenchmarkGradingKind.ArtifactPresent));
+
+        outcome.ShouldContain("grade-error: ");
+        outcome.ShouldNotContain(SpecSecret);
+    }
+
+    /// <summary>The ambient call scope the engine pushes for the supervisor node: its capture redactor holds the node scope's secrets.</summary>
+    private static IDisposable InNodeScope(params string[] secrets) =>
+        CodeSpace.Core.Services.Workflows.Llm.LlmCallContext.Push(new CodeSpace.Core.Services.Workflows.Llm.LlmCallScope(Guid.NewGuid(), TeamId, "sup", "", "agent.supervisor", null!, null!, CaptureRedactor: new CodeSpace.Core.Services.Workflows.Runtime.PersistenceSecretRedactor(secrets)));
+
     // ── fixture ──
 
     private static readonly AcceptanceRubric WithRubric = new() { Criteria = new[] { new AcceptanceRubricCriterion { Id = "sources", Requirement = "names at least one source" } } };
 
     /// <summary>Drive the stop grade directly with a branchless context (the fake resolver finds no published branch when the tape carries none).</summary>
-    private static async Task<string> GradeAsync(CapturingGrader grader, string stopPayloadJson, StubRubricJudge? rubricJudge = null, IReadOnlyList<string>? acceptanceChecks = null, ProducerFixture? producers = null, CodeSpace.Core.Persistence.Db.CodeSpaceDbContext? db = null)
+    private static async Task<string> GradeAsync(CapturingGrader grader, string stopPayloadJson, StubRubricJudge? rubricJudge = null, IReadOnlyList<string>? acceptanceChecks = null, ProducerFixture? producers = null, CodeSpace.Core.Persistence.Db.CodeSpaceDbContext? db = null, CodeSpace.Core.Services.Workflows.Runtime.WorkflowSensitivePayloadSealer? sealer = null)
     {
         // Only the stop-grade path's own collaborators are real here: the grader under test, the branch resolver (the
         // source of the branchless world), the manifest store the oracle anchor reads, and the budget ledger the call
         // scope carries. Every other seam is untouched by ApplyStopAcceptanceGradeAsync.
         var service = new SupervisorTurnService(null!, null!, null!, db: db ?? Infrastructure.EmptyTestDb.New(), grader, null!, null!, null!, null!,
             null!, null!, new NoManifests(), new FakeSupervisorPublishedBranchResolver(), null!, new AdmitAllBudgetLedger(),
-            null!, null!, NullLogger<SupervisorTurnService>.Instance, rubricJudge);
+            null!, null!, NullLogger<SupervisorTurnService>.Instance, rubricJudge, sealer: sealer);
 
         var context = new SupervisorTurnContext
         {
@@ -287,11 +332,11 @@ public sealed class SupervisorBranchlessStopGradeTests
 
     private sealed record ProducerFixture(ReviewModelIdentity? Unit, ReviewModelIdentity? Stop);
 
-    private static string StopWith(BenchmarkGradingKind? kind, AcceptanceRubric? rubric = null) => JsonSerializer.Serialize(new SupervisorStopPayload
+    private static string StopWith(BenchmarkGradingKind? kind, AcceptanceRubric? rubric = null, string command = "REPORT.md") => JsonSerializer.Serialize(new SupervisorStopPayload
     {
         Outcome = "completed",
         Summary = "The two languages differ mainly in their memory model.",
-        Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "REPORT.md" }, Kind = kind, Rubric = rubric },
+        Acceptance = new SupervisorAcceptanceSpec { Command = new[] { command }, Kind = kind, Rubric = rubric },
     }, AgentJson.Options);
 
     /// <summary>The oracle-anchor read: this run published nothing, so it has no manifest rows.</summary>
@@ -323,10 +368,13 @@ public sealed class SupervisorBranchlessStopGradeTests
 
         public List<AcceptanceGradingPosture?> Postures { get; } = new();
 
+        public List<IReadOnlyList<string>?> WorkflowSecrets { get; } = new();
+
         public Task<BenchmarkGrade> GradeCapturedAsync(CapturedAcceptanceGradeRequest request, CancellationToken cancellationToken)
         {
             ProducerModels.Add(request.ProducerModel);
             Postures.Add(request.Posture);
+            WorkflowSecrets.Add(request.WorkflowSecrets);
             return GradeCapturedAsync(request.AgentRunId, request.TeamId, request.Spec, request.TimeoutSeconds, cancellationToken);
         }
 

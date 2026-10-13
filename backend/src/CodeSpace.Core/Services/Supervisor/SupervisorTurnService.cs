@@ -51,9 +51,12 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
     /// <summary>The mode profiles the terminal authority gates a Success claim on — read at rehydrate so the stopped-now recital can name the stage(s) a stop would be refused over. OPTIONAL for the same reason as the judge above; a null one renders the recital exactly as it rendered before the stage line existed (the gate itself is the authority's, and is unaffected).</summary>
     private readonly Completion.IModeProfileRegistry? _modes;
 
+    /// <summary>Opens a unit's sealed task for the workflow secrets it embeds, so a grade of that unit's work masks them in what it keeps. OPTIONAL for the same reason as the judge above; DI always supplies it, and without it a grade still masks every secret its acceptance argv carries.</summary>
+    private readonly Workflows.Runtime.WorkflowSensitivePayloadSealer? _sealer;
+
     private readonly ILogger<SupervisorTurnService> _logger;
 
-    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, Learning.ILessonReader lessons, IServiceScopeFactory scopeFactory, ILogger<SupervisorTurnService> logger, Review.IRubricJudge? rubricJudge = null, Completion.IModeProfileRegistry? modes = null)
+    public SupervisorTurnService(ISupervisorDecisionLog ledger, ISupervisorDecider decider, ISupervisorActionExecutor executor, CodeSpaceDbContext db, ISupervisorAcceptanceGrader acceptanceGrader, IDecisionQueueService decisionQueue, IDecisionArbiter arbiter, IDecisionAnswerService decisionAnswer, Plans.IWorkPlanService workPlans, Workflows.Lifecycle.IRunRecordLogger recordLogger, Workflows.Artifacts.IArtifactOffloader offloader, IPublishManifestStore manifests, ISupervisorPublishedBranchResolver publishedBranches, Completion.ICompletionAssessmentComposer completion, Workflows.Budget.IBudgetLedger budget, Learning.ILessonReader lessons, IServiceScopeFactory scopeFactory, ILogger<SupervisorTurnService> logger, Review.IRubricJudge? rubricJudge = null, Completion.IModeProfileRegistry? modes = null, Workflows.Runtime.WorkflowSensitivePayloadSealer? sealer = null)
     {
         _ledger = ledger;
         _decider = decider;
@@ -74,6 +77,7 @@ public sealed partial class SupervisorTurnService : ISupervisorTurnService, ISco
         _scopeFactory = scopeFactory;
         _rubricJudge = rubricJudge;
         _modes = modes;
+        _sealer = sealer;
         _logger = logger;
     }
 

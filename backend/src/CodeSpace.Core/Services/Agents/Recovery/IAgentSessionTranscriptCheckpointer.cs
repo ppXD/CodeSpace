@@ -56,4 +56,8 @@ public interface IAgentSessionTranscriptCheckpointer : IScopedDependency
 /// <param name="TranscriptPath">The absolute path of the live session transcript, already clamped within the run's config home by the caller (<c>AgentRunExecutor.ResolveSessionTranscriptPath</c> — the agent can write there, so the path is untrusted until that walk has run).</param>
 /// <param name="SessionId">The harness-native session id naming that transcript. Stamped with the checkpoint because a checkpoint nothing can ADDRESS is not resumable — the retry hands this to the CLI as its <c>--resume</c> id.</param>
 /// <param name="PreviousBytes">The complete-prefix length of the last checkpoint taken of THIS path, or null when there is none. The growth watermark: bytes that have not changed carry no new conversation, so re-storing them buys nothing. The caller keys it on the path (a revise round opens a new config home whose transcript legitimately starts smaller) and passes null when the path moved.</param>
-public sealed record SessionTranscriptCheckpointRequest(Guid TeamId, AgentRunOwnerToken Owner, string TranscriptPath, string? SessionId, long? PreviousBytes);
+public sealed record SessionTranscriptCheckpointRequest(Guid TeamId, AgentRunOwnerToken Owner, string TranscriptPath, string? SessionId, long? PreviousBytes)
+{
+    /// <summary>The run's redactor. The transcript is the agent's own file, so whatever the agent echoed into it — its model key, a broker or MCP token, a workflow secret its task embeds — is there too; the checkpoint is masked with this before it is stored. Required, so no caller can store one unmasked by leaving it out.</summary>
+    public required SecretRedactor Redactor { get; init; }
+}

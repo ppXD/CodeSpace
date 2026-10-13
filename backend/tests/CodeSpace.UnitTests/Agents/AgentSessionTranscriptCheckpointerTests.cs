@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Recovery;
@@ -277,11 +278,30 @@ public sealed class AgentSessionTranscriptCheckpointerTests : IDisposable
         (await checkpointer.CheckpointAsync(Request(path), CancellationToken.None)).ShouldNotBeNull("the retry is immediate — a refused stamp must not advance the growth watermark it never earned");
     }
 
+    [Fact]
+    public async Task A_checkpoint_is_masked_with_the_runs_secrets_and_still_resumes()
+    {
+        // SX-13: the live session file is the agent's own, so a key it printed or a workflow secret its goal carried
+        // is in it verbatim — and a checkpoint is a team artifact the next attempt restores for --resume.
+        // MUTATION this pins: store buffer[..complete] unmasked (drop Masked) → the canary is in the stored bytes → red.
+        const string key = "CANARY-G2-checkpoint-sk-ant-5d6e7f80";
+        var whole = "{\"type\":\"init\",\"session_id\":\"s-1\"}\n" + JsonSerializer.Serialize(new { type = "user", tool_result = $"key={key}" }) + "\n";
+        var path = WriteTranscript(whole + "{\"type\":\"assis");
+
+        var taken = (await NewCheckpointer().CheckpointAsync(Request(path, redactor: new SecretRedactor([key])), CancellationToken.None)).ShouldNotBeNull();
+
+        var stored = Encoding.UTF8.GetString(_store.Writes.Single().Bytes.ToArray());
+        stored.ShouldNotContain(key, Case.Sensitive, "the stored checkpoint must not carry the secret the agent echoed into its session");
+        foreach (var line in stored.Split('\n', StringSplitOptions.RemoveEmptyEntries)) JsonDocument.Parse(line).Dispose();   // every restored line must still parse
+        stored.ShouldEndWith("\n", Case.Sensitive, "still only the complete lines");
+        taken.Bytes.ShouldBe(Encoding.UTF8.GetByteCount(whole), "the watermark is the FILE's complete prefix — what the next tick measures the file against — not the masked copy's length");
+    }
+
     private ArtifactSessionTranscriptCheckpointer NewCheckpointer() =>
         new(_store, _runs, _clock, NullLogger<ArtifactSessionTranscriptCheckpointer>.Instance);
 
-    private static SessionTranscriptCheckpointRequest Request(string path, long? previousBytes = null) =>
-        new(Guid.NewGuid(), new AgentRunOwnerToken(Guid.NewGuid(), Guid.NewGuid(), 7), path, "s-1", previousBytes);
+    private static SessionTranscriptCheckpointRequest Request(string path, long? previousBytes = null, SecretRedactor? redactor = null) =>
+        new(Guid.NewGuid(), new AgentRunOwnerToken(Guid.NewGuid(), Guid.NewGuid(), 7), path, "s-1", previousBytes) { Redactor = redactor ?? SecretRedactor.None };
 
     private string WriteTranscript(string content, string name = "session.jsonl") => WriteTranscript(Encoding.UTF8.GetBytes(content), name);
 
