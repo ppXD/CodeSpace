@@ -71,3 +71,26 @@ public sealed class ForwardedHeadersGitWireApiFactory : GitWireApiFactory
         builder.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(new Dictionary<string, string?> { ["ForwardedHeaders_Enabled"] = "true" }));
     }
 }
+
+/// <summary>
+/// The same host as an operator runs it outside Development without <c>App:PublicBaseUrl</c> — the shipped
+/// docker-compose API: <c>ASPNETCORE_ENVIRONMENT=Production</c> (both the host environment and the configuration key the
+/// settings read), the key explicitly blank, and one SPA origin on the CORS list as a direct-mode deployment has.
+/// </summary>
+public sealed class ProductionWithoutPublicBaseUrlGitWireApiFactory : GitWireApiFactory
+{
+    public const string CorsOrigin = "https://spa.example";
+
+    protected override void ConfigureWebHost(IWebHostBuilder builder)
+    {
+        base.ConfigureWebHost(builder);
+
+        builder.UseEnvironment("Production");
+        builder.ConfigureAppConfiguration((_, cfg) => cfg.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ASPNETCORE_ENVIRONMENT"] = "Production",
+            ["App:PublicBaseUrl"] = "",
+            ["Cors:AllowedOrigins"] = CorsOrigin,
+        }));
+    }
+}

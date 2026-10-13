@@ -18,6 +18,15 @@ public interface IOAuthStateStore
     /// browser that started the connect can still finish it.
     /// </summary>
     Task<OAuthPendingState?> ConsumeAsync(string state, string browserNonceHash, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The same one-time consume, bound to the person instead of the browser: only the row whose state matches AND
+    /// whose <c>InitiatorUserId</c> is the caller. Anyone else presenting the state matches nothing and consumes nothing.
+    /// </summary>
+    Task<OAuthPendingState?> ConsumeForInitiatorAsync(string state, Guid initiatorUserId, CancellationToken cancellationToken);
+
+    /// <summary>The unexpired row for this state, read without consuming it. Null when there is none.</summary>
+    Task<OAuthPendingState?> FindLiveAsync(string state, CancellationToken cancellationToken);
 }
 
 public sealed record OAuthPendingStateInput

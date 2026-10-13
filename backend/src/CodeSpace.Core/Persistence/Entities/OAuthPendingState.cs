@@ -19,9 +19,10 @@ public class OAuthPendingState : IAuditable
     public string? ReturnUrl { get; set; }
 
     /// <summary>
-    /// SHA-256 of the nonce the starting browser holds in its binding cookie. The callback must present that nonce,
-    /// so only the browser that started a connect can finish it. Null only on a row a previous version wrote, which
-    /// therefore can never be completed (migration 0246).
+    /// SHA-256 of the nonce the starting browser holds in its binding cookie. A callback that presents that nonce finishes
+    /// the connect on the spot; one that does not consumes nothing and is handed to the SPA, where only
+    /// <see cref="InitiatorUserId"/>, signed in, can finish it. Null only on a row a version before migration 0246 wrote,
+    /// which therefore only that hand-off can complete.
     /// </summary>
     public string? BrowserNonceHash { get; set; }
     public List<string>? RequestedScopes { get; set; }

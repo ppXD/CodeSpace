@@ -1,5 +1,5 @@
 import { ApiError, fetchJson } from "./request";
-import type { CredentialCapabilitiesResponse, CredentialSummary, CredentialUsage, DeleteProviderInstanceResponse, InitOAuthResponse, ProviderDefaults, ProviderInstanceSummary, ProviderInstanceUsage, ProviderKind, RevokeCredentialResponse } from "./types";
+import type { CompleteOAuthResponse, CredentialCapabilitiesResponse, CredentialSummary, CredentialUsage, DeleteProviderInstanceResponse, InitOAuthResponse, ProviderDefaults, ProviderInstanceSummary, ProviderInstanceUsage, ProviderKind, RevokeCredentialResponse } from "./types";
 
 /**
  * Thin typed wrappers around the new OAuth + credential endpoints. They handle:
@@ -83,6 +83,13 @@ export const oauthApi = {
     method: "POST",
     body: JSON.stringify(input),
     credentials: "include",
+  }),
+
+  // Finishes a connect the callback handed to /oauth-callback because this browser held no binding cookie (the API on
+  // another site never sets one). The API accepts it only from the signed-in user who started the connect.
+  completeOAuth: (input: { code: string; state: string }) => fetchJson<CompleteOAuthResponse>("/api/credentials/oauth/complete", {
+    method: "POST",
+    body: JSON.stringify(input),
   }),
 
   // Add a GitLab Group Access Token as a TEAM-SERVICE credential (owned by the team, not a person).

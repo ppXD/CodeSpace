@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Messages.Commands.Credentials;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
@@ -13,6 +14,11 @@ namespace CodeSpace.Api.Controllers;
 /// is two halves: the state (32-byte CSPRNG, one-time use, 10-min TTL, PK-indexed) and a nonce
 /// cookie /init set in the browser that started the flow. State alone let whichever browser
 /// presented it finish someone else's connect.
+///
+/// <para>A browser cannot always keep that cookie: a cross-site fetch response's SameSite=Lax cookie is never stored,
+/// so with the SPA and the API on different sites — and a connect started on another host than <c>OAuth:CallbackUrl</c>
+/// names — the callback arrives without it. It then consumes nothing and hands the code and state to the SPA's
+/// completion page, which finishes the connect through <c>POST /complete</c> as the signed-in person who started it.</para>
 /// </summary>
 [ApiController]
 [Route("api/credentials/oauth")]
@@ -47,10 +53,25 @@ public class CredentialOAuthController : ControllerBase
 
         var result = await _mediator.Send(new CompleteCredentialOAuthCommand { Code = query.Code, State = query.State, BrowserNonce = Request.Cookies[BrowserNonceCookie] }, cancellationToken).ConfigureAwait(false);
 
+        // Handed off: nothing was consumed, and a cookie this browser does hold belongs to another connect, so it stays.
+        if (result.CredentialId is not { } credentialId) return Redirect(OAuthReturnUrl.HandOff(result.ReturnUrl, query.Code, query.State));
+
         // Spent with the state it proved.
         Response.Cookies.Delete(BrowserNonceCookie, BrowserNonceCookieOptions(result.BrowserNonceCookiePath, lifetime: null));
 
-        return Redirect(BuildSuccessReturn(result.ReturnUrl, result.CredentialId));
+        return Redirect(BuildSuccessReturn(result.ReturnUrl, credentialId));
+    }
+
+    /// <summary>
+    /// The SPA's completion page finishing a connect the callback handed off. Authenticated — the fallback policy — and
+    /// accepted only from the person who started the connect.
+    /// </summary>
+    [HttpPost("complete")]
+    public async Task<IActionResult> Complete([FromBody] CompleteCredentialOAuthAsInitiatorCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
+
+        return Ok(new { credentialId = result.CredentialId });
     }
 
     /// <summary>
