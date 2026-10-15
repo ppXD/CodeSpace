@@ -315,6 +315,442 @@ public class RunIntegrationContributionsTests
         contributions.ShouldHaveSingleItem().ProducedBranch.ShouldBe("codespace/agent/passed");
     }
 
+    // ─── What the head withheld is NAMED, not just dropped ───────────────────────────
+    //
+    // The withhold gate above removes a unit from every outcome the integration reports, so a reader of the outcome —
+    // the plan-map synth first — could not tell a run that integrated everything from one that integrated everything
+    // except the unit its own definition-of-done rejected, or its output review did not approve. `Withheld` is the gate's
+    // other face: the same verdicts, the same rows, reported instead of discarded.
+
+    [Fact]
+    public void A_unit_whose_acceptance_failed_is_named_with_that_verdict()
+    {
+        var runId = Guid.NewGuid();
+
+        var withheld = RunIntegrationContributions.Withheld(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: PublishAcceptanceState.Failed) },
+            new[] { Work(runId, "agent", "map#0", minute: 1) });
+
+        withheld.ShouldHaveSingleItem().ShouldBe(new WithheldContribution("agent#map#0", "acceptance Failed"),
+            customMessage: "the label is the unit id the integration outcome names its contributions by — so a reader can line the two up");
+    }
+
+    /// <summary><c>Waived</c> is only ever stamped by the SUPERVISOR's amend-acceptance path, so this fixture is supervisor-shaped: a turn cell, an agent stamped with its own <c>WorkUnit</c>. The words say who waived it and that it was not delivered.</summary>
+    [Fact]
+    public void A_unit_the_supervisor_waived_is_named_as_waived_by_the_supervisor_and_not_delivered()
+    {
+        var runId = Guid.NewGuid();
+
+        var withheld = RunIntegrationContributions.Withheld(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/s1", acceptance: PublishAcceptanceState.Waived) },
+            new[] { PlannedSupervisorWork(runId, "sup#turn1", "subtask-a", minute: 1) });
+
+        withheld.ShouldHaveSingleItem().ShouldBe(new WithheldContribution("sup#sup#turn1", "acceptance waived by the supervisor (not delivered)"));
+    }
+
+    /// <summary>
+    /// A unit the acceptance grade let through can still be withheld by its OUTPUT review — the verdict rides the run's
+    /// result, because the executor upserts the manifest before the review runs — and the head gate withholds it through
+    /// the predicate the supervisor's doors read. It must be NAMED, or it is the failure this account exists to remove: a
+    /// unit dropped from the candidate and mentioned nowhere. The reason is FIXED words — the critique and the unreviewed
+    /// reason are model-authored text derived from the agent's own output, so they stay on the result and never ride into
+    /// the synth's prompt. Flagged (the critic objected) is told apart from did-not-approve (the review never reached a
+    /// verdict over the whole result), because the account must not claim an objection nobody made.
+    /// </summary>
+    [Theory]
+    [InlineData("output-flagged", "output review flagged it")]
+    [InlineData("flagged-before-the-state-existed", "output review flagged it")]
+    [InlineData("output-unreviewed", "output review did not approve it")]
+    [InlineData("needs-decision", "output review did not approve it")]
+    [InlineData("failed-with-patch", "output review did not approve it")]
+    public void A_unit_its_output_review_did_not_approve_is_named_with_the_reviews_verdict_in_fixed_words(string shape, string reason)
+    {
+        var runId = Guid.NewGuid();
+        var produced = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/Auth.cs" }, ProducedBranch = "codespace/agent/a", BaseSha = "base1" };
+        var result = shape switch
+        {
+            "output-flagged" => produced with { Status = AgentRunStatus.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = "hard-coded admin backdoor", OutputReview = OutputReviewState.Flagged },
+            "output-unreviewed" => AgentOutputReviewHold.Held(produced, "812345 characters were never shown to the reviewer"),
+            "needs-decision" => AgentCompletionContract.ApplyPendingDecision(AgentOutputReviewHold.Unreviewed(produced, AgentRunExecutor.DecisionOpenUnreviewedReason), Guid.NewGuid()),
+            "failed-with-patch" => AgentOutputReviewHold.Unreviewed(produced with { Status = AgentRunStatus.Failed, ExitReason = "error_max_turns" }, "ended Failed before its review"),
+            _ => produced with { Status = AgentRunStatus.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = "hard-coded admin backdoor" },
+        };
+        var manifests = new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: PublishAcceptanceState.Passed) };
+        var work = new[] { Work(runId, "agent", "map#1", minute: 1, JsonSerializer.Serialize(result, AgentJson.Options)) };
+
+        RunIntegrationContributions.Build(Repo, manifests, work).ShouldBeEmpty("fixture check: the output review withheld this unit from the candidate");
+
+        var withheld = RunIntegrationContributions.Withheld(Repo, manifests, work).ShouldHaveSingleItem();
+
+        withheld.ShouldBe(new WithheldContribution("agent#map#1", reason));
+        withheld.Reason.ShouldNotContain("backdoor", customMessage: "the critique is model-authored text — it must never reach the account");
+    }
+
+    /// <summary>A run abandoned after its push wrote no result at all: under a configured review there is no approval, so its pushed branch is withheld — and named, as one the review did not approve.</summary>
+    [Fact]
+    public void A_unit_with_no_result_under_a_configured_review_is_named_as_not_approved()
+    {
+        var runId = Guid.NewGuid();
+        var task = JsonSerializer.Serialize(new AgentTask { Goal = "do the work", Harness = "codex-cli", OutputReviewMode = ReviewMode.Gate }, AgentJson.Options);
+
+        RunIntegrationContributions.Withheld(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a") },
+            new[] { new RunAgentWork(runId, "agent", "map#0", At(1), ResultJson: null, task) })
+            .ShouldHaveSingleItem().ShouldBe(new WithheldContribution("agent#map#0", "output review did not approve it"));
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public void A_unit_its_output_review_approved_or_never_configured_is_never_reported_withheld(bool reviewed)
+    {
+        var runId = Guid.NewGuid();
+        var produced = new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", ChangedFiles = new[] { "src/Auth.cs" }, ProducedBranch = "codespace/agent/a" };
+        var result = reviewed ? produced with { OutputReview = OutputReviewState.Approved } : produced;
+
+        RunIntegrationContributions.Withheld(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: PublishAcceptanceState.Passed) },
+            new[] { Work(runId, "agent", "map#0", minute: 1, JsonSerializer.Serialize(result, AgentJson.Options)) })
+            .ShouldBeEmpty("a unit that reaches the candidate is not withheld");
+    }
+
+    /// <summary>Two verdicts can withhold one unit; the acceptance grade is the one named — it is the older, harder fact, and the account says one reason per unit.</summary>
+    [Fact]
+    public void When_the_acceptance_grade_and_the_output_review_both_rejected_a_unit_the_acceptance_grade_is_named()
+    {
+        var runId = Guid.NewGuid();
+        var flagged = new AgentRunResult { Status = AgentRunStatus.NeedsReview, ExitReason = "output-flagged", ReviewFeedback = "hard-coded admin backdoor", OutputReview = OutputReviewState.Flagged, ProducedBranch = "codespace/agent/a" };
+
+        RunIntegrationContributions.Withheld(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: PublishAcceptanceState.Failed) },
+            new[] { Work(runId, "agent", "map#0", minute: 1, JsonSerializer.Serialize(flagged, AgentJson.Options)) })
+            .ShouldHaveSingleItem().Reason.ShouldBe("acceptance Failed");
+    }
+
+    [Theory]
+    [InlineData(PublishAcceptanceState.Passed)]
+    [InlineData(PublishAcceptanceState.NotApplicable)]
+    public void A_unit_the_head_kept_is_never_reported_withheld(PublishAcceptanceState state)
+    {
+        var runId = Guid.NewGuid();
+
+        RunIntegrationContributions.Withheld(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: state) },
+            new[] { Work(runId, "agent", "map#0", minute: 1) })
+            .ShouldBeEmpty("a unit that reaches the candidate is not withheld — naming it would contradict the integration outcome");
+    }
+
+    /// <summary>The two views partition the produced units: every unit is either a contribution or withheld, never both and never neither — which is the property that makes "what landed" plus "what was withheld" a complete account.</summary>
+    [Fact]
+    public void What_landed_and_what_was_withheld_partition_the_produced_units()
+    {
+        var flunked = Guid.NewGuid();
+        var passed = Guid.NewGuid();
+        var manifests = new[]
+        {
+            Manifest(flunked, Repo, PublishState.Pushed, branch: "codespace/agent/flunked", acceptance: PublishAcceptanceState.Failed),
+            Manifest(passed, Repo, PublishState.Pushed, branch: "codespace/agent/passed", acceptance: PublishAcceptanceState.Passed),
+        };
+        var work = new[] { Work(flunked, "agent", "map#0", minute: 1), Work(passed, "agent", "map#1", minute: 2) };
+
+        RunIntegrationContributions.Build(Repo, manifests, work).Select(c => c.Label).ShouldBe(new[] { "agent#map#1" });
+        RunIntegrationContributions.Withheld(Repo, manifests, work).Select(w => w.Label).ShouldBe(new[] { "agent#map#0" });
+    }
+
+    /// <summary>A retry respawns a fresh agent run, so a unit whose first attempt flunked and whose second passed has BOTH rows in the ledger — and its work landed. Reporting the flunked attempt would tell the reduce that delivered work was not delivered.</summary>
+    [Fact]
+    public void A_unit_whose_retry_landed_is_not_reported_withheld_for_its_abandoned_attempt()
+    {
+        var abandoned = Guid.NewGuid();
+        var respawned = Guid.NewGuid();
+        var manifests = new[]
+        {
+            Manifest(abandoned, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+            Manifest(respawned, Repo, PublishState.Pushed, branch: "codespace/agent/a2", acceptance: PublishAcceptanceState.Passed),
+        };
+        var work = new[] { Work(abandoned, "agent", "map#0", minute: 1), Work(respawned, "agent", "map#0", minute: 7) };
+
+        RunIntegrationContributions.Build(Repo, manifests, work).ShouldHaveSingleItem();
+        RunIntegrationContributions.Withheld(Repo, manifests, work).ShouldBeEmpty("the unit's work reached the candidate through its second attempt");
+    }
+
+    [Fact]
+    public void Every_failed_attempt_of_a_withheld_unit_is_reported_once()
+    {
+        var first = Guid.NewGuid();
+        var second = Guid.NewGuid();
+        var third = Guid.NewGuid();
+
+        var withheld = RunIntegrationContributions.Withheld(Repo,
+            new[]
+            {
+                Manifest(first, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+                Manifest(second, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+                Manifest(third, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+            },
+            new[] { Work(first, "agent", "map#0", minute: 1), Work(second, "agent", "map#0", minute: 4), Work(third, "agent", "map#0", minute: 8) });
+
+        withheld.ShouldHaveSingleItem(customMessage: "the retries of one unit are one unit — a row per attempt would name it three times");
+    }
+
+    /// <summary>
+    /// The ORDER is the contract: reduce to the latest attempt first, then apply the verdict. A retry respawns a fresh
+    /// agent run, so a unit whose first attempt failed AFTER its acceptance passed (an executor fault past the grade and
+    /// the push — the row names the pushed branch, the result is a bare Failed) and whose node was retried into a second
+    /// attempt that flunked its acceptance has both rows in the ledger. Gating first let the superseded attempt's bytes
+    /// integrate — the abandoned attempt on the candidate, the unit's own latest verdict ignored. Now the latest attempt
+    /// decides: nothing integrates, and the unit is withheld at ITS verdict.
+    /// </summary>
+    [Fact]
+    public void A_unit_whose_latest_attempt_flunked_contributes_nothing_although_an_earlier_attempt_passed()
+    {
+        var faulted = Guid.NewGuid();
+        var retried = Guid.NewGuid();
+        var executorFault = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentRunExecutor.GenericExecutorExitReason, Error = "the transcript attach faulted" };
+        var flunked = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentAcceptanceContract.FailClosedExitReason, AcceptancePassed = false, Patch = "second-attempt-bytes" };
+        var manifests = new[]
+        {
+            Manifest(faulted, Repo, PublishState.Pushed, branch: "codespace/agent/a1", acceptance: PublishAcceptanceState.Passed),
+            Manifest(retried, Repo, PublishState.PatchOnly, acceptance: PublishAcceptanceState.Failed),
+        };
+        var work = new[]
+        {
+            Work(faulted, "agent", "map#0", minute: 1, JsonSerializer.Serialize(executorFault, AgentJson.Options), AgentRunStatus.Failed),
+            Work(retried, "agent", "map#0", minute: 7, JsonSerializer.Serialize(flunked, AgentJson.Options), AgentRunStatus.Failed),
+        };
+
+        RunIntegrationContributions.Build(Repo, manifests, work).ShouldBeEmpty("the superseded attempt's branch never integrates, and the latest attempt was rejected");
+        RunIntegrationContributions.Withheld(Repo, manifests, work).ShouldHaveSingleItem().ShouldBe(new WithheldContribution("agent#map#0", "acceptance Failed"));
+        RunIntegrationContributions.LandedFailedSubtasks(Repo, manifests, work).ShouldBeEmpty("a unit that did not land is not a failure that landed — whatever its earlier attempt's row says");
+    }
+
+    // ─── Landed although the subtask's own run did not succeed ───────────────────────
+    //
+    // A manifest row is written whatever the owning attempt's status, and neither an ungraded unit's acceptance nor (with
+    // no output review configured) a review holds it back — so a subtask that died after editing files integrates Clean
+    // with its diff on the candidate. `LandedFailedSubtasks` names it, so the account of the candidate does not read as a
+    // whole deliverable. How the run ended is its agent-run ROW's status, the column the map's own {"error": ...} entry
+    // is read from: the result can be absent altogether (a worker the reconciler abandoned after its push).
+
+    [Theory]
+    [InlineData(AgentRunStatus.Failed)]
+    [InlineData(AgentRunStatus.TimedOut)]
+    [InlineData(AgentRunStatus.Cancelled)]
+    [InlineData(AgentRunStatus.NeedsReview)]
+    public void A_contribution_whose_own_run_did_not_succeed_is_reported_as_an_unverified_partial(AgentRunStatus status)
+    {
+        var runId = Guid.NewGuid();
+
+        RunIntegrationContributions.LandedFailedSubtasks(Repo,
+            new[] { Manifest(runId, Repo, PublishState.PatchOnly) },
+            new[] { Work(runId, "agent", "map#1", minute: 1, ResultWith(status), status) })
+            .ShouldBe(new[] { new LandedFailedSubtask("agent#map#1", AcceptancePassed: false) });
+    }
+
+    [Fact]
+    public void A_contribution_whose_own_run_succeeded_is_never_reported()
+    {
+        var runId = Guid.NewGuid();
+
+        RunIntegrationContributions.LandedFailedSubtasks(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a") },
+            new[] { Work(runId, "agent", "map#0", minute: 1, ResultWith(AgentRunStatus.Succeeded), AgentRunStatus.Succeeded) })
+            .ShouldBeEmpty();
+    }
+
+    /// <summary>
+    /// The reconciler abandons a worker that died after the executor wrote its manifest row: the run row is marked Failed
+    /// and NO result is written (the abandon's terminal write keeps the column null). The map reports that subtask as an
+    /// error entry — from the row's status — so the account must flag it, and a result-keyed reading would call it whole.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("{not-json")]
+    public void A_run_abandoned_after_its_push_is_reported_although_it_left_no_readable_result(string? resultJson)
+    {
+        var runId = Guid.NewGuid();
+
+        RunIntegrationContributions.LandedFailedSubtasks(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a") },
+            new[] { Work(runId, "agent", "map#0", minute: 1, resultJson, AgentRunStatus.Failed) })
+            .ShouldBe(new[] { new LandedFailedSubtask("agent#map#0", AcceptancePassed: false) });
+    }
+
+    /// <summary>The row's status is the verdict on the run: a run whose row says Succeeded is whole whatever its result bytes read, and a row that carries no status claims nothing.</summary>
+    [Theory]
+    [InlineData(AgentRunStatus.Succeeded, null)]
+    [InlineData(AgentRunStatus.Succeeded, "{not-json")]
+    [InlineData(null, null)]
+    [InlineData(null, "{not-json")]
+    public void A_row_that_is_not_marked_failed_claims_nothing_about_the_run(AgentRunStatus? status, string? resultJson)
+    {
+        var runId = Guid.NewGuid();
+
+        RunIntegrationContributions.LandedFailedSubtasks(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a") },
+            new[] { Work(runId, "agent", "map#0", minute: 1, resultJson, status) })
+            .ShouldBeEmpty("an absent or unreadable result is not evidence that the run failed");
+    }
+
+    /// <summary>The executor grades acceptance only for a run that reported its own outcome, so a Passed row whose run still ended Failed — a fault after the grade, here the executor's own — was verified and failed AFTERWARDS: the diff on the branch is not an unchecked partial.</summary>
+    [Fact]
+    public void A_run_that_failed_after_its_acceptance_passed_is_reported_as_verified()
+    {
+        var runId = Guid.NewGuid();
+        var fault = new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentRunExecutor.GenericExecutorExitReason, Error = "the transcript attach faulted" };
+
+        RunIntegrationContributions.LandedFailedSubtasks(Repo,
+            new[] { Manifest(runId, Repo, PublishState.Pushed, branch: "codespace/agent/a", acceptance: PublishAcceptanceState.Passed) },
+            new[] { Work(runId, "agent", "map#0", minute: 1, JsonSerializer.Serialize(fault, AgentJson.Options), AgentRunStatus.Failed) })
+            .ShouldBe(new[] { new LandedFailedSubtask("agent#map#0", AcceptancePassed: true) });
+    }
+
+    /// <summary>A unit whose latest attempt was withheld did not land, so it is not a failure that landed: it is named once, by <c>Withheld</c>, and never by both views.</summary>
+    [Fact]
+    public void A_withheld_unit_is_never_reported_as_landed_because_it_did_not_land()
+    {
+        var runId = Guid.NewGuid();
+        var manifests = new[] { Manifest(runId, Repo, PublishState.PatchOnly, acceptance: PublishAcceptanceState.Failed) };
+        var work = new[] { Work(runId, "agent", "map#0", minute: 1, ResultWith(AgentRunStatus.Failed), AgentRunStatus.Failed) };
+
+        RunIntegrationContributions.LandedFailedSubtasks(Repo, manifests, work).ShouldBeEmpty();
+        RunIntegrationContributions.Withheld(Repo, manifests, work).ShouldHaveSingleItem();
+    }
+
+    /// <summary>Only the attempt that LANDED is asked: a first attempt that died and a retry that succeeded leave a unit whose work is whole.</summary>
+    [Fact]
+    public void Only_the_latest_attempts_run_is_asked_whether_it_succeeded()
+    {
+        var died = Guid.NewGuid();
+        var retried = Guid.NewGuid();
+        var manifests = new[] { Manifest(died, Repo, PublishState.PatchOnly), Manifest(retried, Repo, PublishState.Pushed, branch: "codespace/agent/a2") };
+        var work = new[]
+        {
+            Work(died, "agent", "map#0", minute: 1, ResultWith(AgentRunStatus.Failed), AgentRunStatus.Failed),
+            Work(retried, "agent", "map#0", minute: 7, ResultWith(AgentRunStatus.Succeeded), AgentRunStatus.Succeeded),
+        };
+
+        RunIntegrationContributions.LandedFailedSubtasks(Repo, manifests, work).ShouldBeEmpty("the unit's work is the retry's, and the retry succeeded");
+    }
+
+    [Fact]
+    public void Landed_failures_list_in_agent_run_creation_order()
+    {
+        var late = Guid.NewGuid();
+        var early = Guid.NewGuid();
+        var manifests = new[] { Manifest(late, Repo, PublishState.PatchOnly), Manifest(early, Repo, PublishState.PatchOnly, acceptance: PublishAcceptanceState.Passed) };
+        var work = new[]
+        {
+            Work(late, "agent", "map#2", minute: 9, ResultWith(AgentRunStatus.TimedOut), AgentRunStatus.TimedOut),
+            Work(early, "agent", "map#0", minute: 3, ResultWith(AgentRunStatus.Failed), AgentRunStatus.Failed),
+        };
+        var expected = new[] { new LandedFailedSubtask("agent#map#0", AcceptancePassed: true), new LandedFailedSubtask("agent#map#2", AcceptancePassed: false) };
+
+        RunIntegrationContributions.LandedFailedSubtasks(Repo, manifests, work).ShouldBe(expected);
+        RunIntegrationContributions.LandedFailedSubtasks(Repo, manifests.Reverse().ToArray(), work.Reverse().ToArray()).ShouldBe(expected);
+    }
+
+    /// <summary>One attempt can leave a row per repository alias, all carrying the attempt's one acceptance verdict; they are one failed subtask, so one entry.</summary>
+    [Fact]
+    public void The_alias_rows_of_one_failed_attempt_are_one_entry()
+    {
+        var attempt = Guid.NewGuid();
+        var manifests = new[]
+        {
+            Manifest(attempt, Repo, PublishState.PatchOnly, alias: "repo"),
+            Manifest(attempt, Repo, PublishState.PatchOnly, alias: "repo-2"),
+        };
+
+        RunIntegrationContributions.LandedFailedSubtasks(Repo, manifests, new[] { Work(attempt, "agent", "map#0", minute: 1, ResultWith(AgentRunStatus.Failed), AgentRunStatus.Failed) })
+            .ShouldHaveSingleItem().ShouldBe(new LandedFailedSubtask("agent#map#0", AcceptancePassed: false));
+    }
+
+    /// <summary>The supervisor lane's cell is a whole turn, so its K agents share one label while being K distinct deliverables: a peer that landed must not hide the one that was withheld, which is why "did the unit land" is keyed on the agent there and on the cell everywhere else.</summary>
+    [Fact]
+    public void A_supervisor_turns_withheld_agent_is_named_even_though_a_peer_sharing_its_cell_landed()
+    {
+        var alpha = Guid.NewGuid();
+        var beta = Guid.NewGuid();
+        var manifests = new[]
+        {
+            Manifest(alpha, Repo, PublishState.Pushed, branch: "codespace/agent/s1", acceptance: PublishAcceptanceState.Failed),
+            Manifest(beta, Repo, PublishState.Pushed, branch: "codespace/agent/s2", acceptance: PublishAcceptanceState.Passed),
+        };
+        var work = new[] { PlannedSupervisorWork(alpha, "sup#turn1", "subtask-a", minute: 1), PlannedSupervisorWork(beta, "sup#turn1", "subtask-b", minute: 2) };
+
+        RunIntegrationContributions.Build(Repo, manifests, work).ShouldHaveSingleItem().ProducedBranch.ShouldBe("codespace/agent/s2");
+        RunIntegrationContributions.Withheld(Repo, manifests, work).ShouldHaveSingleItem().ShouldBe(new WithheldContribution("sup#sup#turn1", "acceptance Failed"));
+    }
+
+    /// <summary>A supervisor turn's K agents share ONE label but are K deliverables — so two withheld agents of one turn are two entries, each at its own verdict. (Keyed on the label they would be merged into one, and the second withheld deliverable would simply vanish from the account.)</summary>
+    [Fact]
+    public void Two_withheld_agents_of_one_supervisor_turn_are_two_entries_not_one()
+    {
+        var alpha = Guid.NewGuid();
+        var beta = Guid.NewGuid();
+        var manifests = new[]
+        {
+            Manifest(alpha, Repo, PublishState.Pushed, branch: "codespace/agent/s1", acceptance: PublishAcceptanceState.Failed),
+            Manifest(beta, Repo, PublishState.Pushed, branch: "codespace/agent/s2", acceptance: PublishAcceptanceState.Waived),
+        };
+        var work = new[] { PlannedSupervisorWork(alpha, "sup#turn1", "subtask-a", minute: 1), PlannedSupervisorWork(beta, "sup#turn1", "subtask-b", minute: 2) };
+
+        RunIntegrationContributions.Withheld(Repo, manifests, work).ShouldBe(new[]
+        {
+            new WithheldContribution("sup#sup#turn1", "acceptance Failed"),
+            new WithheldContribution("sup#sup#turn1", "acceptance waived by the supervisor (not delivered)"),
+        });
+    }
+
+    /// <summary>One attempt can leave a row per repository alias; they are one unit's one rejected attempt, so one entry.</summary>
+    [Fact]
+    public void The_alias_rows_of_one_withheld_attempt_are_one_entry()
+    {
+        var attempt = Guid.NewGuid();
+        var manifests = new[]
+        {
+            Manifest(attempt, Repo, PublishState.Pushed, alias: "repo", acceptance: PublishAcceptanceState.Failed),
+            Manifest(attempt, Repo, PublishState.Pushed, alias: "repo-2", acceptance: PublishAcceptanceState.Failed),
+        };
+
+        RunIntegrationContributions.Withheld(Repo, manifests, new[] { Work(attempt, "agent", "map#0", minute: 1) })
+            .ShouldHaveSingleItem().ShouldBe(new WithheldContribution("agent#map#0", "acceptance Failed"));
+    }
+
+    [Fact]
+    public void Only_work_this_repository_actually_produced_can_be_withheld_from_it()
+    {
+        var foreignRepo = Guid.NewGuid();
+        var foreign = Guid.NewGuid();
+        var nothingProduced = Guid.NewGuid();
+        var mine = Guid.NewGuid();
+
+        var withheld = RunIntegrationContributions.Withheld(Repo,
+            new[]
+            {
+                Manifest(foreign, foreignRepo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+                Manifest(nothingProduced, Repo, PublishState.None, acceptance: PublishAcceptanceState.Failed),
+                Manifest(mine, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed),
+            },
+            new[] { Work(foreign, "agent", "map#0", minute: 1), Work(nothingProduced, "agent", "map#1", minute: 2), Work(mine, "agent", "map#2", minute: 3) });
+
+        withheld.Select(w => w.Label).ShouldBe(new[] { "agent#map#2" }, "another repository's verdict, and a row that produced nothing, are not this repository's withheld work");
+    }
+
+    [Fact]
+    public void Withheld_units_list_in_agent_run_creation_order_whatever_order_the_rows_arrive_in()
+    {
+        var late = Guid.NewGuid();
+        var early = Guid.NewGuid();
+        var middle = Guid.NewGuid();
+        var manifests = new[] { late, early, middle }.Select(id => Manifest(id, Repo, PublishState.Pushed, acceptance: PublishAcceptanceState.Failed)).ToArray();
+        var work = new[] { Work(late, "agent", "map#2", minute: 9), Work(early, "agent", "map#0", minute: 3), Work(middle, "agent", "map#1", minute: 6) };
+
+        RunIntegrationContributions.Withheld(Repo, manifests, work).Select(w => w.Label).ShouldBe(new[] { "agent#map#0", "agent#map#1", "agent#map#2" });
+        RunIntegrationContributions.Withheld(Repo, manifests.Reverse().ToArray(), work.Reverse().ToArray()).Select(w => w.Label).ShouldBe(new[] { "agent#map#0", "agent#map#1", "agent#map#2" });
+    }
+
     [Fact]
     public void A_surviving_attempts_sibling_alias_rows_all_stay()
     {
@@ -436,6 +872,10 @@ public class RunIntegrationContributionsTests
     private static string Patch(string patch) =>
         JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Patch = patch }, AgentJson.Options);
 
+    /// <summary>A terminal result the executor could have recorded for a run that ended in <paramref name="status"/> having captured a diff.</summary>
+    private static string ResultWith(AgentRunStatus status) =>
+        JsonSerializer.Serialize(new AgentRunResult { Status = status, ExitReason = status == AgentRunStatus.Succeeded ? "completed" : "process-exited", Patch = "diff --git a/x b/x" }, AgentJson.Options);
+
     private static PublishManifest Manifest(Guid agentRunId, Guid repositoryId, PublishState state, string? branch = null, Guid? patchArtifactId = null, string alias = "primary", PublishAcceptanceState acceptance = PublishAcceptanceState.NotApplicable) => new()
     {
         Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Kind = PublishManifestKind.Agent, AgentRunId = agentRunId,
@@ -444,8 +884,8 @@ public class RunIntegrationContributionsTests
     };
 
     /// <summary>A row from a lane whose (node, iteration) cell IS the unit — a map branch / loop iteration / top-level node, whose task envelope carries no supervisor stamp.</summary>
-    private static RunAgentWork Work(Guid agentRunId, string nodeId, string iterationKey, int minute, string? resultJson = null) =>
-        new(agentRunId, nodeId, iterationKey, At(minute), resultJson, TaskJson(subtaskId: null, workUnit: null));
+    private static RunAgentWork Work(Guid agentRunId, string nodeId, string iterationKey, int minute, string? resultJson = null, AgentRunStatus? status = null) =>
+        new(agentRunId, nodeId, iterationKey, At(minute), resultJson, TaskJson(subtaskId: null, workUnit: null), status);
 
     /// <summary>A row the SUPERVISOR staked on a plan-less spawn: its cell is the whole turn, and only <c>SubtaskId</c> names the agent's own unit.</summary>
     private static RunAgentWork SupervisorWork(Guid agentRunId, string turnCell, string subtaskId, int minute) =>
