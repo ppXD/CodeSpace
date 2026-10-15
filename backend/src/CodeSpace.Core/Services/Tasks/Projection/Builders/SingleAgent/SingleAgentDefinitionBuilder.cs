@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Services.Agents;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
@@ -31,9 +32,8 @@ public sealed class SingleAgentDefinitionBuilder : IWorkflowDefinitionBuilder, I
     /// <summary>The route's deliverable shape, normalized — an unknown / absent shape reads as <c>code</c>, today's behaviour.</summary>
     private static string Shape(TaskBuildContext context) => DeliverableShapes.Normalize(context.Route.DeliverableShape);
 
-    /// <summary>The operator's EXECUTABLE floor, blanks dropped. Non-empty ⇒ the operator authored the oracle and it wins over any shape-derived one.</summary>
-    private static IReadOnlyList<string>? OperatorArgv(TaskBuildContext context) =>
-        context.AcceptanceChecks is { Count: > 0 } command && !string.IsNullOrWhiteSpace(command[0]) && command.All(c => c is not null && !c.Contains('\0')) ? command.ToArray() : null;
+    /// <summary>The operator's EXECUTABLE floor, verbatim — blank arguments after the program are arguments. Non-null ⇒ the operator authored a runnable oracle and it wins over any shape-derived one.</summary>
+    private static IReadOnlyList<string>? OperatorArgv(TaskBuildContext context) => AcceptanceArgv.NormalizeOrNull(context.AcceptanceChecks);
 
     /// <summary>
     /// THIS agent's objective oracle. Precedence, and the whole point of the shape axis:

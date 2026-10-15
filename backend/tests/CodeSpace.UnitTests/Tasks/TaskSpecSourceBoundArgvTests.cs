@@ -43,6 +43,20 @@ public sealed class TaskSpecSourceBoundArgvTests
         suggestion.AcceptanceProposal.Reason.ShouldContain("source reference");
     }
 
+    [Theory]
+    [InlineData(256, true)]    // exactly at the bound — a literal reference of this size resolves
+    [InlineData(257, false)]   // one over — the reference is refused, whatever the reviewer says
+    public void A_literal_reference_resolves_up_to_256_tokens_and_no_further(int tokens, bool resolves)
+    {
+        // Short tokens, so the quoted goal stays inside the review's 1000-character citation limit at the bound: a program, then blank arguments (which the rule keeps).
+        var quote = JsonSerializer.Serialize(Enumerable.Repeat("check", 1).Concat(Enumerable.Repeat("", tokens - 1)));
+        var context = Context("Use precisely this validation argv: " + quote);
+        var suggestion = TaskSpecCompiler.ToSuggestion(Compilation(new("goal", quote, "json-argv")), context, Review(context, "supported"))!;
+
+        (suggestion.AcceptanceChecks.Count == tokens).ShouldBe(resolves, "the bound is the shared rule's companion at this site: a reference over 256 tokens is refused as malformed, one at 256 is adopted");
+        if (!resolves) suggestion.AcceptanceProposal!.Reason.ShouldContain("source reference");
+    }
+
     [Fact]
     public void Literal_integrity_does_not_override_an_independent_negation_assessment()
     {

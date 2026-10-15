@@ -197,8 +197,31 @@ public class SupervisorPriorDecisionLegibilityTests
         var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(plan, approved));
 
         prompt.ShouldContain("AMENDED by a co-signed amendment", customMessage: "the co-signed replacement is the check in force and must be marked as such");
-        prompt.ShouldContain("dotnet test", customMessage: "the effective command is what the brain writes its next move against");
-        prompt.ShouldNotContain("npm test", customMessage: "the amended-away original must not be shown as live");
+        prompt.ShouldContain("""AMENDED by a co-signed amendment: ["dotnet","test"]""", customMessage: "the effective command is what the brain writes its next move against — anchored on the plan line, because the approved card above it quotes the same array and would satisfy a bare match on its own");
+        prompt.ShouldNotContain("""["npm","test"]""", customMessage: "the amended-away original must not be shown as live");
+    }
+
+    [Fact]
+    public void The_amendment_card_and_the_plan_line_show_the_amended_check_the_same_way()
+    {
+        // The card used to quote its proposed check through string.Join(" ", …), a few words from the plan line's array: the
+        // model and the human co-signer were told one command two ways, and a pipe in an argument read as a pipeline.
+        var plan = Plan("""{"goal":"ship","subtasks":[{"id":"s1","title":"Add the parser","instruction":"write the parser","acceptance":{"command":["npm","test"]}}]}""");
+
+        var card = SupervisorAmendAcceptance.IntoAskHuman(new SupervisorAmendAcceptancePayload
+        {
+            SubtaskId = "s1", Reason = "npm is not installed in this repository",
+            Acceptance = new SupervisorAcceptanceSpec { Command = new[] { "dotnet", "test", "--filter", "Category=Unit|Category=Smoke" } },
+        });
+        var approved = Ask(2, card.PayloadJson, """{"question":"q","answer":"approve"}""");
+
+        var prompt = LlmSupervisorDecider.BuildUserPromptForTest(Context(plan, approved));
+
+        var array = """["dotnet","test","--filter","Category=Unit|Category=Smoke"]""";
+
+        prompt.ShouldContain($"AMENDED by a co-signed amendment: {array}", customMessage: "the plan line shows the check in force as the argv array");
+        prompt.ShouldContain($"Proposed check: {array} {SupervisorAmendAcceptance.AmendMarker}", customMessage: "the approved card shows the SAME array, between its label and the marker — one command, one way");
+        prompt.ShouldNotContain("dotnet test --filter", customMessage: "a joined line reads the pipe inside the argument as a pipeline, and cannot show where one argument ends");
     }
 
     [Fact]
@@ -213,7 +236,7 @@ public class SupervisorPriorDecisionLegibilityTests
 
         prompt.ShouldContain("WAIVED by a co-signed amendment");
         prompt.ShouldContain("WAIVED is not PASSED", customMessage: "the B2 invariant holds at every door, this one included");
-        prompt.ShouldNotContain("npm test", customMessage: "a waived item carries NO oracle — reciting one invents a contract the run does not have");
+        prompt.ShouldNotContain("""["npm","test"]""", customMessage: "a waived item carries NO oracle — reciting one invents a contract the run does not have");
     }
 
     // ── a budget-blocked wave ───────────────────────────────────────────────────────
