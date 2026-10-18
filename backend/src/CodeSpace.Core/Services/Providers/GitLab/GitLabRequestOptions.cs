@@ -27,6 +27,13 @@ namespace CodeSpace.Core.Services.Providers.GitLab;
 /// to another origin than the connection's is refused before the credential is attached, with the same
 /// <see cref="ProviderBaseUrlRedirectsException"/>: nothing is sent there.</para>
 ///
+/// <para>The rejection. A 401 to an OAuth credential asks <see cref="GitLabCredential.RecoverAsync"/> for a replacement — a
+/// newer token another caller stored, or a rotation — and a GET or HEAD is sent again with it, once. A request that changes
+/// something is not: NGitLab has written its body to a stream it does not hand back, so it cannot be sent again. Asking still
+/// settles the credential — it carries the replacement from then on, for the requests that follow in the same call, and the
+/// stored token is the new one for every call after — and the 401 that this one got is the answer here. The provider, which can
+/// repeat the whole call, does so once for a write that opens it (<c>GitLabRepositoryProvider.ResentOnceIfRefused</c>).</para>
+///
 /// <para>Construct with <c>(0, TimeSpan.Zero)</c>, what <see cref="RequestOptions.Default"/> is: no retries of its own — the
 /// provider's resilience wrapper retries — and its 5-minute timeout.</para>
 /// </summary>
@@ -46,10 +53,27 @@ internal sealed class GitLabRequestOptions : RequestOptions
     public override WebResponse GetResponse(HttpWebRequest request)
     {
         var current = Prepare(request);
+        var presented = _credential.Token;
+        var rejected = false;
 
         for (var hop = 0; ; hop++)
         {
-            var response = (HttpWebResponse)current.GetResponse();
+            HttpWebResponse response;
+
+            try
+            {
+                response = (HttpWebResponse)current.GetResponse();
+            }
+            catch (WebException failure) when (!rejected && IsRejection(failure) && _credential.CanRecover)
+            {
+                rejected = true;
+
+                // NGitLab's synchronous surface has no async to await in; nothing here holds a synchronization context.
+                if (ReplayAfterRejectionAsync(current, failure, presented, CancellationToken.None).GetAwaiter().GetResult() is not { } replay) throw;
+
+                current = replay;
+                continue;
+            }
 
             if (FollowTarget(current, response, hop) is not { } next) return response;
 
@@ -61,16 +85,52 @@ internal sealed class GitLabRequestOptions : RequestOptions
     public override async Task<WebResponse> GetResponseAsync(HttpWebRequest request, CancellationToken cancellationToken)
     {
         var current = Prepare(request);
+        var presented = _credential.Token;
+        var rejected = false;
 
         for (var hop = 0; ; hop++)
         {
-            var response = await SendAsync(current, cancellationToken).ConfigureAwait(false);
+            HttpWebResponse response;
+
+            try
+            {
+                response = await SendAsync(current, cancellationToken).ConfigureAwait(false);
+            }
+            catch (WebException failure) when (!rejected && IsRejection(failure) && _credential.CanRecover)
+            {
+                rejected = true;
+
+                if (await ReplayAfterRejectionAsync(current, failure, presented, cancellationToken).ConfigureAwait(false) is not { } replay) throw;
+
+                current = replay;
+                continue;
+            }
 
             if (FollowTarget(current, response, hop) is not { } next) return response;
 
             response.Dispose();
             current = next;
         }
+    }
+
+    /// <summary>GitLab answered 401: <see cref="HttpWebRequest"/> reports every 4xx as an exception that carries the response.</summary>
+    private static bool IsRejection(WebException failure) => failure.Response is HttpWebResponse { StatusCode: HttpStatusCode.Unauthorized };
+
+    /// <summary>
+    /// Asks for the credential to try instead of the one that was refused, and returns the request to send again with it — or
+    /// null when the 401 stands: nothing to try, or a request that cannot be sent again (anything but a GET or HEAD).
+    /// </summary>
+    private async Task<HttpWebRequest?> ReplayAfterRejectionAsync(HttpWebRequest sent, WebException failure, string presented, CancellationToken cancellationToken)
+    {
+        if (!await _credential.RecoverAsync(presented, cancellationToken).ConfigureAwait(false) || !IsReadOnly(sent.Method)) return null;
+
+        failure.Response?.Dispose();
+
+        var next = Follow(sent, sent.RequestUri);
+
+        _credential.Attach(next.Headers);
+
+        return next;
     }
 
     /// <summary>One request, aborted with its caller's token — as the base class sends it.</summary>

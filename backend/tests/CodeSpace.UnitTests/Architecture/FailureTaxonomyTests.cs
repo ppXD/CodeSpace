@@ -75,6 +75,7 @@ public class FailureTaxonomyTests
         FailureCodes.ProviderError.ShouldBe("provider_error");
         FailureCodes.RateLimited.ShouldBe("rate_limited");
         FailureCodes.CredentialDisconnected.ShouldBe("credential_disconnected");
+        FailureCodes.CredentialNeedsReconnect.ShouldBe("credential_needs_reconnect");
         FailureCodes.GitCredentialRejected.ShouldBe("git_credential_rejected");
         FailureCodes.ModelEndpointKeyRequired.ShouldBe("model_endpoint_key_required");
         FailureCodes.ProviderEndpointCredentialsBound.ShouldBe("provider_endpoint_credentials_bound");

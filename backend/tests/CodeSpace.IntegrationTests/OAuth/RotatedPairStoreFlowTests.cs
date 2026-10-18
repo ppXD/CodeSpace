@@ -1,3 +1,5 @@
+using System.Collections;
+using System.Reflection;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Credentials;
@@ -7,6 +9,7 @@ using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
 using Shouldly;
@@ -110,6 +113,43 @@ public class RotatedPairStoreFlowTests
         (await GitLabCredentialSeed.ReadStoredPayloadAsync(_fixture, seed.CredentialId).ConfigureAwait(false)).RefreshToken.ShouldBe("rt-2");
     }
 
+    [Fact]
+    public async Task A_second_pods_refusal_of_the_consumed_pair_does_not_strand_the_pair_the_first_pod_kept()
+    {
+        // Pod A: GitLab rotates rt-0 and every store fails, so A keeps rt-2 in memory. Pod B has no such memory: it reads the row
+        // — still the consumed rt-0 — and is refused for good, which marks the credential Error. The credential is not dead: a
+        // live pair exists, in A. A's next use must store it, not be told to reconnect by the verdict B's refusal wrote.
+        using var gitlab = new GitLabDoorkeeperStub();
+        gitlab.Seed(GitLabDoorkeeperStub.DefaultClientId, "nacho", "at-0", "rt-0");
+        var seed = await GitLabCredentialSeed.SeedAsync(_fixture, gitlab.BaseUrl, "at-0", "rt-0").ConfigureAwait(false);
+
+        await Should.ThrowAsync<NpgsqlException>(() => CredentialRefreshHarness.ResolveTokenAsync(_fixture, seed.RepositoryId, writer => new FailingCredentialPayloadWriter(writer, int.MaxValue))).ConfigureAwait(false);
+
+        using var podB = KeptPairs.SetAsideLikeAnotherProcess(seed.CredentialId);
+
+        await Should.ThrowAsync<CredentialNeedsReconnectException>(() => CredentialRefreshHarness.ResolveTokenAsync(_fixture, seed.RepositoryId)).ConfigureAwait(false);
+
+        var verdict = await GitLabCredentialSeed.ReadCredentialAsync(_fixture, seed.CredentialId).ConfigureAwait(false);
+
+        verdict.Status.ShouldBe(CredentialStatus.Error, "fixture check: pod B's refusal marked the credential");
+        gitlab.Count(StubEvent.Refused).ShouldBe(1, "fixture check: B presented the consumed refresh token and was refused");
+
+        podB.PodAIsStillRunning();
+
+        var token = await CredentialRefreshHarness.ResolveTokenAsync(_fixture, seed.RepositoryId).ConfigureAwait(false);
+
+        token.ShouldBe("at-2", "pod A holds the pair GitLab is waiting for, and its next use stores it before anything judges the credential by the row");
+        gitlab.Count(StubEvent.Refused).ShouldBe(1, "A presented nothing GitLab had consumed");
+        gitlab.Count(StubEvent.Rotated).ShouldBe(1, "storing the kept pair needs no second refresh");
+        (await GitLabCredentialSeed.ReadStoredPayloadAsync(_fixture, seed.CredentialId).ConfigureAwait(false)).RefreshToken.ShouldBe("rt-2", "the row holds the pair GitLab is waiting for");
+
+        var healed = await GitLabCredentialSeed.ReadCredentialAsync(_fixture, seed.CredentialId).ConfigureAwait(false);
+
+        healed.Status.ShouldBe(CredentialStatus.Active, "a live pair stored over the verdict lifts it");
+        healed.LastError.ShouldBeNull();
+        KeptPairs.IsHeldFor(seed.CredentialId).ShouldBeFalse("stored, so no longer kept");
+    }
+
     // ─── Plumbing ──────────────────────────────────────────────────────────────
 
     /// <summary>One run whose refresh is answered by GitLab and then, before the refresher stores, finds the old pair back in the row.</summary>
@@ -203,6 +243,51 @@ public class RotatedPairStoreFlowTests
             await _afterRefresh().ConfigureAwait(false);
 
             return answer;
+        }
+    }
+
+    /// <summary>
+    /// The refresher keeps a pair it could not store in a static, per process, so a second pod "has no such memory". Tests run
+    /// every pod in one process, so the second pod is made by taking the pair out of that static for the time it runs and
+    /// putting it back when the first pod is alive again. Reflection, because the memory is deliberately not part of the
+    /// refresher's surface.
+    /// </summary>
+    private sealed class KeptPairs : IDisposable
+    {
+        private static readonly IDictionary Memory = (IDictionary)typeof(OAuthTokenRefresher).GetField("KeptRotations", BindingFlags.NonPublic | BindingFlags.Static)!.GetValue(null)!;
+
+        private readonly Guid _credentialId;
+        private object? _setAside;
+
+        private KeptPairs(Guid credentialId, object setAside)
+        {
+            _credentialId = credentialId;
+            _setAside = setAside;
+        }
+
+        public static KeptPairs SetAsideLikeAnotherProcess(Guid credentialId)
+        {
+            var kept = Memory[credentialId] ?? throw new ShouldAssertException($"fixture check: no process kept a pair for credential {credentialId}");
+
+            Memory.Remove(credentialId);
+
+            return new KeptPairs(credentialId, kept);
+        }
+
+        public static bool IsHeldFor(Guid credentialId) => Memory.Contains(credentialId);
+
+        public void PodAIsStillRunning()
+        {
+            Memory[_credentialId] = _setAside;
+            _setAside = null;
+        }
+
+        /// <summary>A test that fails before pod A is back must not leave its pair in the static for the next test of this process.</summary>
+        public void Dispose()
+        {
+            if (_setAside is null) return;
+
+            Memory.Remove(_credentialId);
         }
     }
 }

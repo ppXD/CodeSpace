@@ -3,7 +3,7 @@ using MediatR;
 
 namespace CodeSpace.Core.Jobs.RecurringJobs;
 
-/// <summary>Every five minutes: move the repositories and group hooks still bound to a disconnected credential onto its owner's later reconnect — the rows stranded before the connect paths carried them forward, and any an older pod strands during a rolling deploy (thin Rule-14 dispatcher). A moved binding is no longer a candidate, so an idle tick is one small read.</summary>
+/// <summary>Every five minutes: move the repositories and group hooks still bound to a disconnected (or provider-refused) credential onto its owner's later reconnect — the rows stranded before the connect paths carried them forward, and any an older pod strands during a rolling deploy (thin Rule-14 dispatcher). A moved binding is no longer a candidate, so an idle tick is one small read.</summary>
 public sealed class DisconnectedCredentialBindingRepairRecurringJob : IRecurringJob
 {
     private readonly IMediator _mediator;

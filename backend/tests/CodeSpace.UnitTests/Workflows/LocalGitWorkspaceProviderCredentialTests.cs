@@ -233,6 +233,23 @@ public sealed class LocalGitWorkspaceProviderCredentialTests
     }
 
     [Fact]
+    public async Task A_credential_its_provider_refused_while_the_run_worked_is_typed_the_same_way_and_nothing_reaches_the_remote()
+    {
+        // The probe or a refresh marked the credential as needing a reconnect while the agent ran: resolving it again can
+        // only fail the same way, so the push is not retried and the run is told what to do.
+        var source = new ScriptedSource { Answer = _ => throw new CredentialNeedsReconnectException(Guid.NewGuid(), "GitLab · someone", "invalid_grant") };
+        await using var publish = await PrepareAsync(new ScriptedRunner(), source);
+
+        var failure = await Should.ThrowAsync<GitCredentialRejectedException>(() => publish.PushAsync());
+
+        failure.Code.ShouldBe(FailureCodes.GitCredentialRejected);
+        failure.Message.ShouldContain("was refused by its provider");
+        failure.Message.ShouldContain("Reconnect the provider");
+        failure.InnerException.ShouldBeOfType<CredentialNeedsReconnectException>();
+        publish.Runner.RemoteSpecs.ShouldBeEmpty("nothing was put to the remote");
+    }
+
+    [Fact]
     public async Task A_failure_to_resolve_the_credential_is_a_plain_workspace_failure_the_push_retry_can_retry()
     {
         // A store hiccup, a provider that did not answer: transient until proven otherwise, and the retry above the provider

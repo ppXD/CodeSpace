@@ -8,7 +8,7 @@ namespace CodeSpace.Core.Services.Credentials;
 public interface IStrandedCredentialCensus
 {
     /// <summary>
-    /// The revoked credentials that something live is still bound to AND whose owner has since connected another — exactly
+    /// The dead (revoked, or refused by their provider) credentials that something live is still bound to AND whose owner has since connected another — exactly
     /// the rows <see cref="ICredentialSuccessionService.RepairStrandedAsync"/> takes, counted without its batch bound. A
     /// backlog that stays above zero across passes is a sweep that is not running, or one candidate that fails every time.
     /// </summary>

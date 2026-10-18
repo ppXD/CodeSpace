@@ -154,6 +154,32 @@ public class PullRequestTriggerAdmissionFlowTests
         gitlab.Requests.Count(r => r.PathAndQuery.Contains("/members/all/66")).ShouldBe(1, customMessage: "GitLab names the pusher but not their standing, so it is asked like the author's");
     }
 
+    [Theory]
+    [InlineData(403, WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, "refused the lookup (HTTP 403)")]
+    [InlineData(503, WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, "answered HTTP 503 to the lookup")]
+    [InlineData(401, WorkflowRunRequestRejectionReasons.CredentialRejected, "answered HTTP 401 to the repository's credential")]
+    public async Task On_a_public_gitlab_project_a_pusher_whose_standing_could_not_be_read_is_refused_for_that_not_as_a_stranger(int status, string reason, string cause)
+    {
+        // The author is a known member; whoever else pushed to their fork's head has to be a member too, and asking GitLab
+        // about them failed. Which refusal that is matters: "their standing is unknown, set Pull requests from to Anyone" sends
+        // the operator to loosen the trigger for a problem that is the credential's, or the lookup's.
+        using var gitlab = new StubProviderHost();
+        var seed = await SeedAsync(ProviderKind.GitLab, gitlab.BaseUrl);
+        gitlab.Answer("GET", $"/api/v4/projects/{seed.ExternalId}/members/all/51", 200, """{"id":51,"access_level":40}""")
+              .Answer("GET", $"/api/v4/projects/{seed.ExternalId}/members/all/66", status, """{"message":"no"}""");
+        await SeedActivationAsync(seed, Updated, "{}");
+
+        await PublishAsync(Event(Updated, seed.RepositoryId, number: 17, new PullRequestOrigin { AuthorExternalId = "51", RepositoryVisibility = RepositoryVisibility.Public, IsFork = true, PusherExternalId = "66" }));
+
+        (await CountRunsAsync(seed.WorkflowId)).ShouldBe(0, customMessage: "a pusher nobody could vouch for is not admitted — Members still means members");
+
+        var refusal = (await LoadRefusalsAsync(seed.TeamId, reason)).ShouldHaveSingleItem();
+
+        refusal.ShouldContain("whoever pushed its new commits", customMessage: "the refusal says whose standing could not be read — here the pusher's, the author's being known");
+        refusal.ShouldContain(cause);
+        (await LoadRefusalsAsync(seed.TeamId, WorkflowRunRequestRejectionReasons.AuthorNotMember)).ShouldBeEmpty("nothing is known about the pusher, so no one was refused as a stranger");
+    }
+
     [Fact]
     public async Task One_delivery_asks_gitlab_once_however_many_activations_match_and_an_any_trigger_still_learns_the_standing()
     {
@@ -172,7 +198,7 @@ public class PullRequestTriggerAdmissionFlowTests
     }
 
     [Fact]
-    public async Task A_lookup_gitlab_could_not_answer_is_asked_once_per_delivery_not_once_per_activation()
+    public async Task A_lookup_gitlab_could_not_answer_is_asked_once_per_delivery_with_one_retry_not_once_per_activation()
     {
         using var gitlab = new StubProviderHost();
         var seed = await SeedAsync(ProviderKind.GitLab, gitlab.BaseUrl);
@@ -183,7 +209,7 @@ public class PullRequestTriggerAdmissionFlowTests
 
         await PublishAsync(Event(Opened, seed.RepositoryId, number: 11, new PullRequestOrigin { AuthorExternalId = "51", RepositoryVisibility = RepositoryVisibility.Public }));
 
-        gitlab.Requests.Count(r => r.PathAndQuery.Contains("/members/all/51")).ShouldBe(1, customMessage: "an unanswered lookup costs up to its timeout; every matching activation repeating it would hold the delivery past the provider's own timeout");
+        gitlab.Requests.Count(r => r.PathAndQuery.Contains("/members/all/51")).ShouldBe(2, customMessage: "an unanswered lookup costs up to its timeout, and a 5xx is asked once more; every matching activation repeating that would hold the delivery past the provider's own timeout");
         (await CountRunsAsync(seed.WorkflowId)).ShouldBe(0);
         (await CountRunsAsync(sibling.WorkflowId)).ShouldBe(0);
     }

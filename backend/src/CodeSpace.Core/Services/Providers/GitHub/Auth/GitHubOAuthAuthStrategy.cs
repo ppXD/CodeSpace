@@ -10,11 +10,13 @@ public sealed class GitHubOAuthAuthStrategy : IProviderAuthStrategy
 {
     private readonly ICredentialResolver _credentialResolver;
     private readonly IOAuthTokenRefresher _refresher;
+    private readonly IOAuthTokenRecovery _recovery;
 
-    public GitHubOAuthAuthStrategy(ICredentialResolver credentialResolver, IOAuthTokenRefresher refresher)
+    public GitHubOAuthAuthStrategy(ICredentialResolver credentialResolver, IOAuthTokenRefresher refresher, IOAuthTokenRecovery recovery)
     {
         _credentialResolver = credentialResolver;
         _refresher = refresher;
+        _recovery = recovery;
     }
 
     public ProviderKind Kind => ProviderKind.GitHub;
@@ -22,6 +24,8 @@ public sealed class GitHubOAuthAuthStrategy : IProviderAuthStrategy
 
     public async Task<ResolvedAuth> ResolveAsync(ProviderContext context, CancellationToken cancellationToken)
     {
+        await _recovery.StoreKeptPairAsync(context, cancellationToken).ConfigureAwait(false);
+
         var payload = _credentialResolver.Resolve(context.Credential) as OAuthPayload
             ?? throw new InvalidOperationException($"Credential {context.Credential.Id} has AuthType=OAuth but payload is not OAuthPayload — encrypted blob may be corrupt");
 

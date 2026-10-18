@@ -5,6 +5,8 @@ using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Messages.Credentials;
+using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.OAuth;
@@ -34,8 +36,19 @@ public interface IOAuthTokenRefresher
 /// proven able to seal it BEFORE the provider is asked; the store is retried on fresh connections; a pair that still
 /// cannot be stored is kept in this process, logged, and stored by the credential's next use; and a compare-and-swap lost
 /// to a row that is not empty never drops it — the row's pair wins only if it is at least as new.
+///
+/// <para>A refusal that names the grant or the client (<see cref="OAuthExchangeException.IsFinalRefusal"/>) and finds the row
+/// unchanged is final: the credential is marked <c>Error</c> with the reason, on a connection of its own, and the caller gets
+/// <see cref="CredentialNeedsReconnectException"/> — until then the row stayed Active with nothing to say why, and every run
+/// re-asked the provider for the same refusal. It is also what <see cref="RecoverAfterRejectionAsync"/> answers when the
+/// pair it rotates after a 401 is refused for good.</para>
+///
+/// <para>A pair this process kept is also stored when the credential is next READ, not only when it is next refreshed
+/// (<see cref="StoreKeptPairAsync"/>, asked by the OAuth strategies first): another process that was refused the consumed
+/// refresh token has marked the credential <c>Error</c> by then, and the fail-fast on that verdict would otherwise stand in
+/// front of the one live pair.</para>
 /// </summary>
-public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependency
+public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IOAuthTokenRecovery, IScopedDependency
 {
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> RefreshLocks = new();
     private static readonly TimeSpan RefreshBuffer = TimeSpan.FromMinutes(2);
@@ -48,6 +61,14 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
 
     /// <summary>Plaintext for proving the key ring can seal before the provider is asked to rotate. Never stored, never logged.</summary>
     private const string SealProbe = "oauth-rotation-seal-probe";
+
+    /// <summary>How long after this process rotated a credential's pair a refusal of the NEW access token is left alone: a token issued moments ago that is refused is not aged out, and rotating again would burn a refresh token on a 401 that has another cause.</summary>
+    private static readonly TimeSpan RejectionRotationCooldown = TimeSpan.FromMinutes(1);
+
+    private const int PruneRotationsAbove = 1024;
+
+    /// <summary>When this process last had the provider rotate each credential's pair — what <see cref="RejectionRotationCooldown"/> is measured from.</summary>
+    private static readonly ConcurrentDictionary<Guid, DateTimeOffset> RecentRotations = new();
 
     /// <summary>
     /// Pairs the provider issued that no attempt could store, by credential: what the row held when the refresh began
@@ -64,9 +85,10 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
     private readonly TimeProvider _clock;
     private readonly ICrossProcessLock _crossProcessLock;
     private readonly ITrackedCredentialEntry _trackedEntry;
+    private readonly ICredentialHealthWriter _healthWriter;
     private readonly ILogger<OAuthTokenRefresher> _logger;
 
-    public OAuthTokenRefresher(IOAuthClientRegistry oauthClients, ICredentialPayloadWriter payloadWriter, ICredentialPayloadReader payloadReader, ICredentialResolver credentialResolver, IPayloadEncryptor encryptor, TimeProvider clock, ICrossProcessLock crossProcessLock, ITrackedCredentialEntry trackedEntry, ILogger<OAuthTokenRefresher> logger)
+    public OAuthTokenRefresher(IOAuthClientRegistry oauthClients, ICredentialPayloadWriter payloadWriter, ICredentialPayloadReader payloadReader, ICredentialResolver credentialResolver, IPayloadEncryptor encryptor, TimeProvider clock, ICrossProcessLock crossProcessLock, ITrackedCredentialEntry trackedEntry, ICredentialHealthWriter healthWriter, ILogger<OAuthTokenRefresher> logger)
     {
         _oauthClients = oauthClients;
         _payloadWriter = payloadWriter;
@@ -76,6 +98,7 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
         _clock = clock;
         _crossProcessLock = crossProcessLock;
         _trackedEntry = trackedEntry;
+        _healthWriter = healthWriter;
         _logger = logger;
     }
 
@@ -100,8 +123,7 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
 
     /// <summary>
     /// Runs under the lock. Refreshes only if the stored token still needs it. A refusal is final unless the row changed
-    /// meanwhile: emptied by a revocation, which does not take the lock (reported as revoked), or — only when this
-    /// refresher's lock session was lost mid-refresh — refreshed by the pod that took the lock over, whose token we use.
+    /// meanwhile (see <see cref="RotateOrClassifyAsync"/>).
     /// </summary>
     private async Task<OAuthPayload> RefreshStoredPayloadAsync(ProviderContext context, CancellationToken cancellationToken)
     {
@@ -110,17 +132,103 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
 
         if (!ShouldRefresh(latest)) return latest;
 
+        return await RotateOrClassifyAsync(context, stored, latest).ConfigureAwait(false);
+    }
+
+    public async Task<OAuthPayload?> RecoverAfterRejectionAsync(ProviderContext context, string rejectedAccessToken, CancellationToken cancellationToken) =>
+        await UnderRefreshLockAsync(context, ct => RecoverStoredPayloadAsync(context, rejectedAccessToken, ct), cancellationToken).ConfigureAwait(false);
+
+    public async Task StoreKeptPairAsync(ProviderContext context, CancellationToken cancellationToken)
+    {
+        if (context.Credential.Status == CredentialStatus.Revoked || !KeptRotations.ContainsKey(context.Credential.Id)) return;
+
+        await UnderRefreshLockAsync(context, async ct => await ReadStoredAfterKeptPairAsync(context, ct).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The credential's two refresh locks — this process's, then every process's — held for <paramref name="work"/>.</summary>
+    private async Task<T> UnderRefreshLockAsync<T>(ProviderContext context, Func<CancellationToken, Task<T>> work, CancellationToken cancellationToken)
+    {
+        var sem = RefreshLocks.GetOrAdd(context.Credential.Id, _ => new SemaphoreSlim(1, 1));
+        await sem.WaitAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await using var crossLock = await _crossProcessLock.AcquireAsync(CredentialIdToLockKey(context.Credential.Id), cancellationToken).ConfigureAwait(false);
+
+            return await work(cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            sem.Release();
+        }
+    }
+
+    /// <summary>
+    /// Runs under the lock, from the stored row. Whatever the row holds that is not the refused token and is still good is
+    /// what another caller replaced it with, and is the answer. Otherwise the refused token is the credential's token, and
+    /// the provider is asked once for a new pair — unless there is no refresh token to ask with, or the pair was rotated
+    /// moments ago and its token is refused too (<see cref="RejectionRotationCooldown"/>).
+    /// </summary>
+    private async Task<OAuthPayload?> RecoverStoredPayloadAsync(ProviderContext context, string rejectedAccessToken, CancellationToken cancellationToken)
+    {
+        var stored = await ReadStoredAfterKeptPairAsync(context, cancellationToken).ConfigureAwait(false);
+        var latest = Adopt(context.Credential, stored);
+
+        if (latest.AccessToken != rejectedAccessToken && !ShouldRefresh(latest)) return latest;
+        if (string.IsNullOrEmpty(latest.RefreshToken) || RotatedRecently(context.Credential.Id)) return null;
+
+        return await RotateOrClassifyAsync(context, stored, latest).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Rotates the pair and stores it. A refusal is final unless the row changed meanwhile: emptied by a revocation, which
+    /// does not take the lock (reported as revoked), or — only when this refresher's lock session was lost mid-refresh —
+    /// refreshed by the pod that took the lock over, whose token we use. A refusal that stands is the provider's verdict on
+    /// the grant (<see cref="ClassifyRefusalAsync"/>).
+    /// </summary>
+    private async Task<OAuthPayload> RotateOrClassifyAsync(ProviderContext context, string stored, OAuthPayload latest)
+    {
         try
         {
             return await RotateAndStoreAsync(context, stored, latest).ConfigureAwait(false);
         }
-        catch (OAuthExchangeException)
+        catch (OAuthExchangeException refusal)
         {
             var storedSinceRefusal = await _payloadReader.ReadEncryptedPayloadAsync(context.Credential.Id, CancellationToken.None).ConfigureAwait(false);
 
-            if (storedSinceRefusal == stored) throw;
+            if (storedSinceRefusal != stored) return Adopt(context.Credential, storedSinceRefusal);
 
-            return Adopt(context.Credential, storedSinceRefusal);
+            throw await ClassifyRefusalAsync(context, stored, refusal).ConfigureAwait(false);
+        }
+    }
+
+    /// <summary>
+    /// What the caller is told about a refusal that stands. One that names the grant or the client is final: the credential
+    /// is marked <c>Error</c> (<see cref="RecordRefusalAsync"/>) and the failure says to reconnect, with the credential named.
+    /// Any other (a provider that is down, an answer that is not OAuth) is not a verdict on the credential, so it stays the
+    /// provider's failure — now naming the credential it was for.
+    /// </summary>
+    private async Task<Exception> ClassifyRefusalAsync(ProviderContext context, string stored, OAuthExchangeException refusal)
+    {
+        if (!refusal.IsFinalRefusal) return refusal.ForCredential(context.Credential.Id);
+
+        await RecordRefusalAsync(context, stored, refusal).ConfigureAwait(false);
+
+        return new CredentialNeedsReconnectException(context.Credential.Id, context.Credential.DisplayName, refusal.Error, refusal);
+    }
+
+    /// <summary>Marks the credential <c>Error</c> over the row the refusal was judged against, and says so in the log. A store that cannot be reached must not hide the refusal it was recording, so it is logged and the refusal still surfaces.</summary>
+    private async Task RecordRefusalAsync(ProviderContext context, string stored, OAuthExchangeException refusal)
+    {
+        try
+        {
+            var marked = await _healthWriter.MarkRejectedAsync(context.Credential.Id, stored, $"needs reconnect: {refusal.Error}", CancellationToken.None).ConfigureAwait(false);
+
+            _logger.LogWarning("Credential {CredentialId} ({CredentialName}) needs to be reconnected: its provider refused the OAuth grant ({OAuthError}). Marked Error: {Marked}", context.Credential.Id, context.Credential.DisplayName, refusal.Error, marked);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Credential {CredentialId} ({CredentialName}) needs to be reconnected (its provider refused the OAuth grant: {OAuthError}), and recording that failed", context.Credential.Id, context.Credential.DisplayName, refusal.Error);
         }
     }
 
@@ -151,8 +259,24 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
 
         var refreshed = await ExchangeRefreshAsync(context, latest, CancellationToken.None).ConfigureAwait(false);
 
+        NoteRotation(context.Credential.Id);
+
         return await PersistOrAdoptAsync(context, stored, refreshed).ConfigureAwait(false);
     }
+
+    private void NoteRotation(Guid credentialId)
+    {
+        var now = _clock.GetUtcNow();
+
+        RecentRotations[credentialId] = now;
+
+        if (RecentRotations.Count <= PruneRotationsAbove) return;
+
+        foreach (var (id, at) in RecentRotations)
+            if (now - at >= RejectionRotationCooldown) RecentRotations.TryRemove(id, out _);
+    }
+
+    private bool RotatedRecently(Guid credentialId) => RecentRotations.TryGetValue(credentialId, out var at) && _clock.GetUtcNow() - at < RejectionRotationCooldown;
 
     /// <summary>
     /// The writer seals the new pair only after the provider has issued it, so a Data Protection fault there — a key-ring

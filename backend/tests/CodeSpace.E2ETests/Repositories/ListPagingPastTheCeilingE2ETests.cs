@@ -60,13 +60,13 @@ public sealed class ListPagingPastTheCeilingE2ETests : IClassFixture<TaskLaunchA
         await using var gitLab = LoopbackResponder.Start(OneRowPerList);
         var (viewer, team, repositoryId) = await SeedRepositoryAsync(gitLab.Port);
 
-        // Connecting the provider may already have asked GitLab (the endpoint probe on add); only what the refused list request asks counts.
-        var asked = gitLab.Requests.Count;
+        // Connecting the provider and adding the token already ask GitLab (the endpoint probe, GET /user and the token's own record), so what the refused request must add to is counted from there.
+        var askedWhenSeeded = gitLab.Requests.Count;
 
         var response = await _tenants.SendAsync(HttpMethod.Get, $"/api/repositories/{repositoryId}/{list}?page=3000000000&perPage=100", viewer, team);
 
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest, await TenantHarness.DescribeAsync(response));
-        gitLab.Requests.Count.ShouldBe(asked, "a refused request reaches no provider");
+        gitLab.Requests.Count.ShouldBe(askedWhenSeeded, "a refused request reaches no provider");
     }
 
     private async Task<JsonElement> ListAsync(Guid viewer, Guid team, Guid repositoryId, string list, int page)

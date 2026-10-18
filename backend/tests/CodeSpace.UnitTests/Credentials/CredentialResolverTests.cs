@@ -44,6 +44,67 @@ public class CredentialResolverTests
     }
 
     [Fact]
+    public void A_credential_its_provider_refused_fails_fast_naming_it_and_what_was_recorded_instead_of_presenting_its_token_again()
+    {
+        var credential = BuildCredential(CredentialStatus.Error, _encryptor.Encrypt(_serializer.Serialize(new PatPayload { Token = "glpat-dead" })));
+        credential.LastError = "needs reconnect: invalid_grant";
+
+        var failure = Should.Throw<CredentialNeedsReconnectException>(() => new CredentialResolver(_encryptor, _serializer).Resolve(credential));
+
+        failure.CredentialId.ShouldBe(credential.Id);
+        failure.DisplayName.ShouldBe("alice's GitLab");
+        failure.Code.ShouldBe(FailureCodes.CredentialNeedsReconnect);
+        failure.Kind.ShouldBe(FailureKind.PreconditionRequired, "a person reconnects it; a retry as-is reads the same refused credential");
+        failure.Details.ShouldNotBeNull()["credentialId"].ShouldBe(credential.Id);
+        failure.Message.ShouldContain("needs reconnect: invalid_grant", customMessage: "what the provider said when it was marked is what an operator reading a run's error needs");
+        failure.Message.ShouldNotContain("glpat-dead");
+    }
+
+    [Theory]
+    [InlineData(AuthType.OAuth, 120, false)]   // refused over an hour ago: its refresher is asked again, so one that heals recovers on use
+    [InlineData(AuthType.OAuth, 5, true)]      // refused minutes ago: fails from what the row says
+    [InlineData(AuthType.Pat, 120, true)]      // a static token has nothing to refresh: the health sweep re-asks it, and a use would only be refused
+    [InlineData(AuthType.ProjectAccessToken, 120, true)]
+    [InlineData(AuthType.GroupAccessToken, 120, true)]
+    public void An_oauth_credential_refused_over_an_hour_ago_is_asked_again_on_use_and_nothing_else_is(AuthType type, int minutesSinceTheVerdict, bool failsFast)
+    {
+        var payload = type == AuthType.OAuth ? (CredentialPayload)new OAuthPayload { AccessToken = "at", RefreshToken = "rt" } : new PatPayload { Token = "glpat-static" };
+        var credential = BuildCredential(CredentialStatus.Error, _encryptor.Encrypt(_serializer.Serialize(payload)));
+        credential.AuthType = type;
+        credential.LastError = "needs reconnect: invalid_grant";
+        credential.LastModifiedDate = DateTimeOffset.UtcNow.AddMinutes(-minutesSinceTheVerdict);
+
+        var resolver = new CredentialResolver(_encryptor, _serializer);
+
+        if (failsFast) Should.Throw<CredentialNeedsReconnectException>(() => resolver.Resolve(credential));
+        else resolver.Resolve(credential).ShouldBeOfType<OAuthPayload>().AccessToken.ShouldBe("at", "the row's payload is what the refresher decides from, so a refresh can be attempted and the verdict lifted if the provider accepts it");
+    }
+
+    [Fact]
+    public void The_window_an_oauth_credential_is_refused_for_is_the_one_the_health_sweep_rechecks_after()
+    {
+        // One definition of "long enough to ask again": a use and the sweep must agree, or a credential the sweep would
+        // re-ask stays refused to runs, or the reverse.
+        var credential = BuildCredential(CredentialStatus.Error, _encryptor.Encrypt(_serializer.Serialize(new OAuthPayload { AccessToken = "at", RefreshToken = "rt" })));
+        credential.AuthType = AuthType.OAuth;
+        var resolver = new CredentialResolver(_encryptor, _serializer);
+
+        credential.LastModifiedDate = DateTimeOffset.UtcNow - CredentialHealthService.ErrorRecheckAfter + TimeSpan.FromSeconds(30);
+        Should.Throw<CredentialNeedsReconnectException>(() => resolver.Resolve(credential));
+
+        credential.LastModifiedDate = DateTimeOffset.UtcNow - CredentialHealthService.ErrorRecheckAfter - TimeSpan.FromSeconds(30);
+        resolver.Resolve(credential).ShouldBeOfType<OAuthPayload>();
+    }
+
+    [Fact]
+    public void An_Error_credential_with_no_recorded_reason_still_says_it_was_refused()
+    {
+        var credential = BuildCredential(CredentialStatus.Error, "sealed");
+
+        Should.Throw<CredentialNeedsReconnectException>(() => new CredentialResolver(_encryptor, _serializer).Resolve(credential)).Message.ShouldContain("refused it");
+    }
+
+    [Fact]
     public void The_disconnect_names_the_remedies_a_person_can_perform_today_and_who_may_apply_them()
     {
         // A run's failure is the one place most people meet a disconnect, so it must name what actually fixes it: a team

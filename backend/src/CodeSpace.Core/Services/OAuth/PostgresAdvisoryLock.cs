@@ -5,7 +5,8 @@ using Npgsql;
 namespace CodeSpace.Core.Services.OAuth;
 
 /// <summary>
-/// Postgres advisory lock. Holds a dedicated connection for the duration of the lock — the
+/// Postgres advisory lock — waited for (<see cref="ICrossProcessLock"/>) or tried and skipped
+/// (<see cref="ICrossProcessTryLock"/>). Holds a dedicated connection for the duration of the lock — the
 /// lock is session-scoped, so it auto-releases when the session ends (covers process-crash
 /// recovery). DisposeAsync issues an explicit pg_advisory_unlock and then closes the connection.
 ///
@@ -16,7 +17,7 @@ namespace CodeSpace.Core.Services.OAuth;
 /// the lock however the acquire or the unlock went. Multiplexing, which requires pooling, is turned off with it: the
 /// configured string is otherwise used as it is.</para>
 /// </summary>
-public sealed class PostgresAdvisoryLock : ICrossProcessLock, IScopedDependency
+public sealed class PostgresAdvisoryLock : ICrossProcessLock, ICrossProcessTryLock, IScopedDependency
 {
     private readonly CodeSpaceConnectionString _connectionString;
 
@@ -24,8 +25,7 @@ public sealed class PostgresAdvisoryLock : ICrossProcessLock, IScopedDependency
 
     public async Task<IAsyncDisposable> AcquireAsync(long key, CancellationToken cancellationToken)
     {
-        var conn = new NpgsqlConnection(SessionConnectionString());
-        await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+        var conn = await OpenSessionAsync(cancellationToken).ConfigureAwait(false);
 
         try
         {
@@ -41,6 +41,38 @@ public sealed class PostgresAdvisoryLock : ICrossProcessLock, IScopedDependency
         }
 
         return new Handle(conn, key);
+    }
+
+    public async Task<IAsyncDisposable?> TryAcquireAsync(long key, CancellationToken cancellationToken)
+    {
+        var conn = await OpenSessionAsync(cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.CommandText = "SELECT pg_try_advisory_lock(@key)";
+            cmd.Parameters.AddWithValue("@key", key);
+
+            if (await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false) is true) return new Handle(conn, key);
+        }
+        catch
+        {
+            await conn.DisposeAsync().ConfigureAwait(false);
+            throw;
+        }
+
+        await conn.DisposeAsync().ConfigureAwait(false);
+
+        return null;
+    }
+
+    private async Task<NpgsqlConnection> OpenSessionAsync(CancellationToken cancellationToken)
+    {
+        var conn = new NpgsqlConnection(SessionConnectionString());
+
+        await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
+
+        return conn;
     }
 
     /// <summary>Multiplexing needs the pool this session must not use, so a deployed string that sets it would otherwise fail every acquire.</summary>

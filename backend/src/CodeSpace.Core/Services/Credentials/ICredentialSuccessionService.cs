@@ -4,16 +4,18 @@ using CodeSpace.Messages.Dtos.Credentials;
 namespace CodeSpace.Core.Services.Credentials;
 
 /// <summary>
-/// Moves what a person bound through a credential they disconnected onto the credential they connect next on the same
-/// provider instance. Reconnecting mints a new credential row; without this, every repository and group hook bound
-/// through the old one kept pointing at a revoked row whose token material is gone.
+/// Moves what a person bound through a credential that died — one they disconnected, or one its provider refused for good —
+/// onto the credential they connect next on the same provider instance. Reconnecting mints a new credential row; without
+/// this, every repository and group hook bound through the old one kept pointing at a row whose token material is gone,
+/// or that its provider no longer accepts.
 /// </summary>
 public interface ICredentialSuccessionService
 {
     /// <summary>
     /// Re-point every live repository and in-service group hook bound through one of <paramref name="successor"/>'s
-    /// owner's revoked credentials on the same provider instance and team at <paramref name="successor"/>, lifting the
-    /// "needs a new credential" error the disconnect set and reviving the hooks its failures buried. A credential with no
+    /// owner's dead credentials (revoked, or refused by their provider) on the same provider instance and team at
+    /// <paramref name="successor"/>, lifting the "needs a new credential" error a disconnect set and reviving the hooks its
+    /// failures buried. A credential with no
     /// owner (team-service) succeeds nobody. Tracked changes only — the caller's unit of work saves them with the
     /// successor, and the revived hooks are dispatched after it commits.
     /// </summary>
@@ -21,7 +23,7 @@ public interface ICredentialSuccessionService
 
     /// <summary>
     /// Apply the same rule to bindings a connect path left behind — rows stranded before connects carried them forward,
-    /// or by an older pod during a rolling deploy: up to <paramref name="batchSize"/> revoked credentials that still have
+    /// or by an older pod during a rolling deploy: up to <paramref name="batchSize"/> dead credentials that still have
     /// live bindings AND an owner's reconnect to follow, each saved on its own. Returns how many were repaired. A
     /// credential that fails is skipped and logged, and the pass goes on to the ones after it — however many fail, they
     /// cannot crowd a repairable credential out of the pass — and one that has failed several passes in a row is set aside

@@ -14,6 +14,7 @@ using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Npgsql;
@@ -188,15 +189,16 @@ public class OAuthTokenRefreshRaceFlowTests
     }
 
     [Fact]
-    public async Task A_refused_refresh_with_nothing_newer_stored_surfaces_the_providers_refusal()
+    public async Task A_refused_refresh_with_nothing_newer_stored_is_the_providers_verdict_and_says_the_credential_needs_reconnecting()
     {
         using var provider = new StubProviderHost();
         var endpoint = RotatingTokenEndpoint.Serve(provider, liveRefreshToken: "rt-revoked-elsewhere");
         var seed = await SeedExpiredOAuthRepositoryAsync(provider.BaseUrl, refreshToken: "rt-0").ConfigureAwait(false);
 
-        var refusal = await Should.ThrowAsync<OAuthExchangeException>(() => ResolveTokenAsync(seed.RepositoryId)).ConfigureAwait(false);
+        var verdict = await Should.ThrowAsync<CredentialNeedsReconnectException>(() => ResolveTokenAsync(seed.RepositoryId)).ConfigureAwait(false);
 
-        refusal.Error.ShouldBe("invalid_grant");
+        verdict.CredentialId.ShouldBe(seed.CredentialId);
+        verdict.InnerException.ShouldBeOfType<OAuthExchangeException>().Error.ShouldBe("invalid_grant", "the provider's own answer stays reachable for whoever diagnoses it");
         endpoint.Requests.ShouldBe(1, customMessage: "a refusal with nothing newer stored is final — no retry loop against the provider");
 
         var stored = await ReadStoredPayloadAsync(seed.CredentialId).ConfigureAwait(false);
@@ -258,7 +260,8 @@ public class OAuthTokenRefreshRaceFlowTests
         using var scope = _fixture.BeginScope();
         var credential = await ReadCredentialAsync(credentialId).ConfigureAwait(false);
 
-        return (OAuthPayload)scope.Resolve<ICredentialResolver>().Resolve(credential);
+        // Decrypted directly, not resolved: the resolver refuses a credential its provider refused (Error), and what the row holds is the question.
+        return (OAuthPayload)scope.Resolve<ICredentialPayloadSerializer>().Deserialize(credential.AuthType, scope.Resolve<IPayloadEncryptor>().Decrypt(credential.EncryptedPayload));
     }
 
     private async Task<Credential> ReadCredentialAsync(Guid credentialId)

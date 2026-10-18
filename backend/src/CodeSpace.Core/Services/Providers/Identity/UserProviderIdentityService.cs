@@ -58,6 +58,11 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
         // reflect this PAT — same as the OAuth flow stores token.GrantedScopes. Null when the provider
         // couldn't expose them; the capability check treats that as "unknown", never a false warning.
         credential.Scopes = profile.GrantedScopes?.ToList();
+
+        // The probe just validated the token, and GitLab tells it when the token expires (every new one has an expiry, and
+        // one that reaches it answers 401 to everything) — recorded so the list can say so ahead of time.
+        credential.LastValidatedDate = DateTimeOffset.UtcNow;
+        credential.ExpiresDate = profile.ExpiresAt;
         await ReplaceExistingLinkAsync(userId, providerInstanceId, cancellationToken).ConfigureAwait(false);
 
         await _db.Credential.AddAsync(credential, cancellationToken).ConfigureAwait(false);

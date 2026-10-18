@@ -784,7 +784,7 @@ public sealed partial class GitHubRepositoryProvider : IRepositoryCatalogCapabil
         }
         catch (Exception ex)
         {
-            return new CredentialProbeResult { IsValid = false, Error = ex.Message };
+            return CredentialProbeResult.FromFailure(ex);
         }
     }
 

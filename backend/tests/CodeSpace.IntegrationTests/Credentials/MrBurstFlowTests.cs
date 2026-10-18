@@ -113,6 +113,112 @@ public class MrBurstFlowTests
         (await CountRunsAsync(world.TeamId, world.WorkflowId).ConfigureAwait(false)).ShouldBeGreaterThan(0, "the next delivery's standing lookup got an answer, so a members-only activation admitted its author");
     }
 
+    // ─── What a failed standing lookup says ───────────────────────────────────────
+
+    [Fact]
+    public async Task B2_a_dead_refresh_token_refuses_a_members_only_trigger_as_a_rejected_credential_not_as_a_stranger_while_an_open_trigger_still_starts()
+    {
+        // GitLab never issued the pair the row holds. Before, the dead grant read as "author whose standing is unknown": a
+        // members-only activation refused the author as not a member, with no log line, while the credential stayed Active.
+        using var gitlab = new GitLabDoorkeeperStub();
+        var world = await SeedWorldAsync(gitlab, gitLabKnowsThePair: false, siblingAuthors: "any").ConfigureAwait(false);
+
+        await DeliverAsync(world, MergeRequestHook("reopen", iid: 8, headSha: "head-1")).ConfigureAwait(false);
+
+        Dump(gitlab);
+        (await RefusalsAsync(world, "credential_rejected").ConfigureAwait(false)).ShouldHaveSingleItem("the members-only activation says its credential was refused").ShouldContain("GitLab · NACHO.L");
+        (await RefusalsAsync(world, "author_not_member").ConfigureAwait(false)).ShouldBeEmpty("nothing is known about the author, so no one was refused as a stranger");
+        (await CountRunsAsync(world.TeamId, world.WorkflowId).ConfigureAwait(false)).ShouldBe(0);
+        (await CountRunsAsync(world.TeamId, world.SiblingWorkflowId).ConfigureAwait(false)).ShouldBe(1, "an activation that admits anyone does not need the author's standing, so a dead credential does not stop it");
+        gitlab.Count(StubEvent.Refused).ShouldBe(1, "one refusal for the whole delivery: the second activation reuses the answer");
+
+        var row = await GitLabCredentialSeed.ReadCredentialAsync(_fixture, world.Credential.CredentialId).ConfigureAwait(false);
+
+        row.Status.ShouldBe(CredentialStatus.Error);
+        row.LastError.ShouldBe("needs reconnect: invalid_grant");
+
+        await DeliverAsync(world, MergeRequestHook("reopen", iid: 8, headSha: "head-2")).ConfigureAwait(false);
+
+        gitlab.Count(StubEvent.Refused).ShouldBe(1, "the next delivery fails from what the row says and does not present the dead refresh token again");
+        (await RefusalsAsync(world, "credential_rejected").ConfigureAwait(false)).ShouldHaveSingleItem("refusals are recorded once per activation and pull request a day");
+    }
+
+    [Fact]
+    public async Task A_standing_lookup_refused_with_403_names_the_status_and_the_scope_it_needs_and_leaves_the_credential_alone()
+    {
+        using var gitlab = new GitLabDoorkeeperStub();
+        var world = await SeedWorldAsync(gitlab, siblingAuthors: "any").ConfigureAwait(false);
+        gitlab.FailMembers(403);
+
+        await DeliverAsync(world, MergeRequestHook("reopen", iid: 9, headSha: "head-1")).ConfigureAwait(false);
+
+        Dump(gitlab);
+        var refusal = (await RefusalsAsync(world, "author_standing_unknown").ConfigureAwait(false)).ShouldHaveSingleItem("the lookup failed, so the refusal says that");
+
+        refusal.ShouldContain("403");
+        refusal.ShouldContain("read_api");
+        (await RefusalsAsync(world, "author_not_member").ConfigureAwait(false)).ShouldBeEmpty("the author was not found to be anyone's stranger");
+        (await RefusalsAsync(world, "credential_rejected").ConfigureAwait(false)).ShouldBeEmpty("a 403 is a missing scope or role, not a dead token");
+        (await CountRunsAsync(world.TeamId, world.SiblingWorkflowId).ConfigureAwait(false)).ShouldBe(1);
+        gitlab.Count(StubEvent.MembersFailed).ShouldBe(1, "a 403 is not asked again");
+        (await GitLabCredentialSeed.ReadCredentialAsync(_fixture, world.Credential.CredentialId).ConfigureAwait(false)).Status.ShouldBe(CredentialStatus.Active);
+    }
+
+    [Fact]
+    public async Task A_standing_lookup_that_fails_once_with_a_server_error_is_asked_again_and_the_author_is_admitted()
+    {
+        using var gitlab = new GitLabDoorkeeperStub();
+        var world = await SeedWorldAsync(gitlab).ConfigureAwait(false);
+        gitlab.FailMembers(500, times: 1);
+
+        await DeliverAsync(world, MergeRequestHook("reopen", iid: 10, headSha: "head-1")).ConfigureAwait(false);
+
+        Dump(gitlab);
+        gitlab.Count(StubEvent.MembersFailed).ShouldBe(1);
+        gitlab.Count(StubEvent.Api200).ShouldBe(1, "the lookup that failed is not an answer; the second ask was one");
+        (await RefusalsAsync(world, "author_standing_unknown").ConfigureAwait(false)).ShouldBeEmpty();
+        (await RefusalsAsync(world, "author_not_member").ConfigureAwait(false)).ShouldBeEmpty();
+        (await CountRunsAsync(world.TeamId, world.WorkflowId).ConfigureAwait(false)).ShouldBe(1, "one 500 no longer costs the author's own merge request its run");
+        (await CountRunsAsync(world.TeamId, world.SiblingWorkflowId).ConfigureAwait(false)).ShouldBe(1);
+    }
+
+    [Fact]
+    public async Task A_standing_lookup_that_keeps_failing_is_asked_twice_and_refused_as_unknown_with_the_status()
+    {
+        using var gitlab = new GitLabDoorkeeperStub();
+        var world = await SeedWorldAsync(gitlab).ConfigureAwait(false);
+        gitlab.FailMembers(503);
+
+        await DeliverAsync(world, MergeRequestHook("reopen", iid: 11, headSha: "head-1")).ConfigureAwait(false);
+
+        gitlab.Count(StubEvent.MembersFailed).ShouldBe(2, "asked, then asked once more, then given up on");
+        var refusals = await RefusalsAsync(world, "author_standing_unknown").ConfigureAwait(false);
+
+        refusals.Count.ShouldBe(2, "one refusal row per members-only activation");
+        refusals.ShouldAllBe(refusal => refusal.Contains("503"), "each names the status");
+        (await RefusalsAsync(world, "author_not_member").ConfigureAwait(false)).ShouldBeEmpty();
+        (await CountRunsAsync(world.TeamId, world.WorkflowId).ConfigureAwait(false)).ShouldBe(0, "Members still means members: a standing nobody could read is not admitted");
+    }
+
+    [Fact]
+    public async Task A_repository_with_no_credential_to_ask_with_is_refused_as_unknown_not_as_a_stranger()
+    {
+        using var gitlab = new GitLabDoorkeeperStub();
+        var world = await SeedWorldAsync(gitlab).ConfigureAwait(false);
+
+        using (var scope = _fixture.BeginScope())
+            await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE repository SET credential_id = NULL WHERE id = {world.Credential.RepositoryId}").ConfigureAwait(false);
+
+        await DeliverAsync(world, MergeRequestHook("reopen", iid: 12, headSha: "head-1")).ConfigureAwait(false);
+
+        var refusals = await RefusalsAsync(world, "author_standing_unknown").ConfigureAwait(false);
+
+        refusals.Count.ShouldBe(2);
+        refusals.ShouldAllBe(refusal => refusal.Contains("no credential"));
+        (await RefusalsAsync(world, "author_not_member").ConfigureAwait(false)).ShouldBeEmpty();
+        gitlab.Log.ShouldBeEmpty("there was nothing to ask GitLab with");
+    }
+
     // ─── Deliveries ────────────────────────────────────────────────────────────
 
     /// <summary>GitLab's Merge Request Hook for MR <paramref name="iid"/>, authored by user 51 on an internal project. No <c>oldrev</c>: the head did not move.</summary>
@@ -143,7 +249,7 @@ public class MrBurstFlowTests
 
     private void Dump(GitLabDoorkeeperStub gitlab)
     {
-        _output.WriteLine($"GitLab saw: rotated={gitlab.Count(StubEvent.Rotated)} refused={gitlab.Count(StubEvent.Refused)} api-200={gitlab.Count(StubEvent.Api200)} api-401={gitlab.Count(StubEvent.Api401)}");
+        _output.WriteLine($"GitLab saw: rotated={gitlab.Count(StubEvent.Rotated)} refused={gitlab.Count(StubEvent.Refused)} api-200={gitlab.Count(StubEvent.Api200)} api-401={gitlab.Count(StubEvent.Api401)} members-failed={gitlab.Count(StubEvent.MembersFailed)}");
 
         foreach (var entry in gitlab.Log) _output.WriteLine($"  {entry.At:HH:mm:ss.fff} {entry.Kind}: {entry.Detail}");
     }
@@ -161,6 +267,15 @@ public class MrBurstFlowTests
         using var scope = _fixture.BeginScope();
 
         return await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().CountAsync(r => r.TeamId == teamId && r.WorkflowId == workflowId).ConfigureAwait(false);
+    }
+
+    /// <summary>The detail of each Rejected request of the team whose reason is <paramref name="reason"/>, as the audit view's filter reads it: the reason, a colon, the free text.</summary>
+    private async Task<List<string>> RefusalsAsync(World world, string reason)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().WorkflowRunRequest.AsNoTracking()
+            .Where(r => r.TeamId == world.TeamId && r.Status == WorkflowRunRequestStatus.Rejected && r.Error!.StartsWith(reason + ":")).Select(r => r.Error!).ToListAsync().ConfigureAwait(false);
     }
 
     private async Task<int> DebouncedRefusalsAsync(World world)
@@ -183,9 +298,9 @@ public class MrBurstFlowTests
     /// workflows whose pull-request triggers admit only members, and the repository's webhook. GitLab knows the pair the
     /// row holds.
     /// </summary>
-    private async Task<World> SeedWorldAsync(GitLabDoorkeeperStub gitlab)
+    private async Task<World> SeedWorldAsync(GitLabDoorkeeperStub gitlab, bool gitLabKnowsThePair = true, string siblingAuthors = "members")
     {
-        gitlab.Seed(GitLabDoorkeeperStub.DefaultClientId, "nacho", "at-0", "rt-0");
+        if (gitLabKnowsThePair) gitlab.Seed(GitLabDoorkeeperStub.DefaultClientId, "nacho", "at-0", "rt-0");
 
         var team = await WorkflowsTestSeed.SeedTeamAsync(_fixture).ConfigureAwait(false);
         var credential = await GitLabCredentialSeed.SeedAsync(_fixture, gitlab.BaseUrl, "at-0", "rt-0", expired: true, RepositoryVisibility.Internal, team).ConfigureAwait(false);
@@ -193,8 +308,8 @@ public class MrBurstFlowTests
         var sibling = await CreateWorkflowAsync(team.TeamId, await AddAdminAsync(team.TeamId).ConfigureAwait(false)).ConfigureAwait(false);
         var secret = $"gl-sec-{Guid.NewGuid():N}";
 
-        await SeedMembersOnlyActivationAsync(workflow, team.UserId).ConfigureAwait(false);
-        await SeedMembersOnlyActivationAsync(sibling, team.UserId).ConfigureAwait(false);
+        await SeedActivationAsync(workflow, team.UserId, "members").ConfigureAwait(false);
+        await SeedActivationAsync(sibling, team.UserId, siblingAuthors).ConfigureAwait(false);
 
         return new World(credential, workflow, sibling, await SeedWebhookAsync(credential.RepositoryId, secret).ConfigureAwait(false), secret);
     }
@@ -219,12 +334,12 @@ public class MrBurstFlowTests
         return await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand { Name = "burst-" + Guid.NewGuid().ToString("N")[..8], Description = null, Definition = WorkflowsTestSeed.MinimalDefinition(), Activations = new List<WorkflowActivationInput>(), Enabled = true }).ConfigureAwait(false);
     }
 
-    private async Task SeedMembersOnlyActivationAsync(Guid workflowId, Guid userId)
+    private async Task SeedActivationAsync(Guid workflowId, Guid userId, string authors)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        db.WorkflowActivation.Add(new WorkflowActivation { Id = Guid.NewGuid(), WorkflowId = workflowId, TypeKey = Opened, ConfigJson = """{"authors":"members"}""", Enabled = true, CreatedBy = userId, LastModifiedBy = userId });
+        db.WorkflowActivation.Add(new WorkflowActivation { Id = Guid.NewGuid(), WorkflowId = workflowId, TypeKey = Opened, ConfigJson = $$"""{"authors":"{{authors}}"}""", Enabled = true, CreatedBy = userId, LastModifiedBy = userId });
         await db.SaveChangesAsync().ConfigureAwait(false);
     }
 

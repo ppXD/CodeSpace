@@ -975,6 +975,10 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             {
                 throw new GitCredentialRejectedException($"The credential this repository pushes with was disconnected while the run worked, so its branch could not be published. {ReconnectRemedy} ({Redact(ex.Message, repo.Token)})", ex);
             }
+            catch (CredentialNeedsReconnectException ex)
+            {
+                throw new GitCredentialRejectedException($"The credential this repository pushes with was refused by its provider while the run worked, so its branch could not be published. {ReconnectRemedy} ({Redact(ex.Message, repo.Token)})", ex);
+            }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
                 // The run's own cancellation is the only thing allowed through unwrapped: a provider call that timed out

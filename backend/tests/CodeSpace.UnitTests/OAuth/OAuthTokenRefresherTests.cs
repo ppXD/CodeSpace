@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -163,14 +164,14 @@ public partial class OAuthTokenRefresherTests
     }
 
     [Fact]
-    public async Task A_refused_refresh_with_nothing_newer_stored_rethrows_the_refusal()
+    public async Task A_refused_refresh_with_nothing_newer_stored_is_the_providers_verdict_and_the_credential_needs_reconnecting()
     {
         var ctx = BuildContext();
         var stale = new OAuthPayload { AccessToken = "old", RefreshToken = "r-0", ExpiresAt = Now.AddSeconds(-1) };
 
-        var refusal = await Should.ThrowAsync<OAuthExchangeException>(() => RunAsync(stale, ctx, new StoredRow(stale), RecordingOAuthClient.Refusing()));
+        var verdict = await Should.ThrowAsync<CredentialNeedsReconnectException>(() => RunAsync(stale, ctx, new StoredRow(stale), RecordingOAuthClient.Refusing()));
 
-        refusal.Error.ShouldBe("invalid_grant");
+        verdict.InnerException.ShouldBeOfType<OAuthExchangeException>().Error.ShouldBe("invalid_grant", "the provider's own answer stays reachable for whoever diagnoses it");
     }
 
     /// <summary>
@@ -264,7 +265,16 @@ public partial class OAuthTokenRefresherTests
         RunAsync(current, ctx, new StoredRow(current), new RecordingOAuthClient(newAccessToken ?? "fresh", newRefreshToken, newExpiresAt));
 
     /// <summary>The caller's entity holds <paramref name="current"/> — what it loaded; <paramref name="row"/> is what the database holds now.</summary>
-    private static async Task<(OAuthPayload Result, int Exchanges, int Persists)> RunAsync(OAuthPayload current, ProviderContext ctx, StoredRow row, RecordingOAuthClient oauthClient, CancellationToken cancellationToken = default, Func<ICredentialPayloadWriter, ICredentialPayloadWriter>? decorateWriter = null, IPayloadEncryptor? encryptor = null, ILogger<OAuthTokenRefresher>? logger = null, ITrackedCredentialEntry? trackedEntry = null, Func<ICredentialPayloadReader, ICredentialPayloadReader>? decorateReader = null)
+    private static async Task<(OAuthPayload Result, int Exchanges, int Persists)> RunAsync(OAuthPayload current, ProviderContext ctx, StoredRow row, RecordingOAuthClient oauthClient, CancellationToken cancellationToken = default, Func<ICredentialPayloadWriter, ICredentialPayloadWriter>? decorateWriter = null, IPayloadEncryptor? encryptor = null, ILogger<OAuthTokenRefresher>? logger = null, ITrackedCredentialEntry? trackedEntry = null, Func<ICredentialPayloadReader, ICredentialPayloadReader>? decorateReader = null, ICredentialHealthWriter? healthWriter = null)
+    {
+        var (refresher, writer) = BuildRefresher(current, ctx, row, oauthClient, decorateWriter, encryptor, logger, trackedEntry, decorateReader, healthWriter);
+
+        var result = await refresher.RefreshIfNeededAsync(ctx, current, cancellationToken);
+
+        return (result, oauthClient.RefreshCalls, writer.PersistCalls);
+    }
+
+    private static (OAuthTokenRefresher Refresher, RecordingPayloadWriter Writer) BuildRefresher(OAuthPayload current, ProviderContext ctx, StoredRow row, RecordingOAuthClient oauthClient, Func<ICredentialPayloadWriter, ICredentialPayloadWriter>? decorateWriter = null, IPayloadEncryptor? encryptor = null, ILogger<OAuthTokenRefresher>? logger = null, ITrackedCredentialEntry? trackedEntry = null, Func<ICredentialPayloadReader, ICredentialPayloadReader>? decorateReader = null, ICredentialHealthWriter? healthWriter = null)
     {
         ctx.Credential.EncryptedPayload = Serializer.Serialize(current);
 
@@ -272,11 +282,9 @@ public partial class OAuthTokenRefresherTests
         var writer = new RecordingPayloadWriter(row);
         var resolver = new CredentialResolver(new IdentityEncryptor(), Serializer);
 
-        var refresher = new OAuthTokenRefresher(registry, decorateWriter?.Invoke(writer) ?? writer, decorateReader?.Invoke(row) ?? row, resolver, encryptor ?? new IdentityEncryptor(), new FixedClock(Now), new NoopCrossProcessLock(), trackedEntry ?? new NoopTrackedCredentialEntry(), logger ?? NullLogger<OAuthTokenRefresher>.Instance);
+        var refresher = new OAuthTokenRefresher(registry, decorateWriter?.Invoke(writer) ?? writer, decorateReader?.Invoke(row) ?? row, resolver, encryptor ?? new IdentityEncryptor(), new FixedClock(Now), new NoopCrossProcessLock(), trackedEntry ?? new NoopTrackedCredentialEntry(), healthWriter ?? new RecordingHealthWriter(), logger ?? NullLogger<OAuthTokenRefresher>.Instance);
 
-        var result = await refresher.RefreshIfNeededAsync(ctx, current, cancellationToken);
-
-        return (result, oauthClient.RefreshCalls, writer.PersistCalls);
+        return (refresher, writer);
     }
 
     private static readonly CredentialPayloadSerializer Serializer = new();
@@ -340,20 +348,22 @@ public partial class OAuthTokenRefresherTests
         private readonly DateTimeOffset? _expiresAt;
         private readonly Action? _refuse;
         private readonly Action? _onRefreshing;
+        private readonly string _refusalError;
 
         public int RefreshCalls;
 
-        public RecordingOAuthClient(string accessToken, string? refreshToken, DateTimeOffset? expiresAt, Action? refuse = null, Action? onRefreshing = null)
+        public RecordingOAuthClient(string accessToken, string? refreshToken, DateTimeOffset? expiresAt, Action? refuse = null, Action? onRefreshing = null, string refusalError = "invalid_grant")
         {
             _accessToken = accessToken;
             _refreshToken = refreshToken;
             _expiresAt = expiresAt;
             _refuse = refuse;
             _onRefreshing = onRefreshing;
+            _refusalError = refusalError;
         }
 
-        /// <summary>A provider that refuses every refresh with invalid_grant, after running <paramref name="onRefusing"/>.</summary>
-        public static RecordingOAuthClient Refusing(Action? onRefusing = null) => new("unused", null, null, onRefusing ?? (() => { }));
+        /// <summary>A provider that refuses every refresh with <paramref name="error"/> (invalid_grant by default), after running <paramref name="onRefusing"/>.</summary>
+        public static RecordingOAuthClient Refusing(Action? onRefusing = null, string error = "invalid_grant") => new("unused", null, null, onRefusing ?? (() => { }), refusalError: error);
 
         public List<string> RevokedTokens { get; } = new();
 
@@ -373,7 +383,7 @@ public partial class OAuthTokenRefresherTests
             if (_refuse != null)
             {
                 _refuse();
-                throw new OAuthExchangeException("invalid_grant", "The provided authorization grant is invalid", null);
+                throw new OAuthExchangeException(_refusalError, "The provided authorization grant is invalid", null);
             }
 
             _onRefreshing?.Invoke();
@@ -424,6 +434,25 @@ public partial class OAuthTokenRefresherTests
     private sealed class NoopTrackedCredentialEntry : ITrackedCredentialEntry
     {
         public void MarkPayloadStored(Credential credential) { }
+    }
+
+    /// <summary>The verdicts the refresher recorded, in order. Answers true — the row was still the one judged.</summary>
+    private sealed class RecordingHealthWriter : ICredentialHealthWriter
+    {
+        public List<(Guid CredentialId, string ExpectedPayload, string LastError)> Rejections { get; } = new();
+
+        public bool Fails { get; init; }
+
+        public Task<bool> MarkRejectedAsync(Guid credentialId, string expectedEncryptedPayload, string lastError, CancellationToken cancellationToken)
+        {
+            if (Fails) throw new InvalidOperationException("simulated: the store cannot be reached");
+
+            Rejections.Add((credentialId, expectedEncryptedPayload, lastError));
+
+            return Task.FromResult(true);
+        }
+
+        public Task<bool> MarkValidatedAsync(Guid credentialId, string expectedEncryptedPayload, DateTimeOffset validatedAt, ExpiryRecord? expiry, CancellationToken cancellationToken) => Task.FromResult(true);
     }
 
     private sealed class NoopCrossProcessLock : ICrossProcessLock

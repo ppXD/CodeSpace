@@ -32,10 +32,11 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
     private readonly IScopeChecker _scopeChecker;
     private readonly ICredentialSuccessionService _succession;
     private readonly ICredentialRevocationService _revocation;
+    private readonly ICredentialHealthService _health;
     private readonly ITeamMemberService _members;
     private readonly ILogger<CredentialService> _logger;
 
-    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthGrantRevoker grants, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ITeamMemberService members, ILogger<CredentialService> logger)
+    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthGrantRevoker grants, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ICredentialHealthService health, ITeamMemberService members, ILogger<CredentialService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
@@ -48,6 +49,7 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
         _scopeChecker = scopeChecker;
         _succession = succession;
         _revocation = revocation;
+        _health = health;
         _members = members;
         _logger = logger;
     }
@@ -63,7 +65,7 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
         // Repository picker. Two credentials with the same DisplayName (e.g. after a rename)
         // would otherwise be ambiguous; OwnerUserName disambiguates without forcing the user
         // to think about display-name uniqueness.
-        return await query
+        var summaries = await query
             .OrderByDescending(c => c.CreatedDate)
             .Select(c => new CredentialSummary
             {
@@ -82,6 +84,26 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
                 CreatedDate = c.CreatedDate
             })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return await WithHealthAsync(summaries, teamId, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// What to read off each listed credential (<see cref="CredentialHealthDerivation"/>): the columns it is derived from are
+    /// already on the summary, and whether its person has left is one more read for the team's list — the same rule the
+    /// retirement sweep uses (<see cref="DepartedCredentials"/>), so the list never promises a retirement the sweep will not make.
+    /// </summary>
+    private async Task<IReadOnlyList<CredentialSummary>> WithHealthAsync(List<CredentialSummary> summaries, Guid teamId, CancellationToken cancellationToken)
+    {
+        var ids = summaries.Select(s => s.Id).ToList();
+        var left = await DepartedCredentials.Of(_db).AsNoTracking().Where(c => c.TeamId == teamId && ids.Contains(c.Id)).Select(c => c.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var now = DateTimeOffset.UtcNow;
+
+        return summaries.Select(s => s with
+        {
+            Health = CredentialHealthDerivation.Derive(s.Status, s.AuthType, s.ExpiresDate, left.Contains(s.Id), now),
+            DaysToExpiry = CredentialHealthDerivation.DaysToExpiry(s.AuthType, s.ExpiresDate, now)
+        }).ToList();
     }
 
     public async Task<CredentialUsage> GetUsageAsync(Guid credentialId, CancellationToken cancellationToken)
@@ -162,7 +184,7 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
         // boundary (a confused-deputy seam: the platform would pair that instance's host + OAuth client
         // with this team's token). Conflate not-found with not-in-team — a 404 leaks nothing about
         // another team's instances.
-        await EnsureProviderInstanceInTeamAsync(input.ProviderInstanceId, teamId, cancellationToken).ConfigureAwait(false);
+        var instance = await LoadProviderInstanceInTeamAsync(input.ProviderInstanceId, teamId, cancellationToken).ConfigureAwait(false);
 
         var ownerUserId = OwnerOf(input);
 
@@ -183,6 +205,9 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
             EncryptedPayload = encrypted,
             Status = CredentialStatus.Active
         };
+
+        // Before it is tracked: the validation stamps the new row, and a provider that answers slowly holds nothing the unit of work has written.
+        await _health.ValidateNewAsync(credential, instance, cancellationToken).ConfigureAwait(false);
 
         await _db.Credential.AddAsync(credential, cancellationToken).ConfigureAwait(false);
         await _succession.CarryForwardAsync(credential, cancellationToken).ConfigureAwait(false);
@@ -250,13 +275,9 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
         return await catalog.PagedListAccessibleAsync(context, search, clampedPage, clampedPerPage, cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task EnsureProviderInstanceInTeamAsync(Guid providerInstanceId, Guid teamId, CancellationToken cancellationToken)
-    {
-        var inTeam = await _db.ProviderInstance.AsNoTracking()
-            .AnyAsync(p => p.Id == providerInstanceId && p.TeamId == teamId && p.DeletedDate == null, cancellationToken).ConfigureAwait(false);
-
-        if (!inTeam) throw new KeyNotFoundException($"Provider instance {providerInstanceId} not found.");
-    }
+    private async Task<ProviderInstance> LoadProviderInstanceInTeamAsync(Guid providerInstanceId, Guid teamId, CancellationToken cancellationToken) =>
+        await _db.ProviderInstance.AsNoTracking().FirstOrDefaultAsync(p => p.Id == providerInstanceId && p.TeamId == teamId && p.DeletedDate == null, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"Provider instance {providerInstanceId} not found.");
 
     /// <summary>
     /// A team-service credential belongs to the team, not a person — it never carries an owner, whatever it was handed. A

@@ -3,6 +3,7 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Messages.Credentials;
+using CodeSpace.Messages.Enums;
 using Microsoft.Extensions.Logging;
 using Shouldly;
 
@@ -78,6 +79,68 @@ public partial class OAuthTokenRefresherTests
         provider.RefreshCalls.ShouldBe(1);
         persists.ShouldBe(1);
         row.Read().RefreshToken.ShouldBe("r-1");
+    }
+
+    [Fact]
+    public async Task StoreKeptPairAsync_stores_a_pair_the_process_kept_without_asking_the_provider_again_or_waiting_for_a_refresh_to_be_due()
+    {
+        // What a strategy does before it reads a credential another process marked refused: the pair this process kept is the
+        // live one, and storing it is what lifts that verdict (the writer clears an Error with any pair the provider issued).
+        var ctx = BuildContext();
+        var stale = ExpiredPair();
+        var row = new StoredRow(stale);
+        var provider = new RecordingOAuthClient("new", "r-1", Now.AddHours(2));
+
+        await Should.ThrowAsync<IOException>(() => RunAsync(stale, ctx, row, provider, decorateWriter: w => new FlakyPayloadWriter(w, failures: int.MaxValue)));
+
+        row.Read().RefreshToken.ShouldBe("r-0", "fixture check: nothing was stored");
+
+        var (refresher, writer) = BuildRefresher(stale, ctx, row, provider);
+
+        await refresher.StoreKeptPairAsync(ctx, CancellationToken.None);
+
+        row.Read().RefreshToken.ShouldBe("r-1");
+        writer.PersistCalls.ShouldBe(1);
+        provider.RefreshCalls.ShouldBe(1, "the provider consumed r-0 once, in the first call; presenting it again is refused");
+
+        await refresher.StoreKeptPairAsync(ctx, CancellationToken.None);
+
+        writer.PersistCalls.ShouldBe(1, "a pair that is stored is no longer kept, so the next use stores nothing");
+    }
+
+    [Fact]
+    public async Task StoreKeptPairAsync_does_nothing_for_a_credential_the_process_holds_no_pair_for()
+    {
+        var ctx = BuildContext();
+        var stale = ExpiredPair();
+        var row = new StoredRow(stale);
+        var provider = new RecordingOAuthClient("new", "r-1", Now.AddHours(2));
+        var (refresher, writer) = BuildRefresher(stale, ctx, row, provider);
+
+        await refresher.StoreKeptPairAsync(ctx, CancellationToken.None);
+
+        row.Read().RefreshToken.ShouldBe("r-0");
+        writer.PersistCalls.ShouldBe(0);
+        provider.RefreshCalls.ShouldBe(0, "storing what is kept never refreshes anything");
+    }
+
+    [Fact]
+    public async Task StoreKeptPairAsync_leaves_a_disconnected_credential_to_the_typed_failure_the_resolver_raises()
+    {
+        var ctx = BuildContext();
+        var stale = ExpiredPair();
+        var row = new StoredRow(stale);
+        var provider = new RecordingOAuthClient("new", "r-1", Now.AddHours(2));
+
+        await Should.ThrowAsync<IOException>(() => RunAsync(stale, ctx, row, provider, decorateWriter: w => new FlakyPayloadWriter(w, failures: int.MaxValue)));
+
+        ctx.Credential.Status = CredentialStatus.Revoked;
+        var (refresher, writer) = BuildRefresher(stale, ctx, row, provider);
+
+        await refresher.StoreKeptPairAsync(ctx, CancellationToken.None);
+
+        writer.PersistCalls.ShouldBe(0, "a disconnected credential is not written to; the resolver says it was disconnected");
+        row.Read().RefreshToken.ShouldBe("r-0");
     }
 
     [Fact]

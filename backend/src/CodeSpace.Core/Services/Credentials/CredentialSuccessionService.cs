@@ -10,9 +10,12 @@ using Microsoft.Extensions.Logging;
 namespace CodeSpace.Core.Services.Credentials;
 
 /// <summary>
-/// One rule, applied at connect time and by the recurring repair: what is bound through a REVOKED credential — its
+/// One rule, applied at connect time and by the recurring repair: what is bound through a DEAD credential — its
 /// repositories and the group hooks it registered — follows that credential's owner to the credential they connected
-/// after it on the same provider instance in the same team. Ownership is the whole key — a teammate connecting the same
+/// after it on the same provider instance in the same team. Dead is a revoked credential, and one its provider refused for
+/// good (<c>Error</c>, with its payload kept): the failure for either says to reconnect, and a person who does has no
+/// Disconnect to click first — the Providers list shows only live credentials, so a refused one is already gone from it.
+/// Ownership is the whole key — a teammate connecting the same
 /// provider is a different identity, and moving the owner's bindings onto it would change who they act as. A live
 /// credential has no successor, whatever its owner connects beside it — its bindings move only when it is disconnected
 /// (<see cref="MoveBindingsAsync"/>, with the destination a person named, or — when the owner disconnects their own — the
@@ -46,7 +49,7 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
     {
         if (successor.OwnerUserId is not Guid ownerId) return;
 
-        var predecessorIds = await LoadDisconnectedPredecessorIdsAsync(successor, ownerId, cancellationToken).ConfigureAwait(false);
+        var predecessorIds = await LoadDeadPredecessorIdsAsync(successor, ownerId, cancellationToken).ConfigureAwait(false);
 
         if (predecessorIds.Count == 0) return;
 
@@ -61,25 +64,28 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
     public async Task<int> CountAsync(CancellationToken cancellationToken) => await StrandedWithSuccessor().CountAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
-    /// The owner's revoked credentials on the successor's instance and team. Filtered on the tracked entities, not in
-    /// SQL: a token link revokes the credential it replaces in the same unit of work, so that row is Revoked in memory
-    /// before it is Revoked in the database.
+    /// The owner's dead credentials on the successor's instance and team — revoked, or refused by their provider. Filtered on
+    /// the tracked entities, not in SQL: a token link revokes the credential it replaces in the same unit of work, so that row
+    /// is Revoked in memory before it is Revoked in the database. No date is asked of a refused one here: the successor is
+    /// being created now, after whatever the owner's credentials last did.
     /// </summary>
-    private async Task<List<Guid>> LoadDisconnectedPredecessorIdsAsync(Credential successor, Guid ownerId, CancellationToken cancellationToken)
+    private async Task<List<Guid>> LoadDeadPredecessorIdsAsync(Credential successor, Guid ownerId, CancellationToken cancellationToken)
     {
         var owned = await _db.Credential
             .Where(c => c.TeamId == successor.TeamId && c.ProviderInstanceId == successor.ProviderInstanceId && c.OwnerUserId == ownerId && c.Id != successor.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return owned.Where(c => c.Status == CredentialStatus.Revoked).Select(c => c.Id).ToList();
+        return owned.Where(c => c.Status is CredentialStatus.Revoked or CredentialStatus.Error).Select(c => c.Id).ToList();
     }
 
     /// <summary>
-    /// Revoked owned credentials that something live is still bound to, each paired with its successor: the owner's
-    /// newest Active credential on the same instance and team connected at or after the revocation (a revoked row is not
-    /// modified again, so its last-modified date is when it was revoked; a token link revokes the credential it replaces
-    /// in the same save that creates the new one, hence at-or-after). A credential with no successor — a disconnect
-    /// nobody reconnected — is not a candidate, so it never crowds a repairable one out of the batch. Ordered by id and
+    /// Dead owned credentials that something live is still bound to, each paired with its successor: the owner's
+    /// newest Active credential on the same instance and team connected at or after the moment the dead one stopped working. A revoked row is not modified again, so its last-modified date is when it was revoked (a token link revokes
+    /// the credential it replaces in the same save that creates the new one, hence at-or-after). A refused row IS written again,
+    /// every hour its verdict is confirmed, so its last-modified date says nothing about when it died: it was last known good
+    /// at its last validation, or at its creation if it never had one, and a credential connected since is the owner's
+    /// reconnect — while one connected before it last worked was beside it, not after it. A credential with no successor — a
+    /// disconnect nobody reconnected — is not a candidate, so it never crowds a repairable one out of the batch. Ordered by id and
     /// read in pages: <paramref name="after"/> is the last id of the previous page, so the pass walks the whole backlog
     /// instead of re-reading its first <paramref name="take"/> rows every time.
     /// </summary>
@@ -99,18 +105,18 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
     /// </summary>
     private IQueryable<StrandedRow> StrandedWithSuccessor(Guid? after = null)
     {
-        var revoked = _db.Credential.AsNoTracking().Where(dead => dead.Status == CredentialStatus.Revoked && dead.OwnerUserId != null);
+        var deadCredentials = _db.Credential.AsNoTracking().Where(c => (c.Status == CredentialStatus.Revoked || c.Status == CredentialStatus.Error) && c.OwnerUserId != null);
 
-        if (after is Guid cursor) revoked = revoked.Where(dead => dead.Id.CompareTo(cursor) > 0);
+        if (after is Guid cursor) deadCredentials = deadCredentials.Where(c => c.Id.CompareTo(cursor) > 0);
 
-        return revoked
+        return deadCredentials
             .Where(dead => _db.Repository.Any(r => r.CredentialId == dead.Id && r.TeamId == dead.TeamId && r.ProviderInstanceId == dead.ProviderInstanceId && r.DeletedDate == null)
                 || _db.ConnectionWebhook.Any(w => w.CredentialId == dead.Id && w.ProviderInstanceId == dead.ProviderInstanceId && WebhookRegistrationLifecycle.InService.Contains(w.RegistrationStatus)))
             .Select(dead => new StrandedRow
             {
                 DeadId = dead.Id,
                 SuccessorId = _db.Credential
-                    .Where(c => c.TeamId == dead.TeamId && c.ProviderInstanceId == dead.ProviderInstanceId && c.OwnerUserId == dead.OwnerUserId && c.Status == CredentialStatus.Active && c.DeletedDate == null && c.CreatedDate >= dead.LastModifiedDate)
+                    .Where(c => c.TeamId == dead.TeamId && c.ProviderInstanceId == dead.ProviderInstanceId && c.OwnerUserId == dead.OwnerUserId && c.Status == CredentialStatus.Active && c.DeletedDate == null && c.CreatedDate >= (dead.Status == CredentialStatus.Revoked ? dead.LastModifiedDate : (dead.LastValidatedDate ?? dead.CreatedDate)))
                     .OrderByDescending(c => c.CreatedDate).ThenByDescending(c => c.Id)
                     .Select(c => (Guid?)c.Id)
                     .FirstOrDefault()
@@ -118,7 +124,7 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
             .Where(candidate => candidate.SuccessorId != null);
     }
 
-    /// <summary>Move one disconnected credential's bindings and save them on their own, then hand its revived hooks to the registrar.</summary>
+    /// <summary>Move one dead credential's bindings and save them on their own, then hand its revived hooks to the registrar.</summary>
     private async Task<bool> RepairAsync(StrandedCredential candidate, CancellationToken cancellationToken)
     {
         try

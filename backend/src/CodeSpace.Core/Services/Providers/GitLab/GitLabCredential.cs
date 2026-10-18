@@ -12,29 +12,42 @@ namespace CodeSpace.Core.Services.Providers.GitLab;
 /// PAT and fail with an OAuth token as soon as a redirect dropped the Bearer, and the typed client (Bearer only) fail on
 /// every long access token.
 ///
-/// <para>A struct that overrides <see cref="ToString"/>: a record's generated one would print the token into whatever
+/// <para>An OAuth credential also carries the way to ask for a replacement when GitLab answers 401 to its token
+/// (<see cref="RecoverAsync"/>). The replacement STAYS: this one object is what the typed client and every raw call of a
+/// provider call present, so once a request has been refused and the token replaced, the requests after it — the write that
+/// follows a read, the next page — carry the replacement without being refused first. A static token carries no way to ask.</para>
+///
+/// <para>A class that overrides <see cref="ToString"/>: a record's generated one would print the token into whatever
 /// message or log line a value of this type is formatted into.</para>
 /// </summary>
-internal readonly struct GitLabCredential
+internal sealed class GitLabCredential
 {
     internal const string PrivateTokenHeader = "PRIVATE-TOKEN";
 
     internal const string AuthorizationHeader = "Authorization";
 
-    public GitLabCredential(string token, AuthType type)
+    private readonly Func<string, CancellationToken, Task<string?>>? _recover;
+    private volatile string _token;
+
+    /// <param name="recover">Given the token GitLab refused, the token to try instead — null when there is none. Absent for a credential that cannot be replaced.</param>
+    public GitLabCredential(string token, AuthType type, Func<string, CancellationToken, Task<string?>>? recover = null)
     {
-        Token = token;
+        _token = token;
         Type = type;
+        _recover = recover;
     }
 
-    public string Token { get; }
+    /// <summary>The token presented now: the one it was made with until a refusal replaced it.</summary>
+    public string Token => _token;
 
     public AuthType Type { get; }
 
     /// <summary>The header this credential's type names: <c>PRIVATE-TOKEN</c> for an access token, <c>Authorization</c> for anything else (OAuth).</summary>
     public string HeaderName => IsAccessToken ? PrivateTokenHeader : AuthorizationHeader;
 
-    public string HeaderValue => IsAccessToken ? Token : $"Bearer {Token}";
+    public string HeaderValue => ValueOf(_token);
+
+    private string ValueOf(string token) => IsAccessToken ? token : $"Bearer {token}";
 
     private bool IsAccessToken => Type is AuthType.Pat or AuthType.ProjectAccessToken or AuthType.GroupAccessToken;
 
@@ -43,7 +56,7 @@ internal readonly struct GitLabCredential
     {
         request.Headers.Remove(PrivateTokenHeader);
         request.Headers.Remove(AuthorizationHeader);
-        request.Headers.TryAddWithoutValidation(HeaderName, HeaderValue);
+        request.Headers.TryAddWithoutValidation(HeaderName, ValueOf(_token));
     }
 
     /// <summary>The same, for NGitLab's request, whose headers it has already written an <c>Authorization: Bearer</c> into.</summary>
@@ -51,7 +64,29 @@ internal readonly struct GitLabCredential
     {
         headers.Remove(PrivateTokenHeader);
         headers.Remove(AuthorizationHeader);
-        headers[HeaderName] = HeaderValue;
+        headers[HeaderName] = ValueOf(_token);
+    }
+
+    /// <summary>Whether a 401 is worth asking <see cref="RecoverAsync"/> about.</summary>
+    public bool CanRecover => _recover is not null;
+
+    /// <summary>
+    /// GitLab answered 401 to <paramref name="rejectedToken"/>. True when the credential now carries another token to send the
+    /// request again with: a request that was refused alongside this one may already have replaced it, which is taken as the
+    /// answer without asking again; otherwise the way to ask is used once. False when the 401 stands.
+    /// </summary>
+    public async Task<bool> RecoverAsync(string rejectedToken, CancellationToken cancellationToken)
+    {
+        if (_recover is null) return false;
+        if (_token != rejectedToken) return true;
+
+        var replacement = await _recover(rejectedToken, cancellationToken).ConfigureAwait(false);
+
+        if (replacement is null) return false;
+
+        _token = replacement;
+
+        return true;
     }
 
     public override string ToString() => $"{HeaderName} credential ({Type})";

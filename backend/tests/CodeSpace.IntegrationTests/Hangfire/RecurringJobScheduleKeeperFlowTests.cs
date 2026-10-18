@@ -30,7 +30,7 @@ public sealed class RecurringJobScheduleKeeperFlowTests
 {
     private const string LoadFailure = "Hangfire.Common.JobLoadException: Could not load the job. See inner exception for the details. ---> Newtonsoft.Json.JsonSerializationException: Error converting value \"CodeSpace.Core.Jobs.RecurringJobs.DepartedMemberCredentialRetirementRecurringJob, CodeSpace.Core\" to type 'System.Type'.";
 
-    private static readonly string[] AddedSinceThePreviousBuild = [nameof(DepartedMemberCredentialRetirementRecurringJob), nameof(DisconnectedCredentialBindingRepairRecurringJob), nameof(WebhookClaimPurgeRecurringJob), nameof(PackCloneUrlBackfillRecurringJob)];
+    private static readonly string[] AddedSinceThePreviousBuild = [nameof(DepartedMemberCredentialRetirementRecurringJob), nameof(DisconnectedCredentialBindingRepairRecurringJob), nameof(WebhookClaimPurgeRecurringJob), nameof(PackCloneUrlBackfillRecurringJob), nameof(CredentialHealthProbeRecurringJob)];
 
     private readonly PostgresFixture _fixture;
 

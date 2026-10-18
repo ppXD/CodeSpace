@@ -119,7 +119,7 @@ public sealed class PodStack
     {
         var trackedEntry = new TrackedCredentialEntry(NewDb());
 
-        return new OAuthTokenRefresher(_clients, new CredentialPayloadWriter(Encryptor, Serializer, _settings, trackedEntry), _reader, Resolver, Encryptor, TimeProvider.System, new PostgresAdvisoryLock(_settings), trackedEntry, NullLogger<OAuthTokenRefresher>.Instance);
+        return new OAuthTokenRefresher(_clients, new CredentialPayloadWriter(Encryptor, Serializer, _settings, trackedEntry), _reader, Resolver, Encryptor, TimeProvider.System, new PostgresAdvisoryLock(_settings), trackedEntry, new CredentialHealthWriter(_settings), NullLogger<OAuthTokenRefresher>.Instance);
     }
 
     public IOAuthTokenRefresher PreviousBuildRefresher() =>

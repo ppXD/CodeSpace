@@ -34,7 +34,7 @@ public class GitHubAuthStrategyTests
     public async Task GitHubOAuth_returns_access_token_and_expiry()
     {
         var expires = new DateTimeOffset(2030, 1, 1, 0, 0, 0, TimeSpan.Zero);
-        var strategy = new GitHubOAuthAuthStrategy(new FakeCredentialResolver(new OAuthPayload { AccessToken = "ghu_abc", ExpiresAt = expires }), new NoopOAuthTokenRefresher());
+        var strategy = new GitHubOAuthAuthStrategy(new FakeCredentialResolver(new OAuthPayload { AccessToken = "ghu_abc", ExpiresAt = expires }), new NoopOAuthTokenRefresher(), new NoopOAuthTokenRefresher());
 
         var result = await strategy.ResolveAsync(AuthTestContextFactory.Build(ProviderKind.GitHub, AuthType.OAuth), CancellationToken.None);
 
@@ -43,9 +43,24 @@ public class GitHubAuthStrategyTests
     }
 
     [Fact]
+    public async Task GitHubOAuth_stores_the_pair_its_process_kept_before_reading_a_credential_another_process_marked_refused()
+    {
+        var context = AuthTestContextFactory.Build(ProviderKind.GitHub, AuthType.OAuth);
+        context.Credential.Status = CredentialStatus.Error;
+        context.Credential.LastError = "needs reconnect: bad_refresh_token";
+        var holding = new HoldingKeptPair();
+        var strategy = new GitHubOAuthAuthStrategy(new ErrorFailingCredentialResolver(new OAuthPayload { AccessToken = "ghu_kept" }), holding, holding);
+
+        var result = await strategy.ResolveAsync(context, CancellationToken.None);
+
+        result.Token.ShouldBe("ghu_kept", "a live pair this process holds outranks the verdict a refusal of the consumed one wrote on the row");
+        holding.Stores.ShouldBe(1);
+    }
+
+    [Fact]
     public async Task GitHubOAuth_throws_when_payload_type_does_not_match()
     {
-        var strategy = new GitHubOAuthAuthStrategy(new FakeCredentialResolver(new PatPayload { Token = "wrong" }), new NoopOAuthTokenRefresher());
+        var strategy = new GitHubOAuthAuthStrategy(new FakeCredentialResolver(new PatPayload { Token = "wrong" }), new NoopOAuthTokenRefresher(), new NoopOAuthTokenRefresher());
 
         var act = async () => await strategy.ResolveAsync(AuthTestContextFactory.Build(ProviderKind.GitHub, AuthType.OAuth), CancellationToken.None);
 
@@ -65,7 +80,7 @@ public class GitHubAuthStrategyTests
     [Fact]
     public void GitHubOAuth_declares_correct_kind_and_authtype()
     {
-        var strategy = new GitHubOAuthAuthStrategy(new FakeCredentialResolver(new OAuthPayload { AccessToken = "t" }), new NoopOAuthTokenRefresher());
+        var strategy = new GitHubOAuthAuthStrategy(new FakeCredentialResolver(new OAuthPayload { AccessToken = "t" }), new NoopOAuthTokenRefresher(), new NoopOAuthTokenRefresher());
 
         strategy.Kind.ShouldBe(ProviderKind.GitHub);
         strategy.AuthType.ShouldBe(AuthType.OAuth);

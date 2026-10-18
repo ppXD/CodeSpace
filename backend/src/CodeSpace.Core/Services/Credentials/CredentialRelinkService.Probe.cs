@@ -89,9 +89,9 @@ public sealed partial class CredentialRelinkService
     /// <summary>
     /// The provider answered, and the answer is about the target: this token is not let in (401, 403 or an insufficient
     /// scope), cannot see that project (404), or — for an OAuth connection — the grant itself was refused when its token was
-    /// refreshed. Anything else (a 5xx, a 429, a dropped connection, a local rate limit) says nothing about the target.
+    /// refreshed (the provider's answer, or the credential already marked as needing a reconnect for it). Anything else (a 5xx, a 429, a dropped connection, a local rate limit) says nothing about the target.
     /// </summary>
-    private static bool TargetIsRefused(Exception ex) => ex is ProviderInsufficientScopeException or OAuthExchangeException or ProviderApiException { StatusCode: 401 or 403 or 404 };
+    private static bool TargetIsRefused(Exception ex) => ex is ProviderInsufficientScopeException or OAuthExchangeException or CredentialNeedsReconnectException or ProviderApiException { StatusCode: 401 or 403 or 404 };
 
     private string UnreadableMessage(List<string> unreadable)
     {
