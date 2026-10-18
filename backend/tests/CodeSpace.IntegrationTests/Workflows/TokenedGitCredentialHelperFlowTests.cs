@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Agents.Benchmark;
+using CodeSpace.Messages.Failures;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -186,20 +187,55 @@ public sealed class TokenedGitCredentialHelperFlowTests
     [InlineData("clone")]       // the workspace clone,
     [InlineData("push")]        //   the publish push,
     [InlineData("integrate")]   //   and the integration clone, each redirected by the remote
-    public async Task A_redirect_to_another_authority_gets_no_credential(string operation)
+    public async Task A_redirect_to_another_authority_gets_no_credential_and_the_failure_names_it(string operation)
     {
         // git follows the redirect of the ref advertisement and makes the new authority the remote's base, so its next
         // request goes there. The credential answers for the remote's own scheme and authority only: when the harvester asks,
-        // no helper answers for it, and the operation fails rather than send the token anywhere.
+        // no helper answers for it, and the operation fails rather than send the token anywhere. git's own words for that
+        // are a prompt for a username; the failure says instead where the remote pointed — the typed redirect failure, still
+        // a WorkspaceException so every catch site that handles a git failure still does.
         if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
 
         await using var ctx = await OperatorHostContext.StartAsync();
         ctx.Remote.StartHarvester();
 
-        await Should.ThrowAsync<WorkspaceException>(() => ctx.RedirectedAsync(operation));
+        var failure = await Should.ThrowAsync<WorkspaceException>(() => ctx.RedirectedAsync(operation));
+
+        ((IFailure)failure).Code.ShouldBe("provider_base_url_redirects", failure.Message);
+        ((IFailure)failure).Details!["finalOrigin"].ShouldBe(ctx.Remote.HarvesterOrigin);
+        failure.Message.ShouldContain(ctx.Remote.HarvesterOrigin);
+        failure.Message.ShouldNotContain(GitPublishRemoteFixture.FakeToken, Case.Sensitive);
 
         ctx.Remote.HarvesterRequests.ShouldBeGreaterThan(1, "fixture check: git followed the redirect and asked the harvester for more than the advertisement");
         ctx.Remote.HarvestedAuthorizations.ShouldBeEmpty("a credential reached the authority the remote redirected to");
+        ctx.ShouldKeepTheTokenOffEveryArgv();
+        ctx.ShouldHoldTheToken(stored: false);
+    }
+
+    [Theory]
+    [InlineData("clone")]   // the workspace clone,
+    [InlineData("push")]    //   and the publish push from a clone made at the old address
+    public async Task A_redirect_inside_the_authority_keeps_the_credential(string operation)
+    {
+        // The other half of the redirect rule: the credential answers for the remote's scheme and authority, so a redirect to
+        // another PATH on the same authority (a moved repository, a clone URL without its .git) finds it. The remote demands
+        // the token for reads as well as writes, so an operation that gets through carried it past the redirect.
+        if (OperatingSystem.IsWindows() || !await GitAvailableAsync()) return;
+
+        await using var ctx = await OperatorHostContext.StartAsync();
+        ctx.Remote.RedirectsWithinAuthority = true;
+
+        await using var handle = await ctx.ProvisionFromTheOldAddressAsync();
+
+        if (operation == "push")
+        {
+            await ctx.AgentCommitsAsync(handle.Directory);
+            (await ((IWorkspacePushHandle)handle).PushChangesAsync(ctx.BranchName, CancellationToken.None)).ShouldBe(ctx.BranchName);
+            ctx.Remote.AuthenticatedPushRequests.ShouldBeGreaterThan(0, "the push authenticated with the token after the redirect");
+        }
+
+        ctx.Remote.RedirectsServed.ShouldBeGreaterThan(0, "fixture check: git asked the old address and was redirected");
+        File.ReadAllText(Path.Combine(handle.Directory, "README.md")).ShouldBe("base, revised\n", "the clone authenticated past the redirect and read the repository");
         ctx.ShouldKeepTheTokenOffEveryArgv();
         ctx.ShouldHoldTheToken(stored: false);
     }
@@ -679,6 +715,10 @@ public sealed class TokenedGitCredentialHelperFlowTests
         /// <summary>The operator's own credential for the remote, as <c>git credential-store</c> keeps it.</summary>
         public void SeedTheOperatorsStore() =>
             File.WriteAllText(GlobalStore, $"http://x-access-token:{GitPublishRemoteFixture.FakeToken}@{new Uri(Remote.Url).Authority}\n");
+
+        /// <summary>A depth-1 clone of the remote named by its OLD address, which redirects inside the authority once <see cref="GitPublishRemoteFixture.RedirectsWithinAuthority"/> is set.</summary>
+        public Task<IWorkspaceHandle> ProvisionFromTheOldAddressAsync() =>
+            Provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = Remote.MovedUrl, Token = GitPublishRemoteFixture.FakeToken, TokenUsername = "x-access-token", Ref = "main", Depth = 1 }), CancellationToken.None);
 
         /// <summary>A soft ref with a fallback (so the probe runs), a depth-1 clone, and a pin to the base's parent (so the fetch rungs run).</summary>
         public Task<IWorkspaceHandle> ProvisionAsync(string token) =>

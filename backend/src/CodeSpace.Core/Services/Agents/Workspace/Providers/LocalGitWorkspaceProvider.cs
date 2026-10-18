@@ -368,7 +368,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         var result = await RunGitAsync(args, context, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success)
-            throw TokenedGitCommand.OldGitFailure(context.Remote.IsTokened, result.Stderr) ?? new WorkspaceException($"git clone failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), request.Token)}");
+            throw TokenedGitCommand.OldGitFailure(context.Remote.IsTokened, result.Stderr) ?? GitRemoteRedirect.Failure(url, result.Stderr, $"git clone failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), request.Token)}");
 
         if (!string.IsNullOrWhiteSpace(request.PinnedSha))
             await MaterializePinAsync(request, context, cancellationToken).ConfigureAwait(false);
@@ -1007,7 +1007,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
             if (first.Status != SandboxStatus.Success && TokenedGitCommand.OldGitFailure(remote.IsTokened, first.Stderr) is { } oldGit) throw oldGit;
 
-            if (first.Status == SandboxStatus.Success || !ResolvesItsCredential(repo) || !IsCredentialRefusal(first.Stderr))
+            if (first.Status == SandboxStatus.Success || !ResolvesItsCredential(repo) || !IsCredentialRefusal(first.Stderr) || GitRemoteRedirect.Named(remote.Url, first.Stderr) is not null)
             {
                 EnsureSuccess(repo, args(remote.Url), first, remote.IsTokened);
                 return;
@@ -1198,7 +1198,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         private static string EnsureSuccess(MaterializedRepo repo, IReadOnlyList<string> args, SandboxResult result, bool tokened = false)
         {
             if (result.Status != SandboxStatus.Success)
-                throw TokenedGitCommand.OldGitFailure(tokened, result.Stderr) ?? new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), repo.Token)}");
+                throw TokenedGitCommand.OldGitFailure(tokened, result.Stderr) ?? GitRemoteRedirect.Failure(repo.RepositoryUrl, result.Stderr, $"git {string.Join(' ', RedactArgs(args, repo.Token))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), repo.Token)}");
 
             SandboxOutputCompleteness.RequireStdout(result);
             return result.Stdout;

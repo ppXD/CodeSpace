@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -338,7 +339,7 @@ public class WorkspaceSpecTests
     [Fact]
     public async Task ResolveAsync_returns_null_for_a_no_repo_run()
     {
-        var resolver = new RepositoryWorkspaceResolver(db: Infrastructure.EmptyTestDb.New(), auth: null!);
+        var resolver = new RepositoryWorkspaceResolver(db: Infrastructure.EmptyTestDb.New(), auth: null!, logger: NullLogger<RepositoryWorkspaceResolver>.Instance);
 
         (await resolver.ResolveAsync(new AgentTask { Goal = "g", Harness = "claude-code" }, Guid.NewGuid(), CancellationToken.None))
             .ShouldBeNull();
@@ -350,7 +351,7 @@ public class WorkspaceSpecTests
     [Fact]
     public async Task ResolveAsync_refuses_an_empty_repositories_spec_with_a_distinct_error()
     {
-        var resolver = new RepositoryWorkspaceResolver(db: Infrastructure.EmptyTestDb.New(), auth: null!);
+        var resolver = new RepositoryWorkspaceResolver(db: Infrastructure.EmptyTestDb.New(), auth: null!, logger: NullLogger<RepositoryWorkspaceResolver>.Instance);
         var task = new AgentTask
         {
             Goal = "g",

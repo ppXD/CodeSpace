@@ -64,6 +64,12 @@ public static class FailureCodes
     /// <summary>An edit moved a git provider connection's endpoint (the scheme, host or port of its API or base URL) while credentials are still connected through it. Remedy: disconnect them first (members reconnect against the new host), or add the new host as its own provider; a connected token never follows a repoint.</summary>
     public const string ProviderEndpointCredentialsBound = "provider_endpoint_credentials_bound";
 
+    /// <summary>A git provider's base URL answered a redirect to another origin (a different scheme, host or port). A credential is only ever sent to the origin it was connected for, so the redirect is not followed. Remedy: edit the provider's base URL to the address the host answers on (the error names it), or remove the redirect on the host; a retry as-is reads the same redirect.</summary>
+    public const string ProviderBaseUrlRedirects = "provider_base_url_redirects";
+
+    /// <summary>An edit upgraded a connected git provider's address from http to https and nothing answered HTTP at the new address (a port that does not speak TLS, a certificate this server does not trust, a host that is down). Remedy: make the new address serve HTTPS this server can reach and trust, then save again; the stored address is unchanged.</summary>
+    public const string ProviderEndpointUnreachable = "provider_endpoint_unreachable";
+
     /// <summary>An edit moved a git provider connection's endpoint without entering its stored OAuth client secret again. Remedy: send the secret (normally the new host's OAuth app's) with the new endpoint.</summary>
     public const string ProviderEndpointSecretRequired = "provider_endpoint_secret_required";
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { endpointChanged, keyMustBeReentered, providerSecretMustBeReentered, showsMaskedCredentials } from "./credentialEndpoint";
+import { endpointChanged, isHttpsUpgrade, keyMustBeReentered, providerEndpointMoves, providerSecretMustBeReentered, showsMaskedCredentials } from "./credentialEndpoint";
 
 describe("endpointChanged", () => {
   it.each([
@@ -23,6 +23,40 @@ describe("endpointChanged", () => {
     ["gw.example:4000", "gw.example:5000"],
   ])("moves %s → %s to another endpoint", (original, next) => {
     expect(endpointChanged(original, next)).toBe(true);
+  });
+});
+
+describe("isHttpsUpgrade", () => {
+  it.each([
+    ["http://gitlab.acme.test", "https://gitlab.acme.test"],
+    ["http://gitlab.acme.test:80", "https://gitlab.acme.test:443"],
+    ["http://gitlab.acme.test:8080", "https://gitlab.acme.test:8080"],
+    ["http://GitLab.Acme.test/", "https://gitlab.acme.test/gitlab"],
+  ])("treats %s → %s as an upgrade of the same host", (original, next) => {
+    expect(isHttpsUpgrade(original, next)).toBe(true);
+  });
+
+  it.each([
+    ["http://gitlab.acme.test", "https://gitlab.acme.test:8443"],
+    ["http://gitlab.acme.test:8080", "https://gitlab.acme.test"],
+    ["http://gitlab.acme.test:443", "https://gitlab.acme.test"],
+    ["http://gitlab.acme.test", "https://gitlab-alias.acme.test"],
+    ["https://gitlab.acme.test", "http://gitlab.acme.test"],
+    ["https://gitlab.acme.test", "https://gitlab.acme.test"],
+    ["gitlab.acme.test", "https://gitlab.acme.test"],
+    [null, "https://gitlab.acme.test"],
+    ["http://gitlab.acme.test", ""],
+  ])("does not treat %s → %s as one", (original, next) => {
+    expect(isHttpsUpgrade(original, next)).toBe(false);
+  });
+});
+
+describe("providerEndpointMoves", () => {
+  it("is a change of endpoint bar an http to https upgrade of the same host", () => {
+    expect(providerEndpointMoves("http://gitlab.acme.test", "https://gitlab.acme.test")).toBe(false);
+    expect(providerEndpointMoves("http://gitlab.acme.test", "https://gitlab.acme.test:8443")).toBe(true);
+    expect(providerEndpointMoves("https://gitlab.acme.test", "https://attacker.test")).toBe(true);
+    expect(providerEndpointMoves("https://gitlab.acme.test", "https://gitlab.acme.test/gitlab")).toBe(false);
   });
 });
 
@@ -51,6 +85,11 @@ describe("providerSecretMustBeReentered", () => {
 
   it("never asks when no secret is stored", () => {
     expect(providerSecretMustBeReentered({ oauthEnabled: false, baseUrl: "https://gitlab.acme.test" }, "https://gitlab.new.test")).toBe(false);
+  });
+
+  it("never asks for an http to https upgrade of the same host — the backend lets it through while tokens are connected", () => {
+    expect(providerSecretMustBeReentered({ oauthEnabled: true, baseUrl: "http://gitlab.acme.test" }, "https://gitlab.acme.test")).toBe(false);
+    expect(providerSecretMustBeReentered({ oauthEnabled: true, baseUrl: "http://gitlab.acme.test" }, "https://gitlab.acme.test:8443")).toBe(true);
   });
 
   it("never asks for a path change or the masked URL sent back", () => {

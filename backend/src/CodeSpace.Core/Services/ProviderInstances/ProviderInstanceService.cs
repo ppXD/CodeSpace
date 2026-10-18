@@ -31,10 +31,11 @@ public sealed partial class ProviderInstanceService : IProviderInstanceService, 
     private readonly ICredentialRevocationService _revocation;
     private readonly IOAuthGrantRevoker _grants;
     private readonly IPostCommitActions _postCommit;
+    private readonly IProviderEndpointProbe _endpointProbe;
     private readonly TimeProvider _clock;
     private readonly ILogger<ProviderInstanceService> _logger;
 
-    public ProviderInstanceService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, IRepositoryBindingService binding, IWebhookScopeTransitionService webhookScope, IConnectionWebhookProvisioner connectionHooks, ICredentialRevocationService revocation, IOAuthGrantRevoker grants, IPostCommitActions postCommit, TimeProvider clock, ILogger<ProviderInstanceService> logger)
+    public ProviderInstanceService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, IRepositoryBindingService binding, IWebhookScopeTransitionService webhookScope, IConnectionWebhookProvisioner connectionHooks, ICredentialRevocationService revocation, IOAuthGrantRevoker grants, IPostCommitActions postCommit, IProviderEndpointProbe endpointProbe, TimeProvider clock, ILogger<ProviderInstanceService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
@@ -46,6 +47,7 @@ public sealed partial class ProviderInstanceService : IProviderInstanceService, 
         _revocation = revocation;
         _grants = grants;
         _postCommit = postCommit;
+        _endpointProbe = endpointProbe;
         _clock = clock;
         _logger = logger;
     }
@@ -104,6 +106,7 @@ public sealed partial class ProviderInstanceService : IProviderInstanceService, 
 
         EnsureOAuthPairConsistent(normalisedClientId, oauthClientSecret);
         await EnsureNotDuplicateAsync(teamId, provider, normalisedBaseUrl, normalisedClientId, cancellationToken).ConfigureAwait(false);
+        await _endpointProbe.EnsureNoRedirectToAnotherOriginAsync(provider, ApiOf(normalisedBaseUrl, apiUrl), cancellationToken).ConfigureAwait(false);
 
         var instance = new ProviderInstance
         {
@@ -142,6 +145,8 @@ public sealed partial class ProviderInstanceService : IProviderInstanceService, 
         if (baseUrlChanged || clientIdChanged) await EnsureUniquenessKeyAvailableAsync(instance, newBaseUrl, newClientId, cancellationToken).ConfigureAwait(false);
 
         await EnsureSecretsStayWithTheirEndpointAsync(instance, edits, cancellationToken).ConfigureAwait(false);
+        await EnsureAnUpgradeAnswersWhileSecretsAreBoundAsync(instance, edits, cancellationToken).ConfigureAwait(false);
+        await EnsureAnEditedApiAddressDoesNotRedirectAsync(instance, edits, cancellationToken).ConfigureAwait(false);
         LogEndpointMove(instance, edits);
 
         var previousScope = instance.WebhookScope;
@@ -168,9 +173,18 @@ public sealed partial class ProviderInstanceService : IProviderInstanceService, 
     /// Whether an edit moves where this connection presents its secrets: the API every provider call goes to
     /// (<c>ApiUrl</c>, or the base URL when unset) or the base URL the OAuth token, authorize and revoke endpoints are
     /// derived from. A move is a change of scheme, host or port (<see cref="CredentialUrl.SameEndpoint"/>); a path, a
-    /// trailing slash or a credential slot is not.
+    /// trailing slash or a credential slot is not — and neither is an upgrade of http to https on the very same host
+    /// (<see cref="CredentialUrl.IsHttpsUpgrade"/>), which a base URL that redirects to https asks for and which sends a
+    /// token nowhere new, only over TLS: refusing it while tokens are connected left the owner no way to fix the URL
+    /// short of disconnecting every member's token.
     /// </summary>
     internal static bool EndpointMoves(string storedBaseUrl, string? storedApiUrl, string nextBaseUrl, string? nextApiUrl) =>
+        UrlMoves(storedBaseUrl, nextBaseUrl) || UrlMoves(ApiOf(storedBaseUrl, storedApiUrl), ApiOf(nextBaseUrl, nextApiUrl));
+
+    private static bool UrlMoves(string stored, string next) => !CredentialUrl.SameEndpoint(stored, next) && !CredentialUrl.IsHttpsUpgrade(stored, next);
+
+    /// <summary>Whether an edit changes the scheme, host or port of either URL at all — the moves, and the http to https upgrades that are allowed past bound credentials.</summary>
+    internal static bool EndpointChanges(string storedBaseUrl, string? storedApiUrl, string nextBaseUrl, string? nextApiUrl) =>
         !CredentialUrl.SameEndpoint(storedBaseUrl, nextBaseUrl) || !CredentialUrl.SameEndpoint(ApiOf(storedBaseUrl, storedApiUrl), ApiOf(nextBaseUrl, nextApiUrl));
 
     /// <summary>
@@ -193,19 +207,60 @@ public sealed partial class ProviderInstanceService : IProviderInstanceService, 
             throw new ProviderEndpointSecretRequiredException(instance.Id);
     }
 
+    /// <summary>
+    /// An http to https upgrade is the one change of endpoint a connected token may follow, because it sends the token nowhere
+    /// new; it can still land every connected token on an address nothing serves over TLS (a host with no https, a certificate
+    /// this server does not trust), and putting the old address back is a move, refused while the tokens are connected — the
+    /// owner would be stranded where the carve-out was meant to free them. So while any token is connected the new address
+    /// must answer HTTP before the edit is kept, and the stored one stays otherwise. With nothing connected a mistaken address
+    /// is one edit away from undone, so nothing is asked; an edit that relies on no upgrade asks nothing either.
+    /// </summary>
+    private async Task EnsureAnUpgradeAnswersWhileSecretsAreBoundAsync(ProviderInstance instance, UpdateProviderInstanceCommand edits, CancellationToken cancellationToken)
+    {
+        var upgraded = UpgradedAddresses(instance, edits);
+
+        if (upgraded.Count == 0 || await CountPresentableCredentialsAsync(instance.Id, cancellationToken).ConfigureAwait(false) == 0) return;
+
+        foreach (var address in upgraded) await _endpointProbe.EnsureAnswersAsync(instance.Provider, address, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>The edit's next base URL and API address, each when it differs from the stored one by an http to https upgrade of the same host and nothing else (<see cref="CredentialUrl.IsHttpsUpgrade"/>).</summary>
+    private static IReadOnlyList<string> UpgradedAddresses(ProviderInstance instance, UpdateProviderInstanceCommand edits)
+    {
+        var nextBaseUrl = NextBaseUrl(instance, edits);
+        var addresses = new[] { (Stored: instance.BaseUrl, Next: nextBaseUrl), (Stored: ApiOf(instance.BaseUrl, instance.ApiUrl), Next: ApiOf(nextBaseUrl, NextApiUrl(instance, edits))) };
+
+        return addresses.Where(address => CredentialUrl.IsHttpsUpgrade(address.Stored, address.Next)).Select(address => address.Next).Distinct(StringComparer.Ordinal).ToList();
+    }
+
+    /// <summary>
+    /// A new API address is asked once whether it redirects to another origin, so the redirect is named now, to the owner
+    /// who typed it, instead of reading as a 401 on every call afterwards. After the refusals above, so a repoint that is
+    /// refused never contacts the host it named. An edit that leaves the address as stored asks nothing — a connection
+    /// whose stored URL already redirects keeps saving its other fields; its calls name the redirect when they meet it.
+    /// </summary>
+    private async Task EnsureAnEditedApiAddressDoesNotRedirectAsync(ProviderInstance instance, UpdateProviderInstanceCommand edits, CancellationToken cancellationToken)
+    {
+        var next = ApiOf(NextBaseUrl(instance, edits), NextApiUrl(instance, edits));
+
+        if (string.Equals(next, ApiOf(instance.BaseUrl, instance.ApiUrl), StringComparison.Ordinal)) return;
+
+        await _endpointProbe.EnsureNoRedirectToAnotherOriginAsync(instance.Provider, next, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Credentials that would still be presented: connected through this instance and not disconnected (a disconnect revokes the row and blanks its token).</summary>
     private Task<int> CountPresentableCredentialsAsync(Guid providerInstanceId, CancellationToken cancellationToken) =>
         _db.Credential.AsNoTracking().CountAsync(c => c.ProviderInstanceId == providerInstanceId && c.DeletedDate == null && c.Status != CredentialStatus.Revoked, cancellationToken);
 
-    /// <summary>One audit line per endpoint move, naming only scheme://host:port on each side (<see cref="CredentialUrl.Endpoint"/>) — never embedded credentials, path or query.</summary>
+    /// <summary>One audit line per endpoint change — a move, or an http to https upgrade — naming only scheme://host:port on each side (<see cref="CredentialUrl.Endpoint"/>) — never embedded credentials, path or query.</summary>
     private void LogEndpointMove(ProviderInstance instance, UpdateProviderInstanceCommand edits)
     {
         var nextBaseUrl = NextBaseUrl(instance, edits);
         var nextApiUrl = NextApiUrl(instance, edits);
 
-        if (!EndpointMoves(instance.BaseUrl, instance.ApiUrl, nextBaseUrl, nextApiUrl)) return;
+        if (!EndpointChanges(instance.BaseUrl, instance.ApiUrl, nextBaseUrl, nextApiUrl)) return;
 
-        _logger.LogInformation("Provider instance {ProviderInstanceId} of team {TeamId} moved its endpoint from {PreviousEndpoint} (API {PreviousApiEndpoint}) to {Endpoint} (API {ApiEndpoint}), by user {UserId}", instance.Id, instance.TeamId, CredentialUrl.Endpoint(instance.BaseUrl), CredentialUrl.Endpoint(ApiOf(instance.BaseUrl, instance.ApiUrl)), CredentialUrl.Endpoint(nextBaseUrl), CredentialUrl.Endpoint(ApiOf(nextBaseUrl, nextApiUrl)), _currentUser.Id);
+        _logger.LogInformation("Provider instance {ProviderInstanceId} of team {TeamId} moved its endpoint from {PreviousEndpoint} (API {PreviousApiEndpoint}) to {Endpoint} (API {ApiEndpoint}), by user {UserId}; an http to https upgrade of the same host: {HttpsUpgrade}", instance.Id, instance.TeamId, CredentialUrl.Endpoint(instance.BaseUrl), CredentialUrl.Endpoint(ApiOf(instance.BaseUrl, instance.ApiUrl)), CredentialUrl.Endpoint(nextBaseUrl), CredentialUrl.Endpoint(ApiOf(nextBaseUrl, nextApiUrl)), _currentUser.Id, !EndpointMoves(instance.BaseUrl, instance.ApiUrl, nextBaseUrl, nextApiUrl));
     }
 
     private static string NextBaseUrl(ProviderInstance instance, UpdateProviderInstanceCommand edits) => edits.BaseUrl != null ? NormaliseBaseUrl(edits.BaseUrl) : instance.BaseUrl;

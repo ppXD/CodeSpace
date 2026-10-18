@@ -242,6 +242,13 @@ public sealed class PostgresFixture : IAsyncLifetime
 
         builder.RegisterType<Webhooks.CapturedNormalizedEvents>().AsSelf().SingleInstance();
 
+        // A provider add or edit asks its API address once whether it redirects to another origin. The suite's addresses
+        // exist only in tests, so the probe contacts nothing here: tests that care register an answer on this instance.
+        builder.RegisterType<TestProviderEndpointProbe>()
+            .As<CodeSpace.Core.Services.ProviderInstances.IProviderEndpointProbe>()
+            .AsSelf()
+            .SingleInstance();
+
         // In-memory store backing TestRepositoryProvider's remote webhook lookups. Singleton
         // per fixture (= per test DB) so tests within one fixture share state (e.g. assert
         // "registrar called exactly once" via RegisterCallCount across multiple operations)

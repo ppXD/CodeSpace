@@ -216,7 +216,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
         var result = await RunTokenedGitAsync(request, new[] { "clone", url, directory }, directory, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success)
-            throw TokenedGitCommand.OldGitFailure(Remote(request).IsTokened, result.Stderr) ?? new WorkspaceException($"git clone failed (exit {result.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(result.Stderr), request.Token)}");
+            throw TokenedGitCommand.OldGitFailure(Remote(request).IsTokened, result.Stderr) ?? GitRemoteRedirect.Failure(url, result.Stderr, $"git clone failed (exit {result.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(result.Stderr), request.Token)}");
     }
 
     /// <summary>Check out the EXACT shared base (detached) so every <c>apply --3way</c> resolves the pre-image against the commit the agents saw. False when the SHA is not in history (a bad base).</summary>
@@ -457,7 +457,7 @@ public sealed class LocalGitBranchIntegrator : IBranchIntegrator, IScopedDepende
             return "remote integration branch advanced — refusing to clobber it";
 
         // A genuine infrastructure failure (auth / network / repo gone) — surface it (token redacted).
-        throw TokenedGitCommand.OldGitFailure(Remote(request).IsTokened, result.Stderr) ?? new WorkspaceException($"git push failed (exit {result.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(result.Stderr), request.Token)}");
+        throw TokenedGitCommand.OldGitFailure(Remote(request).IsTokened, result.Stderr) ?? GitRemoteRedirect.Failure(Remote(request).Url, result.Stderr, $"git push failed (exit {result.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(result.Stderr), request.Token)}");
     }
 
     private async Task ResetToBaseAsync(string directory, IntegrationRequest request, CancellationToken cancellationToken)

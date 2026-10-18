@@ -7,6 +7,7 @@ using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -73,7 +74,7 @@ public class DefaultRunnerKindTests
     public async Task RunCommandService_resolves_the_deployment_default_only_when_the_request_pins_none(string? requestKind, string expectedKind)
     {
         var runners = new RecordingRunnerRegistry();
-        var service = new RunCommandService(null!, null!, runners, null!, Setting("cfg-runner"), new CallerCommandLanes());
+        var service = new RunCommandService(null!, null!, runners, null!, Setting("cfg-runner"), new CallerCommandLanes(), NullLogger<RunCommandService>.Instance);
 
         // Ephemeral (no repositoryId) so the DbContext / auth / workspace collaborators are never touched.
         await service.RunAsync(new RunCommandRequest { Command = "true", RunnerKind = requestKind }, CancellationToken.None);

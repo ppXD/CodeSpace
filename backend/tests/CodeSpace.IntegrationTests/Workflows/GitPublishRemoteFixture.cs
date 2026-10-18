@@ -36,6 +36,7 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     private Task? _harvest;
     private string _harvesterAuthority = "";
     private int _harvesterRequests;
+    private int _redirectsServed;
     private int _lfsBatchRequests;
     private int _lfsBatchRefusedCredentials;
 
@@ -75,6 +76,22 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     /// the same path and query on the harvester (<see cref="StartHarvester"/>): a remote that redirects to another authority.
     /// </summary>
     public bool RedirectsToHarvester { get; set; }
+
+    /// <summary>
+    /// When set, anything under <see cref="MovedUrl"/> is answered, before any authentication, with a 301 to the same path
+    /// under the remote's real URL — a redirect inside ONE authority, the shape of a repository that moved or a clone URL
+    /// without its <c>.git</c>. The credential still answers for that authority, so the operation must go through.
+    /// </summary>
+    public bool RedirectsWithinAuthority { get; set; }
+
+    /// <summary>The remote's URL as the old address it redirects from once <see cref="RedirectsWithinAuthority"/> is set: the same authority, another path.</summary>
+    public string MovedUrl => Url.Replace("/remote.git", "/moved.git", StringComparison.Ordinal);
+
+    /// <summary>Redirects served inside the authority — non-zero once git asked the old address.</summary>
+    public int RedirectsServed => Volatile.Read(ref _redirectsServed);
+
+    /// <summary>The harvester's scheme and authority — the origin a redirect to it sends git to, which a failure naming the redirect must give.</summary>
+    public string HarvesterOrigin => _harvesterAuthority;
 
     /// <summary>Requests the harvester served — non-zero once git followed the redirect to it.</summary>
     public int HarvesterRequests => Volatile.Read(ref _harvesterRequests);
@@ -275,6 +292,7 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
 
             var path = context.Request.Url!.AbsolutePath;
 
+            if (RedirectsWithinAuthority && path.StartsWith("/moved.git/", StringComparison.Ordinal)) { RedirectWithinAuthority(context, path); return; }
             if (path.EndsWith("/info/lfs/objects/batch", StringComparison.Ordinal)) { await ServeLfsBatchAsync(context); return; }
             if (path.Contains("/lfs-object/", StringComparison.Ordinal)) { await ServeLfsObjectAsync(context, path); return; }
             if (RedirectsToHarvester && IsRefAdvertisement(context, path)) { RedirectToHarvester(context, path); return; }
@@ -302,6 +320,15 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
             Unauthorized(context, recordRefusal: false);
         }
         finally { context.Response.Close(); }
+    }
+
+    /// <summary>A 301 from <see cref="MovedUrl"/>'s path to the remote's own, the authority unchanged.</summary>
+    private void RedirectWithinAuthority(HttpListenerContext context, string path)
+    {
+        Interlocked.Increment(ref _redirectsServed);
+
+        context.Response.StatusCode = 301;
+        context.Response.RedirectLocation = "/remote.git" + path["/moved.git".Length..] + context.Request.Url!.Query;
     }
 
     private static bool IsRefAdvertisement(HttpListenerContext context, string path) => context.Request.HttpMethod == "GET" && path.EndsWith("/info/refs", StringComparison.Ordinal);

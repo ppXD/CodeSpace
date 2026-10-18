@@ -9,7 +9,7 @@ import { useAddGroupAccessToken, useAddProviderInstance, useCredentialCapabiliti
 import { useMe } from "@/hooks/use-me";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { OAuthFlowError, useOAuthFlow } from "@/hooks/use-oauth-flow";
-import { endpointChanged, providerSecretMustBeReentered, showsMaskedCredentials } from "@/lib/credentialEndpoint";
+import { providerEndpointMoves, providerSecretMustBeReentered, showsMaskedCredentials } from "@/lib/credentialEndpoint";
 import { providerSupportsTeamServiceCredential } from "@/lib/teamCredentials";
 
 import { Ic } from "./icons";
@@ -1006,7 +1006,7 @@ function EditProviderStep({ instance, onBack, onClose, onSaved }: EditProviderSt
   const blanksOnImmutable = !displayName.trim() || !baseUrl.trim();
   // A stored OAuth secret is only ever sent to the host it was entered for: moving the host needs it typed again.
   const nextBaseUrl = baseUrl.trim().replace(/\/$/, "");
-  const hostMoves = endpointChanged(instance.baseUrl, nextBaseUrl);
+  const hostMoves = providerEndpointMoves(instance.baseUrl, nextBaseUrl);
   const secretMustFollow = providerSecretMustBeReentered(instance, nextBaseUrl);
   const missingSecretForMove = secretMustFollow && !secretFilled;
   const submitDisabled = update.isPending || blanksOnImmutable || oauthPairIncomplete || missingRequiredForConfig || missingSecretForMove;

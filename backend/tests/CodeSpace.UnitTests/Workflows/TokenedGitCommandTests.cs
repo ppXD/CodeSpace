@@ -59,6 +59,22 @@ public sealed class TokenedGitCommandTests
         TokenedGitSpecs.CarriesTheCredential(tokened, username, token).ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData("http://gitlab.acme.test/org/repo.git", "https://gitlab.acme.test/org/repo.git", false)]          // http to https: another scheme
+    [InlineData("http://127.0.0.1:8080/org/repo.git", "http://localhost:8080/org/repo.git", false)]               // a host alias
+    [InlineData("http://gitlab.acme.test/org/repo.git", "http://gitlab.acme.test:8080/org/repo.git", false)]      // another port
+    [InlineData("https://gitlab.acme.test/org/repo.git", "https://gitlab.acme.test/org/repo/", true)]             // the same authority: another path
+    [InlineData("https://GitLab.Acme.test/org/repo.git", "https://gitlab.acme.test:443/org/moved.git", true)]     // case and the default port are the same authority
+    public void A_redirect_is_inside_the_credentials_scope_only_when_the_scheme_and_authority_are_the_same(string url, string redirectsTo, bool credentialed)
+    {
+        // The three shapes a GitLab base URL redirects in are, for git, all outside the scope the credential answers for: the
+        // helper is keyed by scheme and authority, so the command fails at the redirect rather than send the token to it.
+        // A redirect to another path on the same authority (a moved repository, a URL without .git) stays inside.
+        string ScopeKey(string remoteUrl) => TokenedGitCommand.CredentialEnvironment(TokenedGitCommand.RemoteFor(remoteUrl, "oauth2", "glpat-fake")).Single(kv => kv.Key == "GIT_CONFIG_KEY_1").Value;
+
+        (ScopeKey(url) == ScopeKey(redirectsTo)).ShouldBe(credentialed);
+    }
+
     [Fact]
     public void A_tokened_command_maps_its_remote_to_itself_so_no_operator_rewrite_moves_it()
     {
