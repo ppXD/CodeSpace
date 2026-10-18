@@ -8,8 +8,10 @@ cd /usr/share/nginx/html
 npx -y @import-meta-env/cli@0.7.4 -x .env -e .env -p dist/env.js
 
 # Name the API origin that env points the SPA at, for the CSP in nginx.conf (which includes this file). A malformed
-# VITE_API_URL stops the container here instead of serving a policy that blocks the app.
-mkdir -p /etc/nginx/codespace
-node /usr/local/lib/codespace/csp-api-origin.mjs dist/env.js > /etc/nginx/codespace/api-origin.conf
+# VITE_API_URL stops the container here instead of serving a policy that blocks the app. Written under /tmp, nginx.conf's
+# include path, so this step needs nothing under /etc to be writable. It is not what makes a read-only root filesystem
+# work: the substitution above still writes dist/env.js in place (and npx its cache), and nginx its pid file and cache.
+mkdir -p /tmp/codespace
+node /usr/local/lib/codespace/csp-api-origin.mjs dist/env.js > /tmp/codespace/api-origin.conf
 
 nginx -g "daemon off;"

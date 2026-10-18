@@ -1,6 +1,6 @@
 // Names the API origin for the SPA's Content-Security-Policy, at container start (docker/init.sh).
 //
-//   node csp-api-origin.mjs dist/env.js > /etc/nginx/codespace/api-origin.conf
+//   node csp-api-origin.mjs dist/env.js > /tmp/codespace/api-origin.conf
 //
 // The origin is read from the SPA's own env script AFTER @import-meta-env/cli has substituted it, so the CSP allows
 // exactly the backend the app was configured to call — the same .env / process env, resolved by the same tool — and no

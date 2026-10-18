@@ -106,8 +106,11 @@ describe("SPA response headers (nginx.conf)", () => {
     expect(cspDirective("connect-src")).toEqual(["'self'", `$${API_ORIGIN_VARIABLE}`]);
   });
 
-  it("loads images from the app, the API, inline data and https — never cleartext http or another scheme", () => {
-    expect(cspDirective("img-src")).toEqual(["'self'", "data:", "blob:", "https:", `$${API_ORIGIN_VARIABLE}`]);
+  it("loads images from the app, the API, inline data, https and plain http — and from no other scheme", () => {
+    // http: because a self-managed GitLab or Gitea on a plain-HTTP deployment serves its avatars and README images over it.
+    // img-src is not what protects the session (https: already names every host an image could be requested from), so the
+    // directives that are — script-src, connect-src, form-action — stay exactly as pinned above.
+    expect(cspDirective("img-src")).toEqual(["'self'", "data:", "blob:", "https:", "http:", `$${API_ORIGIN_VARIABLE}`]);
   });
 
   it("sends nosniff, and a Referer trimmed to the origin on cross-origin requests — so no outside host sees which repository or item was open", () => {
@@ -120,6 +123,16 @@ describe("SPA response headers (nginx.conf)", () => {
 
     expect(include, "nginx.conf does not include the generated API-origin file at server level").not.toBeNull();
     expect(initScript).toContain(`> ${include![1]}`);
+  });
+
+  it("keeps that file under /tmp, so init.sh's write of it needs nothing under /etc", () => {
+    // Only this one write moved off the image's own filesystem. It does not make the image start with a read-only root:
+    // dist/env.js is still substituted in place, npx keeps a cache, and nginx writes its pid file and cache directories.
+    const include = /^\s{4}include\s+(\S+);/m.exec(nginxConf)![1];
+
+    expect(include).toBe("/tmp/codespace/api-origin.conf");
+    expect(initScript).toContain("mkdir -p /tmp/codespace");
+    expect(initScript.split("\n").filter(line => !line.trimStart().startsWith("#")).join("\n")).not.toMatch(/\/etc\//);
   });
 });
 

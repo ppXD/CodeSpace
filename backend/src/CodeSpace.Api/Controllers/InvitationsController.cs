@@ -38,16 +38,17 @@ public class InvitationsController : ControllerBase
 
     /// <summary>
     /// Spends the invitation and answers with a session, so the invitee lands signed in: as the browser's HttpOnly session
-    /// cookie, and in the body too unless the cookie carried the request. A signed-in caller accepts as itself, and any
-    /// account can invite any address, so a page script accepting an invitation its author sent would otherwise read a
-    /// fresh session for the person whose page it runs in.
+    /// cookie when the request carries the SPA's CSRF header (a client that predates the cookie could never clear one), and
+    /// in the body too unless the cookie carried the request. A signed-in caller accepts as itself, and any account can
+    /// invite any address, so a page script accepting an invitation its author sent would otherwise read a fresh session
+    /// for the person whose page it runs in.
     /// </summary>
     [HttpPost("{token}/accept")]
     public async Task<IActionResult> Accept([FromRoute] string token, [FromBody] AcceptInvitationCommand command, CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(command with { Token = token }, cancellationToken).ConfigureAwait(false);
 
-        SessionCookie.Issue(HttpContext, result.Token!, result.ExpiresAt);
+        SessionCookie.IssueIfRequested(HttpContext, result.Token!, result.ExpiresAt);
 
         return Ok(SessionCookie.Authenticated(HttpContext) ? result with { Token = null } : result);
     }

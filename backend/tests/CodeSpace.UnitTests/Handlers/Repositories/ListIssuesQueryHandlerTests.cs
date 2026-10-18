@@ -26,8 +26,8 @@ public class ListIssuesQueryHandlerTests
     [InlineData(3, 30, 3, 30)]                 // in-range values pass through
     [InlineData(1, 0, 1, 1)]                   // perPage < 1 clamps up to 1
     [InlineData(1, 1000, 1, 100)]             // perPage > Max clamps down to MaxPerPage
-    [InlineData(1_000_000, 100, 1000, 100)]   // a page past the ceiling is the ceiling
-    [InlineData(int.MaxValue, int.MaxValue, 1000, 100)]
+    [InlineData(1000, 100, 1000, 100)]        // the last page the list allows is still a page
+    [InlineData(1000, int.MaxValue, 1000, 100)]
     public async Task Clamps_page_and_perPage_then_forwards_with_the_current_team(int page, int perPage, int expectedPage, int expectedPerPage)
     {
         var team = Guid.NewGuid();
@@ -43,6 +43,23 @@ public class ListIssuesQueryHandlerTests
         service.State.ShouldBe(IssueState.Open);
         service.Page.ShouldBe(expectedPage);
         service.PerPage.ShouldBe(expectedPerPage);
+    }
+
+    [Theory]
+    [InlineData(1001)]
+    [InlineData(1_000_000)]
+    [InlineData(int.MaxValue)]
+    public async Task A_page_past_the_last_one_the_list_allows_is_empty_and_asks_no_provider(int page)
+    {
+        // It used to read page 1000 again, so a client paging on kept receiving the same rows under a new page number,
+        // for as long as it cared to ask.
+        var service = new StubIssueService();
+        var handler = new ListIssuesQueryHandler(service, new StubCurrentTeam(Guid.NewGuid()));
+
+        var listed = await handler.Handle(new ListIssuesQuery { RepositoryId = Guid.NewGuid(), Page = page, PerPage = 100 }, CancellationToken.None);
+
+        listed.ShouldBeEmpty();
+        service.Calls.ShouldBe(0, "there is nothing at that page to fetch, so nothing is fetched");
     }
 
     /// <summary>Hand-rolled stub (no mocking lib) — records the list call; writes/counts throw.</summary>

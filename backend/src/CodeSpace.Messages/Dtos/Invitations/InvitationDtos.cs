@@ -31,6 +31,17 @@ public sealed record InvitationPreview
     /// could invite an arbitrary address and read the answer.</para>
     /// </summary>
     public required bool ForSignedInAccount { get; init; }
+
+    /// <summary>
+    /// <see cref="ForSignedInAccount"/> under the name the invite page that shipped before it reads. The API is replaced
+    /// before the SPA, so that page meets this response for the length of a rollout, and without the name it reads
+    /// <c>undefined</c> and asks a signed-in invitee to "Create your account" for an address that already has one.
+    ///
+    /// <para>Derived, so it can never say more than <see cref="ForSignedInAccount"/> does: the same fact about the caller,
+    /// not the old answer to "does this address have an account". Remove it once no deployed SPA predates the rename.</para>
+    /// </summary>
+    [Obsolete("Read ForSignedInAccount. Kept for one release for the invite page that predates it.")]
+    public bool AccountExists => ForSignedInAccount;
 }
 
 /// <summary>

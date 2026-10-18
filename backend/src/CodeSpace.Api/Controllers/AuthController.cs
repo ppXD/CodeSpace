@@ -25,7 +25,9 @@ public class AuthController : ControllerBase
 
     // Every endpoint that mints a session hands it to the browser in the HttpOnly session cookie, which its scripts never
     // see (SessionCookie), and to a caller that keeps it itself — an API client, the CLI — in the body as well. Never in
-    // the body to a request the cookie carried: that caller may be a script in the page, and it could read a body.
+    // the body to a request the cookie carried: that caller may be a script in the page, and it could read a body. And
+    // the cookie only to a request that carries the SPA's CSRF header: a client that predates the cookie could never
+    // clear it, so it keeps the body's session alone (SessionCookie.IssueIfRequested).
 
     [HttpPost("sign-in")]
     [AllowAnonymous]
@@ -33,7 +35,7 @@ public class AuthController : ControllerBase
     {
         var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
 
-        SessionCookie.Issue(HttpContext, result.Token!, result.ExpiresAt);
+        SessionCookie.IssueIfRequested(HttpContext, result.Token!, result.ExpiresAt);
 
         return Ok(SessionCookie.Authenticated(HttpContext) ? result with { Token = null } : result);
     }
@@ -48,7 +50,7 @@ public class AuthController : ControllerBase
     {
         var result = await _mediator.Send(command, cancellationToken).ConfigureAwait(false);
 
-        SessionCookie.Issue(HttpContext, result.Token!, result.ExpiresAt);
+        SessionCookie.IssueIfRequested(HttpContext, result.Token!, result.ExpiresAt);
 
         return Ok(SessionCookie.Authenticated(HttpContext) ? result with { Token = null } : result);
     }

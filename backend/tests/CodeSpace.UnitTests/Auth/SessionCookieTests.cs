@@ -137,6 +137,41 @@ public class SessionCookieTests
         SessionCookie.IsUnguardedWrite(RequestFor(method, csrfHeader: "1")).ShouldBeFalse();
     }
 
+    /// <summary>
+    /// A client that predates the cookie — an older SPA bundle, an API client, the CLI — has no way to end one: only the
+    /// API can clear an HttpOnly cookie, and the older SPA's sign-out only empties its own storage. So a sign-in that hands
+    /// it a cookie hands it a 24-hour session it can never sign out of. The SPA that knows the cookie sends the header on
+    /// every request, which is the one thing that tells the two apart.
+    /// </summary>
+    [Theory]
+    [InlineData("1", true)]
+    [InlineData("anything", true)]    // presence is the signal, as it is for the write guard
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData(" ", false)]          // a blank header is no header, here as in IsUnguardedWrite
+    public void A_session_is_handed_over_as_a_cookie_only_to_a_request_that_carries_the_csrf_header(string? csrfHeader, bool expected)
+    {
+        var context = ContextAt("https");
+
+        if (csrfHeader != null) context.Request.Headers[SessionCookie.CsrfHeader] = csrfHeader;
+
+        SessionCookie.IssueIfRequested(context, "the-jwt", Now.AddHours(24));
+
+        SetCookieOf(context).StartsWith($"{SessionCookie.Name}=the-jwt;", StringComparison.Ordinal).ShouldBe(expected, $"header {csrfHeader ?? "(none)"} — Set-Cookie: {SetCookieOf(context)}");
+        context.Response.Headers.SetCookie.Count.ShouldBe(expected ? 1 : 0);
+    }
+
+    [Fact]
+    public void Asking_for_the_cookie_outright_never_needs_the_header()
+    {
+        // POST /api/auth/session is the one endpoint whose whole job is to set the cookie: whoever calls it asked.
+        var context = ContextAt("https");
+
+        SessionCookie.Issue(context, "the-jwt", Now.AddHours(24));
+
+        SetCookieOf(context).ShouldStartWith($"{SessionCookie.Name}=the-jwt;");
+    }
+
     [Theory]
     [InlineData(true, true, null, true)]                    // the browser on its cookie: the session must not come back in the body
     [InlineData(true, true, "Bearer header-jwt", false)]    // a header client with a stray cookie: the header carried it

@@ -124,7 +124,10 @@ public sealed class InvitationReachE2ETests : IClassFixture<TaskLaunchApiFactory
         var existingPreview = await PreviewAsync(forExisting.Token, userId: null);
         var nobodyPreview = await PreviewAsync(forNobody.Token, userId: null);
 
-        existingPreview.TryGetProperty("accountExists", out _).ShouldBeFalse("an anonymous preview must not say whether the address has an account — it is an existence oracle for any address");
+        // accountExists is only the old spelling of forSignedInAccount, kept for the invite page that shipped before it. Were it
+        // ever the address's own fact again, this is the assertion that goes red: an existence oracle for any address.
+        existingPreview.GetProperty("accountExists").GetBoolean().ShouldBeFalse("an anonymous preview must not say whether the address has an account — it is an existence oracle for any address");
+        nobodyPreview.GetProperty("accountExists").GetBoolean().ShouldBeFalse();
         PropertyNames(existingPreview).ShouldBe(PropertyNames(nobodyPreview), "the two previews must have the same shape");
         existingPreview.GetProperty("forSignedInAccount").GetBoolean().ShouldBeFalse();
         nobodyPreview.GetProperty("forSignedInAccount").GetBoolean().ShouldBeFalse();
@@ -141,6 +144,22 @@ public sealed class InvitationReachE2ETests : IClassFixture<TaskLaunchApiFactory
 
         (await PreviewAsync(invitation.Token, invitee)).GetProperty("forSignedInAccount").GetBoolean().ShouldBeTrue("the hint is about the caller themselves, so it may be given to the caller");
         (await PreviewAsync(invitation.Token, bystander)).GetProperty("forSignedInAccount").GetBoolean().ShouldBeFalse("a different signed-in account learns nothing about the invited address");
+    }
+
+    [Fact]
+    public async Task The_old_spelling_the_previous_invite_page_reads_says_the_same_thing_to_the_same_caller()
+    {
+        // The API is replaced before the SPA, so the page that shipped before forSignedInAccount reads accountExists from this
+        // response: without it, a signed-in invitee is asked to "Create your account" for an address that already has one.
+        var team = await SeedTeamAsync();
+        var inviteeEmail = $"invitee-{Guid.NewGuid():N}@tenant.test";
+        var invitee = await _tenants.AccountAsync(email: inviteeEmail);
+        var bystander = await _tenants.AccountAsync();
+        var invitation = await InviteAsync(team.Owner, team.TeamId, TeamRole.Member, inviteeEmail);
+
+        (await PreviewAsync(invitation.Token, invitee)).GetProperty("accountExists").GetBoolean().ShouldBeTrue("the signed-in invitee is who the older page was written for");
+        (await PreviewAsync(invitation.Token, bystander)).GetProperty("accountExists").GetBoolean().ShouldBeFalse("a different signed-in account learns nothing about the invited address");
+        (await PreviewAsync(invitation.Token, userId: null)).GetProperty("accountExists").GetBoolean().ShouldBeFalse("nor does a stranger");
     }
 
     // ─── Plumbing ────────────────────────────────────────────────────────────────

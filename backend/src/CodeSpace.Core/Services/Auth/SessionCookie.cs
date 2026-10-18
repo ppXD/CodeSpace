@@ -37,6 +37,18 @@ public static class SessionCookie
     /// <summary>Hands the browser the session <paramref name="token"/>, to expire with the token itself.</summary>
     public static void Issue(HttpContext context, string token, DateTimeOffset expiresAt) => context.Response.Cookies.Append(Name, token, Options(context, expiresAt - ClockOf(context).GetUtcNow()));
 
+    /// <summary>
+    /// <see cref="Issue"/> for an endpoint that mints a session for whoever calls it, only when the request carries
+    /// <see cref="CsrfHeader"/>: the SPA that knows the cookie sends it on every request, and nothing older does. A client
+    /// that predates the cookie — an earlier SPA bundle, an API client, the CLI — cannot end one: only the API can clear an
+    /// HttpOnly cookie, and that bundle's sign-out empties its own storage and nothing else. Handed one, it would hold a
+    /// 24-hour session it can never sign out of. It keeps the session the body carries, as it always did.
+    /// </summary>
+    public static void IssueIfRequested(HttpContext context, string token, DateTimeOffset expiresAt)
+    {
+        if (CarriesCsrfHeader(context.Request)) Issue(context, token, expiresAt);
+    }
+
     /// <summary>Tells the browser to drop the session cookie. Written with the attributes it was set with, or the browser treats it as a different cookie and keeps the original.</summary>
     public static void Clear(HttpContext context) => context.Response.Cookies.Delete(Name, Options(context, maxAge: null));
 
@@ -55,7 +67,7 @@ public static class SessionCookie
     public static bool Authenticated(HttpContext context) => context.User.Identity?.IsAuthenticated == true && ReadToken(context.Request) != null;
 
     /// <summary>True for a request that would change something on the strength of the cookie alone: any method not known to be safe, without <see cref="CsrfHeader"/>.</summary>
-    public static bool IsUnguardedWrite(HttpRequest request) => !IsSafeMethod(request.Method) && string.IsNullOrWhiteSpace(request.Headers[CsrfHeader]);
+    public static bool IsUnguardedWrite(HttpRequest request) => !IsSafeMethod(request.Method) && !CarriesCsrfHeader(request);
 
     /// <summary>
     /// <c>Secure</c> exactly when the request arrived over HTTPS — the effective scheme, after whatever forwarded-headers
@@ -72,6 +84,9 @@ public static class SessionCookie
         MaxAge = maxAge,
         IsEssential = true,
     };
+
+    /// <summary>A blank header is no header: it proves nothing a form could not have sent, which is what the header is for.</summary>
+    private static bool CarriesCsrfHeader(HttpRequest request) => !string.IsNullOrWhiteSpace(request.Headers[CsrfHeader]);
 
     private static bool IsSafeMethod(string method) => HttpMethods.IsGet(method) || HttpMethods.IsHead(method) || HttpMethods.IsOptions(method) || HttpMethods.IsTrace(method);
 

@@ -21,7 +21,8 @@ public sealed record ListIssuesQuery : IQuery<IReadOnlyList<RemoteIssue>>, IRequ
 
     /// <summary>
     /// The furthest page a caller may name (with <see cref="MaxPerPage"/>, the newest 100,000 issues), as for
-    /// <see cref="ListPullRequestsQuery.MaxPage"/>. A page past it reads this one: no list is paged this deep.
+    /// <see cref="ListPullRequestsQuery.MaxPage"/>. A page past it is an empty page, and the provider is not asked: no
+    /// list is paged this deep.
     /// </summary>
     public const int MaxPage = 1000;
 
