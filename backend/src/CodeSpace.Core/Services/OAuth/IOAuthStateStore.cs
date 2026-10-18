@@ -38,6 +38,7 @@ public sealed record OAuthPendingStateInput
     public required string IntendedDisplayName { get; init; }
     public Guid? IntendedOwnerUserId { get; init; }
     public string? ReturnUrl { get; init; }
+    public Guid? ReplaceCredentialId { get; init; }
     public required string BrowserNonceHash { get; init; }
     public IReadOnlyList<string>? RequestedScopes { get; init; }
     public required TimeSpan Ttl { get; init; }

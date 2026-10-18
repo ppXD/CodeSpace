@@ -12,9 +12,14 @@ namespace CodeSpace.Core.Services.Credentials;
 /// for kind and predicate for predicate, run as one conditional UPDATE per kind. Each predicate is the row's retirement —
 /// deleted, Revoked, or no longer named — so a live secret is never a candidate, and each matches the relaxed guard that
 /// admits the blanking: a revision only once its credential is Revoked, an envelope only while no template names it, a
-/// Secret variable's NULL only once it is deleted. Each retirement is terminal — nothing restores a deleted row, revives a
-/// Revoked one, or names an envelope again — so a row once a candidate stays one; Postgres re-checks a row's own predicate
-/// when a concurrent writer changed it first, and the guards re-check theirs as each row is written.
+/// Secret variable's NULL only once it is deleted. Each retirement is terminal — nothing restores a deleted row or names an
+/// envelope again — so a row once a candidate stays one; Postgres re-checks a row's own predicate when a concurrent writer
+/// changed it first, and the guards re-check theirs as each row is written.
+///
+/// <para>One Revoked row does come back: a git credential its person Disconnected and, not deleted, later re-authorized in
+/// place (<see cref="ICredentialReauthorizer"/>). It was never a candidate while Revoked — a Disconnect blanks the payload,
+/// and only a row still holding one is — and the write that revives it sets it Active in the same statement that gives it
+/// a token, so it is not one afterwards. A deleted credential is never revived.</para>
 ///
 /// <para>What it does not do is what 0249 does not do: a connection an older build deleted keeps its group hooks registered
 /// at the provider — they are Cancelled here with their secrets blanked, refused at ingestion, and removed at the provider

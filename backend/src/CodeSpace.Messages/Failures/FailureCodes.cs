@@ -58,6 +58,12 @@ public static class FailureCodes
     /// <summary>A credential's grant or token was refused by its provider and cannot be used again as it is — an OAuth refresh answered <c>invalid_grant</c>, a static token the provider rejects or has expired. Remedy: reconnect the provider (or add the token again); a retry as-is is refused the same way, so nothing bound through the credential authenticates until then.</summary>
     public const string CredentialNeedsReconnect = "credential_needs_reconnect";
 
+    /// <summary>A credential was asked to take a new authorization in place after it was retired — its person left the team, or its connection was removed — and a retired row stays retired. Remedy: connect again, which creates a new credential; a retry as-is reads the same retired row.</summary>
+    public const string CredentialRetired = "credential_retired";
+
+    /// <summary>A credential was asked to take an authorization that belongs to a different provider account than the one it was connected as. Re-authorizing means the same account signing in again; another account is a new connection. Remedy: sign in as the account the credential is for, or connect the other account separately.</summary>
+    public const string CredentialAccountMismatch = "credential_account_mismatch";
+
     /// <summary>The remote refused the git credential a push carried even after it was resolved again immediately before the push (or the credential was disconnected while the run worked), so the agent's branch was not published. Remedy: reconnect the provider, or re-link the repository to an active credential, then re-run — a retry as-is is refused the same way.</summary>
     public const string GitCredentialRejected = "git_credential_rejected";
 

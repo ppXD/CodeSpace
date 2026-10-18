@@ -33,10 +33,11 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
     private readonly ICredentialSuccessionService _succession;
     private readonly ICredentialRevocationService _revocation;
     private readonly ICredentialHealthService _health;
+    private readonly ICredentialReauthorizer _reauthorizer;
     private readonly ITeamMemberService _members;
     private readonly ILogger<CredentialService> _logger;
 
-    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthGrantRevoker grants, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ICredentialHealthService health, ITeamMemberService members, ILogger<CredentialService> logger)
+    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthGrantRevoker grants, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ICredentialHealthService health, ICredentialReauthorizer reauthorizer, ITeamMemberService members, ILogger<CredentialService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
@@ -50,6 +51,7 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
         _succession = succession;
         _revocation = revocation;
         _health = health;
+        _reauthorizer = reauthorizer;
         _members = members;
         _logger = logger;
     }

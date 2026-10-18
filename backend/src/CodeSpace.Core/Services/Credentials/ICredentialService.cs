@@ -30,5 +30,15 @@ public interface ICredentialService
     /// the provider is asked to revoke anything.
     /// </summary>
     Task<RevokeCredentialResult> RevokeAsync(Guid credentialId, Guid? moveBindingsToCredentialId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Put a new token into the credential, in place: it keeps its id, so everything bound through it keeps working and what
+    /// its dead token had broken comes back. The token is probed first and must be the same provider account's
+    /// (<see cref="ICredentialReauthorizer"/>). Any credential this caller manages, whatever it was before: a token replaces an
+    /// OAuth sign-in as readily as another token, and the row's auth type follows. Tracked changes beyond the row's own write —
+    /// the caller's unit of work saves them.
+    /// </summary>
+    Task<ReplaceCredentialTokenResult> ReplaceTokenAsync(Guid credentialId, string token, CancellationToken cancellationToken);
+
     Task<RemoteRepositoryPage> ListAccessibleRepositoriesAsync(Guid credentialId, string? search, int page, int perPage, CancellationToken cancellationToken);
 }

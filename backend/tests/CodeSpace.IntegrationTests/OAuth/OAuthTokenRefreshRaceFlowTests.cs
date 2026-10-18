@@ -300,7 +300,7 @@ public class OAuthTokenRefreshRaceFlowTests
 
     private async Task TerminateRefreshLockSessionAsync(Guid credentialId)
     {
-        var key = OAuthTokenRefresher.CredentialIdToLockKey(credentialId);
+        var key = CredentialRefreshLock.KeyOf(credentialId);
 
         await using var conn = new NpgsqlConnection(_fixture.ConnectionString);
         await conn.OpenAsync().ConfigureAwait(false);
@@ -326,7 +326,7 @@ public class OAuthTokenRefreshRaceFlowTests
         }
         catch (TimeoutException timeout)
         {
-            throw new TimeoutException($"{signal} within {Patience.TotalSeconds}s — most likely stuck on the in-process refresh semaphore or the Postgres advisory lock (key {OAuthTokenRefresher.CredentialIdToLockKey(credentialId)}) for credential {credentialId}. While the test hangs, inspect `SELECT pid, pg_blocking_pids(pid), wait_event_type, state, query FROM pg_stat_activity WHERE datname = current_database()`.", timeout);
+            throw new TimeoutException($"{signal} within {Patience.TotalSeconds}s — most likely stuck on the in-process refresh semaphore or the Postgres advisory lock (key {CredentialRefreshLock.KeyOf(credentialId)}) for credential {credentialId}. While the test hangs, inspect `SELECT pid, pg_blocking_pids(pid), wait_event_type, state, query FROM pg_stat_activity WHERE datname = current_database()`.", timeout);
         }
     }
 
@@ -484,7 +484,7 @@ public class OAuthTokenRefreshRaceFlowTests
             await connection.OpenAsync().ConfigureAwait(false);
 
             await using var cmd = new NpgsqlCommand("SELECT pg_advisory_lock(@key), pg_backend_pid()", connection);
-            cmd.Parameters.AddWithValue("key", OAuthTokenRefresher.CredentialIdToLockKey(credentialId));
+            cmd.Parameters.AddWithValue("key", CredentialRefreshLock.KeyOf(credentialId));
             await using var reader = await cmd.ExecuteReaderAsync().ConfigureAwait(false);
             await reader.ReadAsync().ConfigureAwait(false);
 

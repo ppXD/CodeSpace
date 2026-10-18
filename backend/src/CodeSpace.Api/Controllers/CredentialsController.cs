@@ -103,6 +103,19 @@ public class CredentialsController : ControllerBase
     }
 
     /// <summary>
+    /// Replace a credential's token in place: the credential keeps its id, so everything bound through it keeps working and
+    /// what its dead token had broken comes back. The new token must be the same provider account's. The token travels in
+    /// the body only. Route's credentialId is authoritative, merged into the command with <c>with</c> so a body that
+    /// disagrees cannot redirect the replacement to another credential.
+    /// </summary>
+    [HttpPut("{credentialId:guid}/token")]
+    public async Task<IActionResult> ReplaceToken([FromRoute] Guid credentialId, [FromBody] ReplaceCredentialTokenCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command with { CredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Move every repository and group hook still bound through a dead credential onto another credential in one action.
     /// Route's fromCredentialId is authoritative; the body carries <c>toCredentialId</c>.
     /// </summary>
