@@ -29,11 +29,32 @@ public interface IOAuthTokenRefresher
 /// Once it asks the provider it no longer honours the caller's cancellation: the provider may
 /// already have consumed the old refresh token, and a rotated pair that is never stored leaves
 /// the row holding a token no later run can refresh with. The HTTP client's timeout bounds it.
+///
+/// From then on the new pair is the credential, and until a write lands it exists only here. So the key ring is
+/// proven able to seal it BEFORE the provider is asked; the store is retried on fresh connections; a pair that still
+/// cannot be stored is kept in this process, logged, and stored by the credential's next use; and a compare-and-swap lost
+/// to a row that is not empty never drops it — the row's pair wins only if it is at least as new.
 /// </summary>
 public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependency
 {
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> RefreshLocks = new();
     private static readonly TimeSpan RefreshBuffer = TimeSpan.FromMinutes(2);
+
+    /// <summary>Waits between the attempts to store a rotated pair: one store and two retries, each on a connection of its own.</summary>
+    private static readonly TimeSpan[] StoreRetryDelays = { TimeSpan.FromMilliseconds(100), TimeSpan.FromMilliseconds(400) };
+
+    /// <summary>How many times a store may find the row changed to an OLDER pair and take it over, before the pair is kept instead.</summary>
+    private const int MaxStoreConflictRounds = 3;
+
+    /// <summary>Plaintext for proving the key ring can seal before the provider is asked to rotate. Never stored, never logged.</summary>
+    private const string SealProbe = "oauth-rotation-seal-probe";
+
+    /// <summary>
+    /// Pairs the provider issued that no attempt could store, by credential: what the row held when the refresh began
+    /// (the compare-and-swap's expected value) and the pair. Only this process knows them; the next use of the credential in
+    /// it stores them. Refreshes of one credential run one at a time per process, under <see cref="RefreshLocks"/>.
+    /// </summary>
+    private static readonly ConcurrentDictionary<Guid, KeptRotation> KeptRotations = new();
 
     private readonly IOAuthClientRegistry _oauthClients;
     private readonly ICredentialPayloadWriter _payloadWriter;
@@ -42,9 +63,10 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
     private readonly IPayloadEncryptor _encryptor;
     private readonly TimeProvider _clock;
     private readonly ICrossProcessLock _crossProcessLock;
+    private readonly ITrackedCredentialEntry _trackedEntry;
     private readonly ILogger<OAuthTokenRefresher> _logger;
 
-    public OAuthTokenRefresher(IOAuthClientRegistry oauthClients, ICredentialPayloadWriter payloadWriter, ICredentialPayloadReader payloadReader, ICredentialResolver credentialResolver, IPayloadEncryptor encryptor, TimeProvider clock, ICrossProcessLock crossProcessLock, ILogger<OAuthTokenRefresher> logger)
+    public OAuthTokenRefresher(IOAuthClientRegistry oauthClients, ICredentialPayloadWriter payloadWriter, ICredentialPayloadReader payloadReader, ICredentialResolver credentialResolver, IPayloadEncryptor encryptor, TimeProvider clock, ICrossProcessLock crossProcessLock, ITrackedCredentialEntry trackedEntry, ILogger<OAuthTokenRefresher> logger)
     {
         _oauthClients = oauthClients;
         _payloadWriter = payloadWriter;
@@ -53,6 +75,7 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
         _encryptor = encryptor;
         _clock = clock;
         _crossProcessLock = crossProcessLock;
+        _trackedEntry = trackedEntry;
         _logger = logger;
     }
 
@@ -82,7 +105,7 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
     /// </summary>
     private async Task<OAuthPayload> RefreshStoredPayloadAsync(ProviderContext context, CancellationToken cancellationToken)
     {
-        var stored = await _payloadReader.ReadEncryptedPayloadAsync(context.Credential.Id, cancellationToken).ConfigureAwait(false);
+        var stored = await ReadStoredAfterKeptPairAsync(context, cancellationToken).ConfigureAwait(false);
         var latest = Adopt(context.Credential, stored);
 
         if (!ShouldRefresh(latest)) return latest;
@@ -102,23 +125,126 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
     }
 
     /// <summary>
+    /// The row as stored now. A pair this process kept for the credential — the provider rotated it and every attempt to
+    /// store it failed — is stored first, or found superseded by a newer one, so what comes back is a row that holds it
+    /// and the refresh decides from that, rather than presenting the refresh token the provider has consumed.
+    /// </summary>
+    private async Task<string> ReadStoredAfterKeptPairAsync(ProviderContext context, CancellationToken cancellationToken)
+    {
+        var stored = await _payloadReader.ReadEncryptedPayloadAsync(context.Credential.Id, cancellationToken).ConfigureAwait(false);
+
+        if (!KeptRotations.TryGetValue(context.Credential.Id, out var kept)) return stored;
+
+        await PersistOrAdoptAsync(context, kept.Expected, kept.Issued).ConfigureAwait(false);
+
+        return await _payloadReader.ReadEncryptedPayloadAsync(context.Credential.Id, CancellationToken.None).ConfigureAwait(false);
+    }
+
+    /// <summary>
     /// Refreshes and stores the new pair only if the row still holds <paramref name="stored"/>. If it does not, the row
-    /// changed while the provider answered: a revocation emptied it — the pair just issued is then revoked at the provider
-    /// rather than written into the revoked row — or, after a lost lock session, the pod that took the lock over stored its
-    /// own. None of it honours the caller's cancellation (see the class summary).
+    /// changed while the provider answered (see <see cref="PersistOrAdoptAsync"/>). None of it honours the caller's
+    /// cancellation (see the class summary).
     /// </summary>
     private async Task<OAuthPayload> RotateAndStoreAsync(ProviderContext context, string stored, OAuthPayload latest)
     {
+        EnsureRotatedPairCanBeSealed();
+
         var refreshed = await ExchangeRefreshAsync(context, latest, CancellationToken.None).ConfigureAwait(false);
 
-        if (await _payloadWriter.UpdatePayloadAsync(context.Credential, stored, refreshed, CancellationToken.None).ConfigureAwait(false)) return refreshed;
-
-        var storedMeanwhile = await _payloadReader.ReadEncryptedPayloadAsync(context.Credential.Id, CancellationToken.None).ConfigureAwait(false);
-
-        if (string.IsNullOrEmpty(storedMeanwhile)) await RevokeIssuedTokensAsync(context, refreshed).ConfigureAwait(false);
-
-        return Adopt(context.Credential, storedMeanwhile);
+        return await PersistOrAdoptAsync(context, stored, refreshed).ConfigureAwait(false);
     }
+
+    /// <summary>
+    /// The writer seals the new pair only after the provider has issued it, so a Data Protection fault there — a key-ring
+    /// store that is down, a key that cannot be created — would lose a pair already issued. Hitting the same fault here
+    /// fails the refresh while the old refresh token is still good.
+    /// </summary>
+    private void EnsureRotatedPairCanBeSealed() => _encryptor.Encrypt(SealProbe);
+
+    /// <summary>
+    /// Stores <paramref name="issued"/> over <paramref name="expected"/>, the payload the refresh began from. When the row no
+    /// longer holds that, nothing the provider issued is ever silently dropped:
+    /// an emptied row is a revocation — the pair is revoked at the provider rather than written into the revoked row; a row
+    /// that holds this very pair, or one at least as new (see <see cref="IsOlderThan"/>), is adopted; a row that holds an
+    /// older one — a stale copy put back — is stored over, since the pair just issued is the one the provider honours.
+    ///
+    /// <para>The pair is kept (see <see cref="KeepForLater"/>) on every other way out: a store nobody answers, a row that
+    /// cannot be read or resolved after the swap was lost, rows that keep changing to older pairs. Whatever fails in between,
+    /// the pair is stored, superseded, revoked, or kept — never just gone.</para>
+    /// </summary>
+    private async Task<OAuthPayload> PersistOrAdoptAsync(ProviderContext context, string expected, OAuthPayload issued)
+    {
+        KeptRotations.TryRemove(context.Credential.Id, out _);
+
+        try
+        {
+            for (var round = 0; round < MaxStoreConflictRounds; round++)
+            {
+                if (await TryStoreAsync(context, expected, issued).ConfigureAwait(false)) return issued;
+
+                expected = await _payloadReader.ReadEncryptedPayloadAsync(context.Credential.Id, CancellationToken.None).ConfigureAwait(false);
+
+                if (string.IsNullOrEmpty(expected)) await RevokeIssuedTokensAsync(context, issued).ConfigureAwait(false);
+
+                var theirs = Adopt(context.Credential, expected);
+
+                if (!IsOlderThan(theirs, issued)) return theirs;
+            }
+        }
+        catch (Exception ex) when (!string.IsNullOrEmpty(expected))
+        {
+            // An emptied row is the revocation above — the pair already ended at the provider, and Adopt reports it. Anything
+            // else leaves a pair that is stored nowhere.
+            KeepForLater(context, expected, issued, ex);
+            throw;
+        }
+
+        return KeepForLater(context, expected, issued);
+    }
+
+    /// <summary>
+    /// One store and two retries, each on a connection of its own and none honouring the caller's cancellation. False when
+    /// the compare-and-swap found the row changed. When no attempt gets an answer the failure surfaces, to
+    /// <see cref="PersistOrAdoptAsync"/>, which keeps the pair for the credential's next use.
+    /// </summary>
+    private async Task<bool> TryStoreAsync(ProviderContext context, string expected, OAuthPayload issued)
+    {
+        for (var attempt = 0; ; attempt++)
+        {
+            try
+            {
+                return await _payloadWriter.UpdatePayloadAsync(context.Credential, expected, issued, CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (attempt < StoreRetryDelays.Length)
+            {
+                _logger.LogWarning(ex, "Storing the rotated pair for credential {CredentialId} failed (attempt {Attempt} of {Attempts}); retrying", context.Credential.Id, attempt + 1, StoreRetryDelays.Length + 1);
+
+                await Task.Delay(StoreRetryDelays[attempt]).ConfigureAwait(false);
+            }
+        }
+    }
+
+    /// <summary>
+    /// The pair is the credential now, held by nothing but this process: say so, and have the credential's next use store it.
+    /// Returned so a caller that has no failure to surface can still hand the caller a live token.
+    /// </summary>
+    private OAuthPayload KeepForLater(ProviderContext context, string expected, OAuthPayload issued, Exception? failure = null)
+    {
+        KeptRotations[context.Credential.Id] = new KeptRotation(expected, issued);
+
+        _logger.LogError(failure, "rotated pair NOT stored for credential {CredentialId}; this process keeps it and stores it on the credential's next use", context.Credential.Id);
+
+        return issued;
+    }
+
+    /// <summary>
+    /// Whether <paramref name="stored"/> is a pair the provider has superseded with <paramref name="issued"/>: a different
+    /// pair that expires earlier. The same pair — a store whose acknowledgement was lost — is not, and nor is one that
+    /// expires at the same moment or later, so a tie keeps what the row holds. Along one grant every refresh expires later
+    /// than the one before; pairs of different grants (a reconnect) are ordered the same way by when they were issued.
+    /// </summary>
+    private static bool IsOlderThan(OAuthPayload stored, OAuthPayload issued) =>
+        (stored.AccessToken != issued.AccessToken || stored.RefreshToken != issued.RefreshToken) && (stored.ExpiresAt ?? DateTimeOffset.MinValue) < (issued.ExpiresAt ?? DateTimeOffset.MinValue);
 
     /// <summary>
     /// Points the caller's entity at the stored payload — as <see cref="ICredentialPayloadWriter"/> does after a refresh —
@@ -131,6 +257,7 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
             throw new InvalidOperationException($"Credential {credential.Id} was revoked; reconnect it to use it again");
 
         credential.EncryptedPayload = storedPayload;
+        _trackedEntry.MarkPayloadStored(credential);
 
         return _credentialResolver.Resolve(credential) as OAuthPayload
             ?? throw new InvalidOperationException($"Credential {credential.Id} is no longer an OAuth payload after lock acquisition");
@@ -206,4 +333,6 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IScopedDependenc
     /// is the same as a 64-bit random key. Same credential id always maps to same key.
     /// </summary>
     internal static long CredentialIdToLockKey(Guid credentialId) => BitConverter.ToInt64(credentialId.ToByteArray(), 0);
+
+    private sealed record KeptRotation(string Expected, OAuthPayload Issued);
 }

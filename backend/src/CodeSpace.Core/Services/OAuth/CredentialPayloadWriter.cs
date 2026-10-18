@@ -13,12 +13,14 @@ public sealed class CredentialPayloadWriter : ICredentialPayloadWriter, IScopedD
     private readonly IPayloadEncryptor _encryptor;
     private readonly ICredentialPayloadSerializer _serializer;
     private readonly CodeSpaceConnectionString _connectionString;
+    private readonly ITrackedCredentialEntry _trackedEntry;
 
-    public CredentialPayloadWriter(IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, CodeSpaceConnectionString connectionString)
+    public CredentialPayloadWriter(IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, CodeSpaceConnectionString connectionString, ITrackedCredentialEntry trackedEntry)
     {
         _encryptor = encryptor;
         _serializer = serializer;
         _connectionString = connectionString;
+        _trackedEntry = trackedEntry;
     }
 
     public async Task<bool> UpdatePayloadAsync(Credential credential, string expectedEncryptedPayload, CredentialPayload newPayload, CancellationToken cancellationToken)
@@ -45,12 +47,14 @@ public sealed class CredentialPayloadWriter : ICredentialPayloadWriter, IScopedD
 
         if (await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false) == 0) return false;
 
-        // Mutate caller's tracked entity so any subsequent read in the same scope reflects
-        // the new token. EF doesn't see this as a change; the row in the DB is already updated.
+        // Mutate the caller's entity so any subsequent read in the same scope reflects the new token. The row is already
+        // updated, but a context that TRACKS the entity would see these as unsaved edits and write them back at its next
+        // SaveChanges — over whatever a later rotation stored — so it is told they are what the database holds.
         credential.EncryptedPayload = encrypted;
         credential.ExpiresDate = expiresDate;
         credential.LastModifiedDate = now;
         credential.LastModifiedBy = SystemUsers.SeederId;
+        _trackedEntry.MarkPayloadStored(credential);
 
         return true;
     }

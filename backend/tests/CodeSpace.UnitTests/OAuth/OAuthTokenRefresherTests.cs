@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -23,7 +24,7 @@ namespace CodeSpace.UnitTests.OAuth;
 /// payload it read — never into a row a revocation emptied meanwhile.</para>
 /// </summary>
 [Trait("Category", "Unit")]
-public class OAuthTokenRefresherTests
+public partial class OAuthTokenRefresherTests
 {
     private static readonly DateTimeOffset Now = new(2030, 1, 1, 12, 0, 0, TimeSpan.Zero);
 
@@ -263,7 +264,7 @@ public class OAuthTokenRefresherTests
         RunAsync(current, ctx, new StoredRow(current), new RecordingOAuthClient(newAccessToken ?? "fresh", newRefreshToken, newExpiresAt));
 
     /// <summary>The caller's entity holds <paramref name="current"/> — what it loaded; <paramref name="row"/> is what the database holds now.</summary>
-    private static async Task<(OAuthPayload Result, int Exchanges, int Persists)> RunAsync(OAuthPayload current, ProviderContext ctx, StoredRow row, RecordingOAuthClient oauthClient, CancellationToken cancellationToken = default)
+    private static async Task<(OAuthPayload Result, int Exchanges, int Persists)> RunAsync(OAuthPayload current, ProviderContext ctx, StoredRow row, RecordingOAuthClient oauthClient, CancellationToken cancellationToken = default, Func<ICredentialPayloadWriter, ICredentialPayloadWriter>? decorateWriter = null, IPayloadEncryptor? encryptor = null, ILogger<OAuthTokenRefresher>? logger = null, ITrackedCredentialEntry? trackedEntry = null, Func<ICredentialPayloadReader, ICredentialPayloadReader>? decorateReader = null)
     {
         ctx.Credential.EncryptedPayload = Serializer.Serialize(current);
 
@@ -271,7 +272,7 @@ public class OAuthTokenRefresherTests
         var writer = new RecordingPayloadWriter(row);
         var resolver = new CredentialResolver(new IdentityEncryptor(), Serializer);
 
-        var refresher = new OAuthTokenRefresher(registry, writer, row, resolver, new IdentityEncryptor(), new FixedClock(Now), new NoopCrossProcessLock(), NullLogger<OAuthTokenRefresher>.Instance);
+        var refresher = new OAuthTokenRefresher(registry, decorateWriter?.Invoke(writer) ?? writer, decorateReader?.Invoke(row) ?? row, resolver, encryptor ?? new IdentityEncryptor(), new FixedClock(Now), new NoopCrossProcessLock(), trackedEntry ?? new NoopTrackedCredentialEntry(), logger ?? NullLogger<OAuthTokenRefresher>.Instance);
 
         var result = await refresher.RefreshIfNeededAsync(ctx, current, cancellationToken);
 
@@ -418,6 +419,11 @@ public class OAuthTokenRefresherTests
     {
         public string Encrypt(string plaintext) => plaintext;
         public string Decrypt(string ciphertext) => ciphertext;
+    }
+
+    private sealed class NoopTrackedCredentialEntry : ITrackedCredentialEntry
+    {
+        public void MarkPayloadStored(Credential credential) { }
     }
 
     private sealed class NoopCrossProcessLock : ICrossProcessLock

@@ -48,6 +48,16 @@ deliberately, rather than extracting a separate `TestInfra` assembly, to keep on
 discovers `[CollectionDefinition]` per test assembly, so E2ETests declares its own `PostgresCollectionE2E` over the
 shared `PostgresFixture` type (`CodeSpace.E2ETests/Infrastructure/PostgresCollectionE2E.cs`).
 
+Provider-credential tests share two more pieces, both in `CodeSpace.IntegrationTests/Infrastructure` (and reused by E2E):
+
+- `GitLabDoorkeeperStub` — a loopback GitLab whose OAuth server is modelled on Doorkeeper: refresh tokens are single use, a
+  refresh revokes the access token it replaces, and the REST and git smart-HTTP endpoints honour only live tokens. Its
+  counters (`Count(StubEvent.Refused)`, …) are how a test says "GitLab was never shown a consumed refresh token".
+  `GitLabDoorkeeperStubTests` pins what it does, so a red test built on it is the product's and not the stub's.
+- `RefreshPodHarness` — pods as real OS processes (`CodeSpace.StorageTestWorker`'s `oauth-refresh-pod` mode) running the
+  production refresher, or the pinned previous build's (`StorageTestWorker/PreviousBuild`), against the fixture's Postgres.
+  One process shares one refresh semaphore, so only separate processes exercise the cross-pod advisory lock.
+
 ## Adding a new test
 
 1. Does it need **no** out-of-process dependency? → `UnitTests`, `[Trait("Category", "Unit")]`.
