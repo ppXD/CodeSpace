@@ -4,6 +4,7 @@ using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Settings.Database;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
+using CodeSpace.Messages.Enums;
 using Npgsql;
 
 namespace CodeSpace.Core.Services.OAuth;
@@ -37,7 +38,9 @@ public sealed class CredentialPayloadWriter : ICredentialPayloadWriter, IScopedD
         await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
 
         await using var cmd = conn.CreateCommand();
-        cmd.CommandText = "UPDATE credential SET encrypted_payload = @enc, expires_date = @exp, last_modified_date = @now, last_modified_by = @user WHERE id = @id AND encrypted_payload = @expected";
+        // A pair the provider just issued for this row is proof the provider accepts the grant, so an Error that recorded its refusal
+        // is cleared with it (the status and the text it carried are read from the row, not assumed, hence the CASE).
+        cmd.CommandText = "UPDATE credential SET encrypted_payload = @enc, expires_date = @exp, last_modified_date = @now, last_modified_by = @user, status = CASE WHEN status = 'Error' THEN 'Active' ELSE status END, last_error = CASE WHEN status = 'Error' THEN NULL ELSE last_error END WHERE id = @id AND encrypted_payload = @expected";
         cmd.Parameters.AddWithValue("@enc", encrypted);
         cmd.Parameters.AddWithValue("@exp", (object?)expiresDate ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@now", now);
@@ -54,6 +57,13 @@ public sealed class CredentialPayloadWriter : ICredentialPayloadWriter, IScopedD
         credential.ExpiresDate = expiresDate;
         credential.LastModifiedDate = now;
         credential.LastModifiedBy = SystemUsers.SeederId;
+
+        if (credential.Status == CredentialStatus.Error)
+        {
+            credential.Status = CredentialStatus.Active;
+            credential.LastError = null;
+        }
+
         _trackedEntry.MarkPayloadStored(credential);
 
         return true;

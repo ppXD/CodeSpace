@@ -24,6 +24,8 @@ public class WorkflowRunRequestRejectionReasonsTests
     [InlineData("delivery_id_missing", nameof(WorkflowRunRequestRejectionReasons.DeliveryIdMissing))]
     [InlineData("delivery_replayed", nameof(WorkflowRunRequestRejectionReasons.DeliveryReplayed))]
     [InlineData("author_not_member", nameof(WorkflowRunRequestRejectionReasons.AuthorNotMember))]
+    [InlineData("author_standing_unknown", nameof(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown))]
+    [InlineData("credential_rejected", nameof(WorkflowRunRequestRejectionReasons.CredentialRejected))]
     [InlineData("pull_request_debounced", nameof(WorkflowRunRequestRejectionReasons.PullRequestDebounced))]
     public void Rejection_reason_string_form_is_pinned(string expected, string constantName)
     {

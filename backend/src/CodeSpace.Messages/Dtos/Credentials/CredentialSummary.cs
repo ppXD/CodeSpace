@@ -28,4 +28,10 @@ public sealed record CredentialSummary
     public DateTimeOffset? LastValidatedDate { get; init; }
     public string? LastError { get; init; }
     public required DateTimeOffset CreatedDate { get; init; }
+
+    /// <summary>What to read off the credential — derived from its status, a static token's expiry and its owner's standing; see <see cref="CredentialHealth"/>.</summary>
+    public CredentialHealth Health { get; init; } = CredentialHealth.Active;
+
+    /// <summary>Whole days until a static token expires at its provider; null for an OAuth credential (its access token renews itself) and for a token with no recorded expiry.</summary>
+    public int? DaysToExpiry { get; init; }
 }

@@ -311,7 +311,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemotePullRequest> OpenPullRequestAsync(ProviderContext context, RemoteRepository repository, OpenPullRequestInput input, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, _, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
 
         // GitLab marks a draft via a "Draft:" title prefix (the modern replacement for work_in_progress);
@@ -328,7 +328,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         {
             // A freshly-opened MR carries no labels, so no project-label-colour lookup is needed.
             return await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(OpenPullRequestAsync),
-                _ => Task.FromResult(ToRemotePullRequestDetail(client.GetMergeRequest(projectId).Create(create), EmptyLabelColors)),
+                ResentOnceIfRefused(credential, _ => Task.FromResult(ToRemotePullRequestDetail(client.GetMergeRequest(projectId).Create(create), EmptyLabelColors))),
                 _ => Task.FromResult(FindOpenedMergeRequest(client, projectId, input)),
                 cancellationToken).ConfigureAwait(false);
         }
@@ -365,7 +365,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemotePullRequestMergeResult> MergePullRequestAsync(ProviderContext context, RemoteRepository repository, int number, MergePullRequestInput input, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, _, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var mergeRequests = client.GetMergeRequest(int.Parse(repository.ExternalId));
 
         // GitLab's Accept covers merge + squash + remove-source-branch in one call. Rebase-merge isn't a
@@ -382,7 +382,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         // A merge is one-way: re-sent after it landed, GitLab answers 405 and fails a merge that succeeded. So a
         // retry first re-reads the merge request and takes an existing merge as the answer.
         var accepted = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(MergePullRequestAsync),
-            _ => Task.FromResult(mergeRequests.Accept(number, merge)),
+            ResentOnceIfRefused(credential, _ => Task.FromResult(mergeRequests.Accept(number, merge))),
             ct => FindMergedAsync(mergeRequests, number, ct),
             cancellationToken).ConfigureAwait(false);
 
@@ -492,7 +492,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemoteIssue> CreateIssueAsync(ProviderContext context, RemoteRepository repository, CreateIssueInput input, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, _, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
         var marker = IdempotencyMarker.New();
 
@@ -507,7 +507,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         };
 
         var issue = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(CreateIssueAsync),
-            _ => Task.FromResult(client.Issues.Create(create)),
+            ResentOnceIfRefused(credential, _ => Task.FromResult(client.Issues.Create(create))),
             _ => Task.FromResult(FindMarkedIssue(client, projectId, marker)),
             cancellationToken).ConfigureAwait(false);
 
@@ -622,14 +622,14 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemoteIssueComment> CommentIssueAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, _, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var marker = IdempotencyMarker.New();
 
         // GitLab issue comments are "notes" on a separate client; IssueId here is the iid (the `number`).
         var notes = client.GetProjectIssueNoteClient(int.Parse(repository.ExternalId));
 
         var note = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(CommentIssueAsync),
-            _ => Task.FromResult(notes.Create(new ProjectIssueNoteCreate { IssueId = number, Body = IdempotencyMarker.Append(body, marker) })),
+            ResentOnceIfRefused(credential, _ => Task.FromResult(notes.Create(new ProjectIssueNoteCreate { IssueId = number, Body = IdempotencyMarker.Append(body, marker) }))),
             _ => Task.FromResult(notes.ForIssue(number).FirstOrDefault(n => IdempotencyMarker.IsIn(n.Body, marker))),
             cancellationToken).ConfigureAwait(false);
 
@@ -645,9 +645,9 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemoteIssue> CloseIssueAsync(ProviderContext context, RemoteRepository repository, int number, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, _, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
 
-        return await _resilience.ExecuteAsync(context.Instance, nameof(CloseIssueAsync), _ =>
+        return await _resilience.ExecuteAsync(context.Instance, nameof(CloseIssueAsync), ResentOnceIfRefused(credential, _ =>
         {
             var projectId = int.Parse(repository.ExternalId);
 
@@ -661,7 +661,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             });
 
             return Task.FromResult(ToRemoteIssue(closed));
-        }, cancellationToken).ConfigureAwait(false);
+        }), cancellationToken).ConfigureAwait(false);
     }
 
     private static readonly IReadOnlyDictionary<string, string?> EmptyLabelColors = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
@@ -920,7 +920,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemotePullRequestComment> PostCommentAsync(ProviderContext context, RemoteRepository repository, int number, string body, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, _, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var marker = IdempotencyMarker.New();
 
         // NGitLab v11: IMergeRequestClient.Comments(iid) returns IMergeRequestCommentClient.
@@ -929,7 +929,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         var commentsClient = client.GetMergeRequest(int.Parse(repository.ExternalId)).Comments(number);
 
         var comment = await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(PostCommentAsync),
-            _ => Task.FromResult(commentsClient.Add(new NGitLab.Models.MergeRequestCommentCreate { Body = IdempotencyMarker.Append(body, marker) })),
+            ResentOnceIfRefused(credential, _ => Task.FromResult(commentsClient.Add(new NGitLab.Models.MergeRequestCommentCreate { Body = IdempotencyMarker.Append(body, marker) }))),
             _ => Task.FromResult(commentsClient.All.FirstOrDefault(c => IdempotencyMarker.IsIn(c.Body, marker))),
             cancellationToken).ConfigureAwait(false);
 
@@ -1135,41 +1135,116 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     {
         try
         {
-            var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+            var identity = await ReadIdentityAsync(context, cancellationToken).ConfigureAwait(false);
 
-            var identity = await _resilience.ExecuteAsync(context.Instance, nameof(ProbeCredentialAsync), _ =>
-            {
-                var current = client.Users.Current;
-                return Task.FromResult((Id: current.Id.ToString(), Name: current.Username));
-            }, cancellationToken).ConfigureAwait(false);
-
-            var scopes = await TryFetchTokenScopesAsync(context, cancellationToken).ConfigureAwait(false);
+            var self = await TryReadTokenSelfAsync(context, cancellationToken).ConfigureAwait(false);
 
             return new CredentialProbeResult
             {
-                IsValid = true,
+                IsValid = self?.Active != false,
+                IsRejected = self?.Active == false,
+                Error = self?.Active == false ? "GitLab reports the token is no longer active (revoked or expired)" : null,
                 AuthenticatedUserExternalId = identity.Id,
                 AuthenticatedUserName = identity.Name,
-                GrantedScopes = scopes
+                GrantedScopes = self?.Scopes,
+                ExpiresAt = self?.ExpiresAt,
+                Active = self?.Active
             };
         }
         catch (Exception ex)
         {
-            return new CredentialProbeResult { IsValid = false, Error = ex.Message };
+            return CredentialProbeResult.FromFailure(ex);
         }
     }
 
     /// <summary>
-    /// Reads the token's OWN granted scopes via <c>GET /api/v4/personal_access_tokens/self</c> so
-    /// capability warnings reflect the real PAT (GitLab returns the exact scope list the user ticked).
-    /// Best-effort: the endpoint is PAT-only, so OAuth / group / impersonation tokens get 401/403 — any
-    /// non-success or failure returns null, which the capability check reads as "scopes unknown" (no
-    /// false warnings) rather than "no scopes". Mirrors the raw-HTTP pattern used by CountViaXTotalAsync.
+    /// Who the token is, from <c>GET /api/v4/user</c> — asked over the raw client rather than NGitLab's <c>Users.Current</c>,
+    /// which is synchronous: it ignores the caller's token, blocks its thread for the HTTP client's five minutes and, being
+    /// a connection that never answered, is retried twice more, so a probe's deadline could not stop it. A 401 to an OAuth
+    /// credential is answered as every raw call answers it (<see cref="GitLabHttp.SendAsync(HttpRequestMessage, GitLabCredential, CancellationToken)"/>).
+    /// A refusal is raised here, outside the resilience layer, already classified — as <see cref="GetMemberStandingAsync"/> raises
+    /// its own — so the layer does not wrap it again or ask a 4xx twice; only a 5xx is thrown inside it, to be asked again.
     /// </summary>
-    private async Task<IReadOnlyList<string>?> TryFetchTokenScopesAsync(ProviderContext context, CancellationToken cancellationToken)
+    private async Task<(string Id, string Name)> ReadIdentityAsync(ProviderContext context, CancellationToken cancellationToken)
     {
         var (host, credential) = await ResolveCredentialAsync(context, cancellationToken).ConfigureAwait(false);
+        var url = $"{host.TrimEnd('/')}/api/v4/user";
+
+        var answer = await _resilience.ExecuteAsync(context.Instance, nameof(ProbeCredentialAsync), async ct => await AskIdentityAsync(url, credential, ct).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
+
+        return answer.Refusal is { } refusal ? throw refusal : ParseIdentity(answer.Body!);
+    }
+
+    private static async Task<IdentityAnswer> AskIdentityAsync(string url, GitLabCredential credential, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Get, url);
+        using var response = await GitLabHttp.SendAsync(request, credential, cancellationToken).ConfigureAwait(false);
+
+        if ((int)response.StatusCode >= 500) throw new HttpRequestException(StatusLine(response), null, response.StatusCode);
+
+        if (response.IsSuccessStatusCode) return new IdentityAnswer(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false), null);
+
+        return new IdentityAnswer(null, await IdentityRefusalAsync(response, credential, cancellationToken).ConfigureAwait(false));
+    }
+
+    /// <summary>
+    /// GitLab's refusal of the identity call: a 403 tagged <c>insufficient_scope</c> is the scope gap it names (the body is
+    /// read for that tag, with the token struck from it), any other answer is its status and reason phrase — never its body,
+    /// which an error page can fill with what it was sent.
+    /// </summary>
+    private static async Task<Exception> IdentityRefusalAsync(HttpResponseMessage response, GitLabCredential credential, CancellationToken cancellationToken)
+    {
+        var status = (int)response.StatusCode;
+        var refused = new ProviderApiException(ProviderKind.GitLab, status, nameof(ProbeCredentialAsync), StatusLine(response), new HttpRequestException(StatusLine(response), null, response.StatusCode));
+
+        if (status != 403) return refused;
+
+        var body = CredentialNeedles.Strike(await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false), [credential.Token]);
+
+        return (Exception?)_unapproveScopeClassifier.ClassifyScope(status, body, body, nameof(ProbeCredentialAsync)) ?? refused;
+    }
+
+    private static string StatusLine(HttpResponseMessage response) => $"{(int)response.StatusCode} {response.ReasonPhrase}".TrimEnd();
+
+    /// <summary>What the identity call came back with: the user's body, or the refusal to raise.</summary>
+    private sealed record IdentityAnswer(string? Body, Exception? Refusal);
+
+    /// <summary>The user's id and username from the <c>/user</c> body; anything else is not a GitLab user and fails the probe without saying anything about the token.</summary>
+    internal static (string Id, string Name) ParseIdentity(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.ValueKind == JsonValueKind.Object && root.TryGetProperty("id", out var id) && id.TryGetInt64(out var userId) && root.TryGetProperty("username", out var name) && name.ValueKind == JsonValueKind.String)
+                return (userId.ToString(System.Globalization.CultureInfo.InvariantCulture), name.GetString()!);
+        }
+        catch (JsonException)
+        {
+            // Not JSON: the same answer as JSON that is not a user.
+        }
+
+        throw new InvalidOperationException("GitLab answered GET /user with something that is not a user");
+    }
+
+    /// <summary>
+    /// Reads the token's OWN record via <c>GET /api/v4/personal_access_tokens/self</c>: the scopes it was granted, so
+    /// capability warnings reflect the real PAT (GitLab returns the exact scope list the user ticked), and when it expires
+    /// and whether it is still live, which nothing else tells CodeSpace — GitLab gives every new personal, project and
+    /// group token an expiry, and a token that reaches it answers 401 to everything. Best-effort: the endpoint is
+    /// token-only, so OAuth / impersonation tokens get 401/403 — any non-success or failure returns null, which reads as
+    /// "unknown" (no false warnings, no false expiry) rather than "no scopes". Mirrors the raw-HTTP pattern used by
+    /// CountViaXTotalAsync.
+    /// </summary>
+    private async Task<GitLabTokenSelf?> TryReadTokenSelfAsync(ProviderContext context, CancellationToken cancellationToken)
+    {
+        var (host, resolved) = await ResolveCredentialAsync(context, cancellationToken).ConfigureAwait(false);
         var url = $"{host.TrimEnd('/')}/api/v4/personal_access_tokens/self";
+
+        // Without the way to ask for a replacement: an OAuth token is answered 401 here by design, and that 401 says nothing
+        // about the token — asking would rotate a working pair every time the credential is probed.
+        var credential = new GitLabCredential(resolved.Token, resolved.Type);
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
 
@@ -1179,12 +1254,53 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             if (!response.IsSuccessStatusCode) return null;
 
             var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-            return ParseTokenScopes(json);
+            return ParseTokenSelf(json);
         }
         catch
         {
             return null;
         }
+    }
+
+    /// <summary>What <c>personal_access_tokens/self</c> says about a token. Each part is null when the body does not say it.</summary>
+    internal sealed record GitLabTokenSelf(IReadOnlyList<string>? Scopes, DateTimeOffset? ExpiresAt, bool? Active);
+
+    /// <summary>
+    /// Pure parse of the <c>personal_access_tokens/self</c> body: the scopes (<see cref="ParseTokenScopes"/>), <c>expires_at</c>
+    /// — a date, which GitLab takes as midnight UTC at its start, or a timestamp — and whether the token is live: <c>active</c>,
+    /// and never when <c>revoked</c> is true. Null (not a default) for whatever is absent or malformed, so a caller never
+    /// reads "does not say" as "never expires" or "not active".
+    /// </summary>
+    internal static GitLabTokenSelf ParseTokenSelf(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            var root = doc.RootElement;
+
+            if (root.ValueKind != JsonValueKind.Object) return new GitLabTokenSelf(null, null, null);
+
+            return new GitLabTokenSelf(ParseTokenScopes(json), ReadExpiry(root), ReadActive(root));
+        }
+        catch (JsonException)
+        {
+            return new GitLabTokenSelf(null, null, null);
+        }
+    }
+
+    private static DateTimeOffset? ReadExpiry(JsonElement root)
+    {
+        if (!root.TryGetProperty("expires_at", out var value) || value.ValueKind != JsonValueKind.String) return null;
+
+        return DateTimeOffset.TryParse(value.GetString(), System.Globalization.CultureInfo.InvariantCulture, System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal, out var at) ? at : null;
+    }
+
+    private static bool? ReadActive(JsonElement root)
+    {
+        if (root.TryGetProperty("revoked", out var revoked) && revoked.ValueKind == JsonValueKind.True) return false;
+        if (root.TryGetProperty("active", out var active) && active.ValueKind is JsonValueKind.True or JsonValueKind.False) return active.GetBoolean();
+
+        return null;
     }
 
     /// <summary>
@@ -1476,14 +1592,14 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task DeleteWebhookAsync(ProviderContext context, RemoteRepository repository, string externalWebhookId, CancellationToken cancellationToken)
     {
-        var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, _, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
 
-        await _resilience.ExecuteAsync(context.Instance, nameof(DeleteWebhookAsync), _ =>
+        await _resilience.ExecuteAsync(context.Instance, nameof(DeleteWebhookAsync), ResentOnceIfRefused(credential, _ =>
         {
             var projectId = int.Parse(repository.ExternalId);
             client.GetRepository(projectId).ProjectHooks.Delete(int.Parse(externalWebhookId));
             return Task.CompletedTask;
-        }, cancellationToken).ConfigureAwait(false);
+        }), cancellationToken).ConfigureAwait(false);
     }
 
     public bool VerifySignature(string body, IReadOnlyDictionary<string, string> headers, string secret) => _signatureVerifier.Verify(body, headers, secret);
@@ -1850,8 +1966,16 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
         var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
 
-        return (host, new GitLabCredential(auth.Token, context.Credential.AuthType));
+        return (host, new GitLabCredential(auth.Token, context.Credential.AuthType, RecoveryFor(context)));
     }
+
+    /// <summary>
+    /// How a call answered 401 asks for another token: through the resolver, which adopts the one a newer refresh stored or
+    /// rotates. Only an OAuth credential has one — a personal, project or group access token is the same token whenever it is
+    /// asked for, so its 401 is its answer.
+    /// </summary>
+    private Func<string, CancellationToken, Task<string?>>? RecoveryFor(ProviderContext context) =>
+        context.Credential.AuthType != AuthType.OAuth ? null : async (rejected, cancellationToken) => (await _authResolver.InvalidateAsync(context, rejected, cancellationToken).ConfigureAwait(false))?.Token;
 
     private static RemoteRepository ToRemoteRepository(Project project) => new()
     {

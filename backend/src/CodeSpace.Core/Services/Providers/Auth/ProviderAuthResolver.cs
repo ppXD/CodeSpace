@@ -23,4 +23,17 @@ public sealed class ProviderAuthResolver : IProviderAuthResolver, IScopedDepende
 
         return auth;
     }
+
+    public async Task<ResolvedAuth?> InvalidateAsync(ProviderContext context, string rejectedToken, CancellationToken cancellationToken)
+    {
+        var key = (context.Instance.Provider, context.Credential.AuthType);
+
+        if (!_strategies.TryGetValue(key, out var strategy) || strategy is not IRecoverableProviderAuthStrategy recoverable) return null;
+
+        var auth = await recoverable.InvalidateAsync(context, rejectedToken, cancellationToken).ConfigureAwait(false);
+
+        if (auth is not null) PresentedProviderCredentials.Remember(context.Instance, auth.Token);
+
+        return auth;
+    }
 }

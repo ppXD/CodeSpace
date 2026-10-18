@@ -26,7 +26,13 @@ public enum StubEvent
     /// <summary>A git smart-HTTP request was challenged: no credentials, a dead token, or an OAuth token under a login other than <c>oauth2</c>.</summary>
     Git401,
     /// <summary>A request the stub has no route for.</summary>
-    Unrouted
+    Unrouted,
+    /// <summary>A REST call carried a personal, project or group access token (<c>PRIVATE-TOKEN</c>) that is live.</summary>
+    TokenApi200,
+    /// <summary>A REST call carried an access token that is unknown, revoked or past its expiry — GitLab's 401 for a token that stopped working.</summary>
+    TokenApi401,
+    /// <summary>The members lookup was answered with a scripted failure (<see cref="GitLabDoorkeeperStub.FailMembers"/>) instead of the author's role.</summary>
+    MembersFailed
 }
 
 /// <summary>
@@ -39,6 +45,12 @@ public enum StubEvent
 /// was revoked, is <c>invalid_grant</c>. GitLab revokes no wider family on that (gitlab-org/gitlab#364111), so the
 /// pair a winner was issued survives a loser's refusal. A client whose id or secret does not match the issuing
 /// application is refused with <c>invalid_client</c> or <c>invalid_grant</c>.</para>
+///
+/// <para><b>Access tokens.</b> A personal, project or group access token is not part of an OAuth grant: it is added with
+/// <see cref="AddAccessToken"/>, travels as <c>PRIVATE-TOKEN</c> on REST (GitLab resolves that header as exactly that, whatever
+/// the token's length), answers 401 once it is revoked (<see cref="RevokeAccessToken"/>) or past the expiry it was given, and
+/// describes itself — scopes, <c>expires_at</c> as a date, <c>active</c> — at <c>GET /api/v4/personal_access_tokens/self</c>,
+/// which an OAuth token cannot call (404).</para>
 ///
 /// <para><b>Endpoints.</b> <c>POST /oauth/token</c> (<c>refresh_token</c> and <c>authorization_code</c> grants; the code
 /// <c>authz:&lt;user&gt;</c> issues <c>&lt;user&gt;</c> a first pair), <c>POST /oauth/revoke</c> (RFC 7009: 200 whatever
@@ -71,7 +83,10 @@ public sealed class GitLabDoorkeeperStub : IDisposable
     private readonly List<TokenRow> _rows = new();
     private readonly List<StubLogEntry> _log = new();
     private readonly Dictionary<string, string> _applications = new() { [DefaultClientId] = DefaultClientSecret };
+    private readonly Dictionary<string, AccessToken> _accessTokens = new();
     private int _sequence;
+    private int _membersFailureStatus;
+    private int _membersFailuresLeft;
 
     public GitLabDoorkeeperStub()
     {
@@ -110,6 +125,31 @@ public sealed class GitLabDoorkeeperStub : IDisposable
     public void AddApplication(string clientId, string clientSecret)
     {
         lock (_gate) { _applications[clientId] = clientSecret; }
+    }
+
+    /// <summary>
+    /// A personal, project or group access token, live from now until <paramref name="expiresAt"/> (never, when null) or
+    /// until <see cref="RevokeAccessToken"/>. <paramref name="user"/> is who it speaks for.
+    /// </summary>
+    public void AddAccessToken(string token, string user, DateTimeOffset? expiresAt = null)
+    {
+        lock (_gate) { _accessTokens[token] = new AccessToken(user, expiresAt); }
+    }
+
+    /// <summary>GitLab refuses the token from now on, as it does one an owner revoked.</summary>
+    public void RevokeAccessToken(string token)
+    {
+        lock (_gate) { _accessTokens[token].Revoked = true; }
+    }
+
+    /// <summary>The next <paramref name="times"/> members lookups (all of them when omitted) are answered with <paramref name="status"/> instead of the author's role: a 403 for a token without the scope to read members, a 429, a 5xx.</summary>
+    public void FailMembers(int status, int times = int.MaxValue)
+    {
+        lock (_gate)
+        {
+            _membersFailureStatus = status;
+            _membersFailuresLeft = times;
+        }
     }
 
     /// <summary>A pair issued before the test began: what the credential row held when the story starts.</summary>
@@ -190,7 +230,7 @@ public sealed class GitLabDoorkeeperStub : IDisposable
 
         if (request.HttpMethod == "POST" && path == "/oauth/token") return Token(HttpUtility.ParseQueryString(body));
         if (request.HttpMethod == "POST" && path == "/oauth/revoke") return Revoke(HttpUtility.ParseQueryString(body));
-        if (request.HttpMethod == "GET" && path.StartsWith("/api/v4/", StringComparison.Ordinal)) return Api(request.Headers["Authorization"], path);
+        if (request.HttpMethod == "GET" && path.StartsWith("/api/v4/", StringComparison.Ordinal)) return IsKnownAccessToken(request.Headers["Authorization"], request.Headers["PRIVATE-TOKEN"]) ? TokenApi(request.Headers["PRIVATE-TOKEN"]!, path) : Api(request.Headers["Authorization"], path);
         if (request.HttpMethod == "GET" && path.EndsWith("/info/refs", StringComparison.Ordinal)) return GitAdvertisement(request.Headers["Authorization"], HttpUtility.ParseQueryString(request.Url.Query)["service"]);
 
         Note(StubEvent.Unrouted, $"{request.HttpMethod} {request.Url.PathAndQuery}", null);
@@ -282,18 +322,60 @@ public sealed class GitLabDoorkeeperStub : IDisposable
         lock (_gate)
         {
             var row = FindLiveByAccessToken(BearerOf(authorization));
+            var scripted = row == null ? null : ScriptedMembersFailure(path);
 
-            Note(row == null ? StubEvent.Api401 : StubEvent.Api200, $"{path} Authorization={Describe(authorization)}", BearerOf(authorization));
+            if (scripted == null) Note(row == null ? StubEvent.Api401 : StubEvent.Api200, $"{path} Authorization={Describe(authorization)}", BearerOf(authorization));
 
             if (row == null) return Reply.Json(401, UnauthorizedBody) with { Headers = new Dictionary<string, string> { ["WWW-Authenticate"] = "Bearer realm=\"Protected by OAuth 2.0\", error=\"invalid_token\"" } };
 
-            return Reply.Json(200, ApiBody(row, path));
+            if (path == "/api/v4/personal_access_tokens/self") return Reply.Json(404, """{"message":"404 Not Found"}""");
+
+            return scripted ?? Reply.Json(200, ApiBody(row.User, path));
         }
     }
 
-    private string ApiBody(TokenRow row, string path)
+    /// <summary>A request by an access token this stub was given: its <c>PRIVATE-TOKEN</c>, with no Bearer (a Bearer is read as OAuth, as before). An unknown <c>PRIVATE-TOKEN</c> is an OAuth lookup that fails.</summary>
+    private bool IsKnownAccessToken(string? authorization, string? privateToken)
     {
-        if (path == "/api/v4/user") return JsonSerializer.Serialize(new { id = 1, username = row.User });
+        lock (_gate) { return authorization == null && privateToken != null && _accessTokens.ContainsKey(privateToken); }
+    }
+
+    /// <summary>A REST call by a personal, project or group access token — <c>PRIVATE-TOKEN</c>. Runs under the stub's lock.</summary>
+    private Reply TokenApi(string privateToken, string path)
+    {
+        lock (_gate)
+        {
+            var token = _accessTokens.GetValueOrDefault(privateToken);
+            var live = token != null && !token.Revoked && (token.ExpiresAt == null || token.ExpiresAt > DateTimeOffset.UtcNow);
+
+            var scripted = live ? ScriptedMembersFailure(path) : null;
+
+            if (scripted == null) Note(live ? StubEvent.TokenApi200 : StubEvent.TokenApi401, $"{path} PRIVATE-TOKEN", privateToken);
+
+            if (!live) return Reply.Json(401, UnauthorizedBody);
+            if (path == "/api/v4/personal_access_tokens/self") return Reply.Json(200, SelfBody(token!));
+
+            return scripted ?? Reply.Json(200, ApiBody(token!.User, path));
+        }
+    }
+
+    private static string SelfBody(AccessToken token) =>
+        JsonSerializer.Serialize(new { id = 1, name = "stub", scopes = new[] { "api" }, active = true, revoked = false, expires_at = token.ExpiresAt?.UtcDateTime.ToString("yyyy-MM-dd") });
+
+    /// <summary>The members lookup's scripted failure, while any are left (<see cref="FailMembers"/>).</summary>
+    private Reply? ScriptedMembersFailure(string path)
+    {
+        if (!path.Contains("/members/all/", StringComparison.Ordinal) || _membersFailuresLeft <= 0) return null;
+
+        _membersFailuresLeft--;
+        Note(StubEvent.MembersFailed, $"{path} answered {_membersFailureStatus}", null);
+
+        return Reply.Json(_membersFailureStatus, """{"message":"scripted failure"}""");
+    }
+
+    private string ApiBody(string user, string path)
+    {
+        if (path == "/api/v4/user") return JsonSerializer.Serialize(new { id = 1, username = user });
 
         var member = path.IndexOf("/members/all/", StringComparison.Ordinal);
 
@@ -417,6 +499,19 @@ public sealed class GitLabDoorkeeperStub : IDisposable
                 listener.Close();
             }
         }
+    }
+
+    private sealed class AccessToken
+    {
+        public AccessToken(string user, DateTimeOffset? expiresAt)
+        {
+            User = user;
+            ExpiresAt = expiresAt;
+        }
+
+        public string User { get; }
+        public DateTimeOffset? ExpiresAt { get; }
+        public bool Revoked { get; set; }
     }
 
     /// <summary>One token row, as Doorkeeper keeps it: the access token and its refresh token together.</summary>

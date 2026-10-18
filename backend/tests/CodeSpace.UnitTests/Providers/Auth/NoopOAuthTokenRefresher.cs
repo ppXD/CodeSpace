@@ -9,8 +9,13 @@ namespace CodeSpace.UnitTests.Providers.Auth;
 /// OAuthPayload has an ExpiresAt far in the future (no refresh expected) or null
 /// (refresh impossible) — i.e. when the refresh path is not the subject of the test.
 /// </summary>
-internal sealed class NoopOAuthTokenRefresher : IOAuthTokenRefresher
+internal sealed class NoopOAuthTokenRefresher : IOAuthTokenRefresher, IOAuthTokenRecovery
 {
     public Task<OAuthPayload> RefreshIfNeededAsync(ProviderContext context, OAuthPayload current, CancellationToken cancellationToken)
         => Task.FromResult(current);
+
+    public Task<OAuthPayload?> RecoverAfterRejectionAsync(ProviderContext context, string rejectedAccessToken, CancellationToken cancellationToken)
+        => Task.FromResult<OAuthPayload?>(null);
+
+    public Task StoreKeptPairAsync(ProviderContext context, CancellationToken cancellationToken) => Task.CompletedTask;
 }

@@ -1,3 +1,4 @@
+using System.Net;
 using CodeSpace.Core.Services.OutboundHttp;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -12,6 +13,12 @@ namespace CodeSpace.Core.Services.Providers.GitLab;
 /// with that credential attached again. A redirect to another origin — http to https, a host alias, another port — is not
 /// followed, so nothing is sent there, and fails with <see cref="ProviderBaseUrlRedirectsException"/> naming where GitLab
 /// pointed. The raw calls' client had followed every redirect itself, keeping a <c>PRIVATE-TOKEN</c> across it.
+///
+/// <para>A 401 to an OAuth credential is sent once more with the credential <see cref="GitLabCredential.RecoverAsync"/>
+/// returns (a newer token another caller stored, or a rotation), by both request paths: GitLab retires an access token the
+/// moment its pair is refreshed, however much of its lifetime is left, so a token read from the row an instant ago can be
+/// refused. A request that carries a body is sent again too, by the raw path, which holds its body; a 401 happens before
+/// GitLab acts on a request, so repeating it repeats nothing.</para>
 /// </summary>
 internal static class GitLabHttp
 {
@@ -33,9 +40,25 @@ internal static class GitLabHttp
     /// <summary>
     /// <paramref name="request"/> sent with <paramref name="credential"/>. A redirect that was not followed throws
     /// <see cref="ProviderBaseUrlRedirectsException"/> instead of coming back as a 3xx the caller would read as some other
-    /// failure, so no call site has to know about redirects.
+    /// failure, so no call site has to know about redirects. A 401 to a credential that can be replaced
+    /// (<see cref="GitLabCredential.RecoverAsync"/>) is answered by sending the request once more with the replacement; the
+    /// second answer, whatever it is, is the answer.
     /// </summary>
     public static async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, GitLabCredential credential, HttpCompletionOption completion, CancellationToken cancellationToken)
+    {
+        var replay = await CopyForReplayAsync(request, credential, cancellationToken).ConfigureAwait(false);
+        var presented = credential.Token;
+        var response = await SendOnceAsync(request, credential, completion, cancellationToken).ConfigureAwait(false);
+
+        if (replay is null || response.StatusCode != HttpStatusCode.Unauthorized) return response;
+        if (!await credential.RecoverAsync(presented, cancellationToken).ConfigureAwait(false)) return response;
+
+        response.Dispose();
+
+        return await SendOnceAsync(replay, credential, completion, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<HttpResponseMessage> SendOnceAsync(HttpRequestMessage request, GitLabCredential credential, HttpCompletionOption completion, CancellationToken cancellationToken)
     {
         var requested = request.RequestUri!;
 
@@ -50,6 +73,30 @@ internal static class GitLabHttp
         response.Dispose();
 
         throw new ProviderBaseUrlRedirectsException(ProviderKind.GitLab, requested, target);
+    }
+
+    /// <summary>
+    /// The request as it was handed over, for sending again after a 401 — made before the first send because a redirect
+    /// rewrites the request it follows. Null for a credential that cannot be replaced, which never sends twice. The body is
+    /// read into memory (the raw calls' bodies are small JSON strings), which also lets the first send read it again.
+    /// </summary>
+    private static async Task<HttpRequestMessage?> CopyForReplayAsync(HttpRequestMessage request, GitLabCredential credential, CancellationToken cancellationToken)
+    {
+        if (!credential.CanRecover) return null;
+
+        var copy = new HttpRequestMessage(request.Method, request.RequestUri) { Version = request.Version, VersionPolicy = request.VersionPolicy };
+
+        foreach (var header in request.Headers) copy.Headers.TryAddWithoutValidation(header.Key, header.Value);
+
+        if (request.Content is not { } content) return copy;
+
+        var body = new ByteArrayContent(await content.ReadAsByteArrayAsync(cancellationToken).ConfigureAwait(false));
+
+        foreach (var header in content.Headers) body.Headers.TryAddWithoutValidation(header.Key, header.Value);
+
+        copy.Content = body;
+
+        return copy;
     }
 
     /// <summary><see cref="SendAsync(HttpRequestMessage, GitLabCredential, HttpCompletionOption, CancellationToken)"/> reading the whole answer.</summary>

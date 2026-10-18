@@ -106,6 +106,9 @@ public class CodeSpaceModule : Autofac.Module
         // TimeProvider — the OAuth state store + token refresh use this to compute
         // expiry; test fixtures swap it for a deterministic clock to make TTL tests reliable.
         builder.RegisterInstance(TimeProvider.System).As<TimeProvider>().SingleInstance();
+
+        // What the credential health sweep may spend on one provider and on one pass; a test registers shorter ones.
+        builder.RegisterInstance(Messages.Dtos.Credentials.CredentialHealthDeadlines.Default).SingleInstance();
     }
 
     private void RegisterSettings(ContainerBuilder builder)

@@ -157,12 +157,12 @@ public sealed class AgentPublishCredentialFreshnessFlowTests
     }
 
     [Fact]
-    public async Task A_refresh_the_provider_refuses_is_a_workspace_failure_the_push_retry_can_see_not_a_raw_oauth_exception()
+    public async Task A_refresh_the_provider_refuses_for_good_is_the_typed_rejection_and_the_push_is_not_retried_nor_a_raw_oauth_exception_let_out()
     {
-        // The stored refresh token is one the provider no longer honours (rotated elsewhere, grant revoked). Turning that
-        // into a typed 'reconnect' is the refresher's own arc; what this pins is that the push path stays inside its own
-        // exception contract — a WorkspaceException — instead of letting an OAuth exception escape the publish and flip the
-        // run that produced the work.
+        // The stored refresh token is one the provider no longer honours (rotated elsewhere, grant revoked). That is the
+        // provider's verdict on the grant: the credential is marked as needing a reconnect, and the push says so as the same
+        // typed rejection a disconnected credential gets — the push retry only retries a WorkspaceException, and a dead credential
+        // resolves the same way every time. No OAuth exception escapes the publish to flip the run that produced the work.
         if (!await CanRunGitAsync()) return;
 
         using var ctx = await FreshnessContext.StartAsync(_fixture, liveRefreshToken: "rt-held-by-someone-else");
@@ -171,11 +171,13 @@ public sealed class AgentPublishCredentialFreshnessFlowTests
         await ctx.AgeStoredPairAsync(secondsLeft: 30);
         await ctx.AgentWritesAsync(handle.Directory);
 
-        var failure = await Should.ThrowAsync<WorkspaceException>(() => ((IWorkspacePushHandle)handle).PushChangesAsync(ctx.BranchName, CancellationToken.None));
+        var failure = await Should.ThrowAsync<GitCredentialRejectedException>(() => ((IWorkspacePushHandle)handle).PushChangesAsync(ctx.BranchName, CancellationToken.None));
 
-        failure.Message.ShouldContain("Could not resolve the git credential to push with");
+        failure.Code.ShouldBe(FailureCodes.GitCredentialRejected);
+        failure.Message.ShouldContain("was refused by its provider");
         failure.Message.ShouldContain("invalid_grant", Case.Insensitive);
         failure.Message.ShouldNotContain("at-0", Case.Insensitive, "the token is never in the message");
+        failure.InnerException.ShouldBeOfType<CodeSpace.Messages.Exceptions.CredentialNeedsReconnectException>();
         ctx.Remote.RefusedAuthorizations.ShouldBeEmpty();
     }
 

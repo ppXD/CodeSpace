@@ -55,6 +55,9 @@ public static class FailureCodes
     /// <summary>Something tried to authenticate through a credential that was disconnected — revoked, its token material destroyed. Remedy: reconnect the provider (bound repositories follow their owner's reconnect) or re-link to an active credential; a retry as-is reads the same dead row.</summary>
     public const string CredentialDisconnected = "credential_disconnected";
 
+    /// <summary>A credential's grant or token was refused by its provider and cannot be used again as it is — an OAuth refresh answered <c>invalid_grant</c>, a static token the provider rejects or has expired. Remedy: reconnect the provider (or add the token again); a retry as-is is refused the same way, so nothing bound through the credential authenticates until then.</summary>
+    public const string CredentialNeedsReconnect = "credential_needs_reconnect";
+
     /// <summary>The remote refused the git credential a push carried even after it was resolved again immediately before the push (or the credential was disconnected while the run worked), so the agent's branch was not published. Remedy: reconnect the provider, or re-link the repository to an active credential, then re-run — a retry as-is is refused the same way.</summary>
     public const string GitCredentialRejected = "git_credential_rejected";
 

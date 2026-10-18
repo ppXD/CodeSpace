@@ -13,6 +13,6 @@ namespace CodeSpace.Core.Services.Providers.Capabilities;
 /// </summary>
 public interface IRepositoryMemberStandingCapability : IProviderCapability
 {
-    /// <summary>Member or None from the provider's answer, Unknown when it answered with an error. A provider that cannot be reached throws; either way a caller treats the author as not a member.</summary>
+    /// <summary>Member or None from the provider's answer. An answer that says nothing about the user — the credential refused, the provider erroring or not reached — throws, carrying the cause, so a caller can tell "not a member" from "could not find out" and name the difference to whoever must act on it; it is never returned as <see cref="PullRequestAuthorAssociation.Unknown"/>.</summary>
     Task<PullRequestAuthorAssociation> GetMemberStandingAsync(ProviderContext context, RemoteRepository repository, string userExternalId, CancellationToken cancellationToken);
 }

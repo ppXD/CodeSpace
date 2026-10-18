@@ -89,12 +89,12 @@ internal static class GitLabLoopback
 
     public static ProviderContext Context(string baseUrl, AuthType type) => new(new ProviderInstance { Id = Guid.NewGuid(), TeamId = Guid.NewGuid(), Provider = ProviderKind.GitLab, DisplayName = "loopback", BaseUrl = baseUrl }, new Credential { Id = Guid.NewGuid(), AuthType = type, DisplayName = "token", EncryptedPayload = "unused" });
 
-    public static GitLabRepositoryProvider Provider()
+    public static GitLabRepositoryProvider Provider(IProviderAuthResolver? auth = null)
     {
         var resilience = new ExternalCallResilience(new ProviderErrorMapperRegistry(new IProviderErrorMapper[] { new GitLabErrorMapper() }), NullLogger<ExternalCallResilience>.Instance);
         var normalizer = new GitLabEventNormalizer(new ProviderEventSubscriptionRegistry(Array.Empty<IProviderEventSubscription>()));
 
-        return new GitLabRepositoryProvider(new StaticTokenAuth(), resilience, new GitLabSignatureVerifier(), normalizer, new GitLabWebhookRepositoryIdentifier());
+        return new GitLabRepositoryProvider(auth ?? new StaticTokenAuth(), resilience, new GitLabSignatureVerifier(), normalizer, new GitLabWebhookRepositoryIdentifier());
     }
 
     private sealed class StaticTokenAuth : IProviderAuthResolver

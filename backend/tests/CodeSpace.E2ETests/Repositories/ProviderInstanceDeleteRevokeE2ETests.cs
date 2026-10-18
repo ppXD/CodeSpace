@@ -46,6 +46,9 @@ public sealed class ProviderInstanceDeleteRevokeE2ETests : IClassFixture<TaskLau
         var canary = Guid.NewGuid().ToString("N");
         var world = await SeedConnectionAsync(gitLab.BaseUrl, canary);
 
+        // Adding the personal access token asked GitLab about it (GET /user), which is not what a delete sends; the delete is counted from there.
+        var presentedWhenAdded = gitLab.Carrying($"glpat-{canary}").Count;
+
         var delete = await _tenants.SendAsync(HttpMethod.Delete, $"/api/provider-instances/{world.InstanceId}", world.Admin, world.Team);
 
         delete.StatusCode.ShouldBe(HttpStatusCode.OK, await TenantHarness.DescribeAsync(delete));
@@ -54,7 +57,7 @@ public sealed class ProviderInstanceDeleteRevokeE2ETests : IClassFixture<TaskLau
         var revokes = gitLab.Requests.Where(r => r.Method == "POST" && r.PathAndQuery == "/oauth/revoke").ToList();
         revokes.Select(r => (r.Form["token"], r.Form["token_type_hint"])).ShouldBe(new[] { ($"rt-{canary}", "refresh_token"), ($"at-{canary}", "access_token") }, "GitLab must be asked to revoke the refresh token, then the access token — check the post-commit revoke in ProviderInstanceService and the stub's request log if this fails");
         revokes.ShouldAllBe(r => r.Form["client_id"] == world.ClientId && r.Form["client_secret"] == $"client-secret-{canary}");
-        gitLab.Carrying($"glpat-{canary}").ShouldBeEmpty("a personal access token has no revocation endpoint and is never sent anywhere by a delete");
+        gitLab.Carrying($"glpat-{canary}").Count.ShouldBe(presentedWhenAdded, "a personal access token has no revocation endpoint and is never sent anywhere by a delete");
 
         var stored = await StoredAsync(world);
         stored.Payloads.ShouldAllBe(p => p == string.Empty, "a deleted connection's tokens must not stay decryptable in the database");

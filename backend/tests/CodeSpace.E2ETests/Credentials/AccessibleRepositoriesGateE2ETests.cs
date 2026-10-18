@@ -45,17 +45,20 @@ public sealed class AccessibleRepositoriesGateE2ETests : IClassFixture<TaskLaunc
         var world = await SeedAsync(gitLab.BaseUrl);
         var (credentialId, token) = world.Credential(holder);
 
+        // Adding a token asks its provider about it (GET /user), so each token was presented once when it was added; the listing is what is counted from there.
+        var presentedWhenAdded = gitLab.Carrying(token).Count;
+
         var listing = await _tenants.SendAsync(HttpMethod.Get, $"/api/credentials/{credentialId}/accessible-repositories", world.User(caller), world.Team);
 
         listing.StatusCode.ShouldBe(expected, $"{caller} listing through {holder} — {await TenantHarness.DescribeAsync(listing)}");
 
         if (expected == HttpStatusCode.OK)
         {
-            gitLab.Carrying(token).ShouldNotBeEmpty("fixture check: an allowed listing presents the token to GitLab");
+            gitLab.Carrying(token).Count.ShouldBeGreaterThan(presentedWhenAdded, "fixture check: an allowed listing presents the token to GitLab");
             return;
         }
 
-        gitLab.Carrying(token).ShouldBeEmpty($"{caller} was refused before the {holder} token was ever presented to the provider");
+        gitLab.Carrying(token).Count.ShouldBe(presentedWhenAdded, $"{caller} was refused before the {holder} token was presented to the provider again");
     }
 
     private sealed record World(Guid Team, Guid Owner, Guid Admin, Guid Member, Guid Viewer, (Guid, string) OwnersPat, (Guid, string) MembersPat, (Guid, string) TeamToken)

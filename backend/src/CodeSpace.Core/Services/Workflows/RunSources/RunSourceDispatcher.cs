@@ -177,6 +177,12 @@ public sealed class RunSourceDispatcher :
                 _logger.LogInformation("Webhook activation refused a pull request author. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Reason={Reason}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Message);
                 await AuditRefusalAsync(activation, normalizedEvent, WorkflowRunRequestRejectionReasons.AuthorNotMember, ex.Message, ex.AuditKey, cancellationToken).ConfigureAwait(false);
             }
+            catch (PullRequestStandingUnavailableException ex)
+            {
+                anyRefused = true;
+                _logger.LogWarning("Webhook activation could not read a pull request author's standing. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Reason={Reason} Detail={Detail}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Reason, ex.Message);
+                await AuditRefusalAsync(activation, normalizedEvent, ex.Reason, ex.Message, ex.AuditKey, cancellationToken).ConfigureAwait(false);
+            }
             catch (PullRequestTriggerDebouncedException ex)
             {
                 anyRefused = true;

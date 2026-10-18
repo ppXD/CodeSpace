@@ -1,8 +1,6 @@
-using CodeSpace.Core.Authorization;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
-using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -107,21 +105,8 @@ public sealed class CredentialRevocationService : ICredentialRevocationService, 
         }
     }
 
-    /// <summary>
-    /// Live Personal credentials whose person has no standing in the credential's team (<see cref="TeamStanding"/>): no
-    /// membership row there, and not an instance Admin. The person is the owner, or — for a token stored without one, as
-    /// adding a token without naming an owner did before the owner defaulted to the caller — whoever added it.
-    ///
-    /// <para>Only a person with an account. An owner always has one (the column is a foreign key); a creator stamp is not
-    /// one — it can be empty, or name nobody when a script wrote the row — and then nothing says who lent the token or
-    /// whether they left. That token is kept: retiring it would break every repository bound through it on a guess. A
-    /// soft-deleted account is still somebody, and goes like anyone else without standing.</para>
-    /// </summary>
-    private IQueryable<Credential> Departed() =>
-        _db.Credential
-            .Where(c => c.Ownership == CredentialOwnership.Personal && c.DeletedDate == null)
-            .Where(c => _db.User.IgnoreQueryFilters().Any(u => u.Id == (c.OwnerUserId ?? c.CreatedBy)))
-            .Where(ExpressionPredicate.Not(TeamStanding.Of<Credential>(_db, c => c.TeamId, c => c.OwnerUserId ?? c.CreatedBy)));
+    /// <summary>The credentials the sweep retires — <see cref="DepartedCredentials.Of"/>.</summary>
+    private IQueryable<Credential> Departed() => DepartedCredentials.Of(_db);
 
     /// <summary>
     /// Clear the token material — nothing in CodeSpace can present it once it is gone — and take the row out of the

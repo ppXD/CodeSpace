@@ -81,6 +81,24 @@ public static class WorkflowRunRequestRejectionReasons
     public const string AuthorNotMember = "author_not_member";
 
     /// <summary>
+    /// A pull-request trigger that admits only members could not learn whether the author is one: the provider did not
+    /// answer the standing lookup within its deadline, answered with an error (a 403 for a credential without the scope or
+    /// role to read members, a 429, a 5xx), or the repository has no credential to ask with. Unlike
+    /// <see cref="AuthorNotMember"/> nothing was learned about the author, so setting 'Pull requests from' to Anyone is not
+    /// the remedy — the detail names the status and what the credential needs, and the same pull request is admitted once
+    /// the lookup works.
+    /// </summary>
+    public const string AuthorStandingUnknown = "author_standing_unknown";
+
+    /// <summary>
+    /// A pull-request trigger that admits only members could not ask the provider for the author's standing because the
+    /// repository's credential is refused: the provider answered 401, its OAuth grant can no longer be refreshed, or it was
+    /// disconnected. Remedy: reconnect the credential (the detail names it) or re-link the repository; the author's standing
+    /// is not in question.
+    /// </summary>
+    public const string CredentialRejected = "credential_rejected";
+
+    /// <summary>
     /// The same activation already started a run for this pull request at the same head commit moments ago. Events for
     /// one head within the debounce window start one run, not one per event, so closing and reopening a PR cannot be used
     /// to start runs on demand; a push moves the head, so new commits are never held back.

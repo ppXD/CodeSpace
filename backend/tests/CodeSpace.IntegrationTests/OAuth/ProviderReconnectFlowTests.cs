@@ -71,7 +71,7 @@ public sealed class ProviderReconnectFlowTests : IDisposable
         var repoId = await SeedRepositoryAsync(world, stale);
 
         world.OAuth.RefreshFailure = new OAuthExchangeException("invalid_grant", "The provided authorization grant is invalid, expired, revoked", null);
-        await Should.ThrowAsync<OAuthExchangeException>(() => ResolveCloneTokenAsync(world, repoId));
+        await Should.ThrowAsync<CredentialNeedsReconnectException>(() => ResolveCloneTokenAsync(world, repoId));
 
         await DisconnectAsync(world, stale);
         var reconnected = await ReconnectAsync(world, reconnectWith, reconnectedToken);
@@ -84,6 +84,52 @@ public sealed class ProviderReconnectFlowTests : IDisposable
         repo.CredentialId.ShouldBe(reconnected, "the binding follows the owner's reconnect, so the repository row tells the truth about what it authenticates with");
         repo.Status.ShouldBe(RepositoryStatus.Active, "the disconnect's 'needs a new credential' Error is lifted once it has one");
         repo.LastError.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(ReconnectBy.OAuth, "at-reconnected")]
+    [InlineData(ReconnectBy.TokenLink, "glpat-reconnected")]
+    [InlineData(ReconnectBy.CredentialsApi, "glpat-reconnected")]
+    public async Task A_run_after_reconnecting_beside_a_connection_its_provider_refused_clones_with_the_reconnected_token(ReconnectBy reconnectWith, string reconnectedToken)
+    {
+        // The refusal marks the credential Error and leaves it listed as it was; the Providers dialog lists only Active ones, so
+        // the person sees nothing connected and clicks Connect — there is no Disconnect first. The failure told them to
+        // reconnect, and what was bound through the refused credential has to follow that, as it follows a disconnect's.
+        var world = await SeedWorldAsync();
+        var refused = await ConnectOAuthAsync(world, world.OwnerId, Token("at-stale", "rt-stale", TimeSpan.FromMinutes(-5)));
+        var repoId = await SeedRepositoryAsync(world, refused);
+        var hookId = await SeedConnectionWebhookAsync(world, refused, RepositoryWebhookRegistrationStatus.DeadLettered);
+
+        world.OAuth.RefreshFailure = new OAuthExchangeException("invalid_grant", "The provided authorization grant is invalid, expired, revoked", null);
+        await Should.ThrowAsync<CredentialNeedsReconnectException>(() => ResolveCloneTokenAsync(world, repoId));
+
+        using var dispatches = Jobs().ManualExecution();
+        var reconnected = await ReconnectAsync(world, reconnectWith, reconnectedToken);
+
+        (await ResolveCloneTokenAsync(world, repoId)).ShouldBe(reconnectedToken, "a run after the reconnect must clone with the reconnected token — not fail naming a credential the person has just replaced");
+
+        var repo = await LoadRepositoryAsync(repoId);
+        var hook = await LoadConnectionWebhookAsync(hookId);
+
+        repo.CredentialId.ShouldBe(reconnected, "the binding follows the owner's reconnect, so the repository row tells the truth about what it authenticates with");
+        repo.Status.ShouldBe(RepositoryStatus.Active);
+        hook.CredentialId.ShouldBe(reconnected, "a group hook registered through the refused credential follows with the repository");
+        hook.RegistrationStatus.ShouldBe(RepositoryWebhookRegistrationStatus.Enqueued, "and a dead-lettered one is revived, as a disconnect's reconnect revives it");
+    }
+
+    [Fact]
+    public async Task Another_members_connect_does_not_adopt_a_refused_credentials_repositories()
+    {
+        var world = await SeedWorldAsync();
+        var refused = await ConnectOAuthAsync(world, world.OwnerId, Token("at-owner", "rt-owner", TimeSpan.FromMinutes(-5)));
+        var repoId = await SeedRepositoryAsync(world, refused);
+
+        world.OAuth.RefreshFailure = new OAuthExchangeException("invalid_grant", "dead", null);
+        await Should.ThrowAsync<CredentialNeedsReconnectException>(() => ResolveCloneTokenAsync(world, repoId));
+
+        await ConnectOAuthAsync(world, world.MemberId, Token("at-member", "rt-member", TimeSpan.FromHours(2)));
+
+        (await LoadRepositoryAsync(repoId)).CredentialId.ShouldBe(refused, "a teammate is a different identity: the owner's repositories still need the owner (or a deliberate re-link)");
     }
 
     [Fact]
@@ -186,7 +232,7 @@ public sealed class ProviderReconnectFlowTests : IDisposable
         failure.Message.ShouldContain("'owner's GitLab' was disconnected", Case.Sensitive, "the run must say which credential is gone and what to do — not report the blanked payload as a Data Protection fault");
     }
 
-    public enum StrandedShape { ReconnectedAfterTheDisconnect, TokenLinkedInTheSameSave, OnlyAnOlderLiveCredential, ReconnectedByAnotherMember, ReconnectedThenDisconnectedAgain, BoundToALiveCredentialWithANewerSibling }
+    public enum StrandedShape { ReconnectedAfterTheDisconnect, TokenLinkedInTheSameSave, OnlyAnOlderLiveCredential, ReconnectedByAnotherMember, ReconnectedThenDisconnectedAgain, BoundToALiveCredentialWithANewerSibling, RefusedThenReconnected, RefusedWithOnlyAnOlderLiveCredential, RefusedWithASiblingConnectedBeforeItLastWorked, RefusedThenReconnectedByAnotherMember }
 
     [Theory]
     [InlineData(StrandedShape.ReconnectedAfterTheDisconnect, true)]
@@ -195,6 +241,10 @@ public sealed class ProviderReconnectFlowTests : IDisposable
     [InlineData(StrandedShape.ReconnectedByAnotherMember, false)]
     [InlineData(StrandedShape.ReconnectedThenDisconnectedAgain, false)]
     [InlineData(StrandedShape.BoundToALiveCredentialWithANewerSibling, false)]
+    [InlineData(StrandedShape.RefusedThenReconnected, true)]
+    [InlineData(StrandedShape.RefusedWithOnlyAnOlderLiveCredential, false)]
+    [InlineData(StrandedShape.RefusedWithASiblingConnectedBeforeItLastWorked, false)]
+    [InlineData(StrandedShape.RefusedThenReconnectedByAnotherMember, false)]
     public async Task The_repair_sweep_moves_a_stranded_binding_only_to_its_owners_reconnect(StrandedShape shape, bool moves)
     {
         // The rows a connect path without the carry-forward leaves behind — the code before it, or an older pod still
@@ -203,7 +253,7 @@ public sealed class ProviderReconnectFlowTests : IDisposable
         // the connect paths apply, on every tick, and leave alone every shape that rule leaves alone.
         var world = await SeedWorldAsync();
         var (bound, successor) = await SeedStrandedCredentialsAsync(world, shape);
-        var repoId = await SeedRepositoryAsync(world, bound, shape is StrandedShape.TokenLinkedInTheSameSave or StrandedShape.BoundToALiveCredentialWithANewerSibling ? RepositoryStatus.Active : RepositoryStatus.Error);
+        var repoId = await SeedRepositoryAsync(world, bound, LeavesTheRepositoryActive(shape) ? RepositoryStatus.Active : RepositoryStatus.Error);
         var hookId = await SeedConnectionWebhookAsync(world, bound, RepositoryWebhookRegistrationStatus.DeadLettered);
 
         using var dispatches = Jobs().ManualExecution();
@@ -239,6 +289,10 @@ public sealed class ProviderReconnectFlowTests : IDisposable
     [InlineData(StrandedShape.ReconnectedByAnotherMember, false)]
     [InlineData(StrandedShape.ReconnectedThenDisconnectedAgain, false)]
     [InlineData(StrandedShape.BoundToALiveCredentialWithANewerSibling, false)]
+    [InlineData(StrandedShape.RefusedThenReconnected, true)]
+    [InlineData(StrandedShape.RefusedWithOnlyAnOlderLiveCredential, false)]
+    [InlineData(StrandedShape.RefusedWithASiblingConnectedBeforeItLastWorked, false)]
+    [InlineData(StrandedShape.RefusedThenReconnectedByAnotherMember, false)]
     public async Task The_census_counts_exactly_the_shapes_the_sweep_moves_and_falls_as_it_moves_them(StrandedShape shape, bool counted)
     {
         // The health report's backlog is only worth reading if it is the sweep's own candidate set. The shapes are the sweep
@@ -251,7 +305,7 @@ public sealed class ProviderReconnectFlowTests : IDisposable
         var baseline = await CountStrandedAsync();
 
         var (bound, _) = await SeedStrandedCredentialsAsync(world, shape);
-        await SeedRepositoryAsync(world, bound, shape is StrandedShape.TokenLinkedInTheSameSave or StrandedShape.BoundToALiveCredentialWithANewerSibling ? RepositoryStatus.Active : RepositoryStatus.Error);
+        await SeedRepositoryAsync(world, bound, LeavesTheRepositoryActive(shape) ? RepositoryStatus.Active : RepositoryStatus.Error);
 
         (await CountStrandedAsync()).ShouldBe(baseline + (counted ? 1 : 0), $"{shape}: counted only when the sweep would move it");
 
@@ -387,6 +441,14 @@ public sealed class ProviderReconnectFlowTests : IDisposable
             return;
         }
 
+        if (IsRefused(shape))
+        {
+            var refusal = await Should.ThrowAsync<CredentialNeedsReconnectException>(() => ResolveCloneTokenAsync(world, repositoryId));
+
+            refusal.CredentialId.ShouldBe(bound, $"{shape}: the run names the credential its provider refused, which nobody has reconnected");
+            return;
+        }
+
         var failure = await Should.ThrowAsync<CredentialDisconnectedException>(() => ResolveCloneTokenAsync(world, repositoryId));
 
         failure.CredentialId.ShouldBe(bound, $"{shape}: the run names the disconnect it is still bound to");
@@ -419,28 +481,38 @@ public sealed class ProviderReconnectFlowTests : IDisposable
     /// <summary>
     /// The credential rows of one stranded shape, timestamped as a connect path without the carry-forward wrote them:
     /// (the one the repository and hook are bound to, the one connected around it). The bound one is Revoked with a
-    /// blank payload, except in <see cref="StrandedShape.BoundToALiveCredentialWithANewerSibling"/>, where it is live.
+    /// blank payload, except in <see cref="StrandedShape.BoundToALiveCredentialWithANewerSibling"/>, where it is live, and
+    /// in the Refused shapes, where it is a token its provider refused: <c>Error</c>, payload kept, last validated
+    /// some days after it was connected and last written minutes ago — a confirmation of the verdict dates the row afresh every
+    /// hour, so the row's last-modified date says nothing about when it died.
     /// </summary>
     private async Task<(Guid Bound, Guid Other)> SeedStrandedCredentialsAsync(World world, StrandedShape shape)
     {
         var connected = DateTimeOffset.UtcNow.AddDays(-30);
         var revoked = connected.AddDays(10);
+        var lastWorked = connected.AddDays(5);
 
-        var otherOwner = shape == StrandedShape.ReconnectedByAnotherMember ? world.MemberId : world.OwnerId;
+        var otherOwner = shape is StrandedShape.ReconnectedByAnotherMember or StrandedShape.RefusedThenReconnectedByAnotherMember ? world.MemberId : world.OwnerId;
         var otherConnected = shape switch
         {
             StrandedShape.TokenLinkedInTheSameSave => revoked,
             StrandedShape.OnlyAnOlderLiveCredential => connected.AddDays(-1),
             StrandedShape.BoundToALiveCredentialWithANewerSibling => connected.AddDays(1),
+            StrandedShape.RefusedThenReconnected or StrandedShape.RefusedThenReconnectedByAnotherMember => lastWorked.AddDays(7),
+            StrandedShape.RefusedWithOnlyAnOlderLiveCredential => connected.AddDays(-1),
+            StrandedShape.RefusedWithASiblingConnectedBeforeItLastWorked => connected.AddDays(2),
             _ => revoked.AddDays(1)
         };
 
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        var bound = shape == StrandedShape.BoundToALiveCredentialWithANewerSibling
-            ? StrandedCredential(world, world.OwnerId, AuthType.Pat, CredentialStatus.Active, SealToken(scope, "glpat-bound"), connected, connected)
-            : StrandedCredential(world, world.OwnerId, AuthType.OAuth, CredentialStatus.Revoked, string.Empty, connected, revoked);
+        var bound = shape switch
+        {
+            StrandedShape.BoundToALiveCredentialWithANewerSibling => StrandedCredential(world, world.OwnerId, AuthType.Pat, CredentialStatus.Active, SealToken(scope, "glpat-bound"), connected, connected),
+            _ when IsRefused(shape) => RefusedCredential(world, SealToken(scope, "glpat-refused"), connected, lastWorked),
+            _ => StrandedCredential(world, world.OwnerId, AuthType.OAuth, CredentialStatus.Revoked, string.Empty, connected, revoked)
+        };
 
         var other = shape == StrandedShape.ReconnectedThenDisconnectedAgain
             ? StrandedCredential(world, otherOwner, AuthType.OAuth, CredentialStatus.Revoked, string.Empty, otherConnected, otherConnected.AddDays(1))
@@ -452,6 +524,21 @@ public sealed class ProviderReconnectFlowTests : IDisposable
         await db.SaveChangesAsync();
 
         return (bound.Id, other.Id);
+    }
+
+    private static bool IsRefused(StrandedShape shape) => shape is StrandedShape.RefusedThenReconnected or StrandedShape.RefusedWithOnlyAnOlderLiveCredential or StrandedShape.RefusedWithASiblingConnectedBeforeItLastWorked or StrandedShape.RefusedThenReconnectedByAnotherMember;
+
+    /// <summary>The shapes whose bound credential was never disconnected, so nothing turned the repository Error: it is Active, on a credential that cannot be used.</summary>
+    private static bool LeavesTheRepositoryActive(StrandedShape shape) => shape is StrandedShape.TokenLinkedInTheSameSave or StrandedShape.BoundToALiveCredentialWithANewerSibling || IsRefused(shape);
+
+    private static Credential RefusedCredential(World world, string encryptedPayload, DateTimeOffset createdDate, DateTimeOffset lastValidatedDate)
+    {
+        var refused = StrandedCredential(world, world.OwnerId, AuthType.Pat, CredentialStatus.Error, encryptedPayload, createdDate, DateTimeOffset.UtcNow.AddMinutes(-5));
+
+        refused.LastError = "token rejected by GitLab";
+        refused.LastValidatedDate = lastValidatedDate;
+
+        return refused;
     }
 
     private string SealToken(ILifetimeScope scope, string token) => _encryptor.Encrypt(scope.Resolve<ICredentialPayloadSerializer>().Serialize(new PatPayload { Token = token }));

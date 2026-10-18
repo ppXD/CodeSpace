@@ -171,6 +171,52 @@ public sealed class GitLabDoorkeeperStubTests : IDisposable
     }
 
     [Fact]
+    public async Task An_access_token_travels_as_private_token_describes_itself_and_stops_when_it_is_revoked_or_expires()
+    {
+        _gitlab.AddAccessToken("glpat-live", "nacho", DateTimeOffset.UtcNow.AddDays(3));
+        _gitlab.AddAccessToken("glpat-forever", "nacho");
+        _gitlab.AddAccessToken("glpat-lapsed", "nacho", DateTimeOffset.UtcNow.AddMinutes(-1));
+        _gitlab.AddAccessToken("glpat-revoked", "nacho");
+        _gitlab.RevokeAccessToken("glpat-revoked");
+
+        (await GetAsync("/api/v4/user", ("PRIVATE-TOKEN", "glpat-live")).ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.OK);
+        (await GetAsync("/api/v4/user", ("PRIVATE-TOKEN", "glpat-lapsed")).ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.Unauthorized, "GitLab refuses a token that reached its expiry");
+        (await GetAsync("/api/v4/user", ("PRIVATE-TOKEN", "glpat-revoked")).ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.Unauthorized);
+        (await GetAsync("/api/v4/user", ("PRIVATE-TOKEN", "glpat-unknown")).ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.Unauthorized, "a PRIVATE-TOKEN the stub was not given is looked up as an OAuth token, which fails as before");
+        (await GetAsync("/api/v4/user", ("Authorization", "Bearer glpat-live")).ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.Unauthorized, "an access token is not an OAuth token: GitLab looks a Bearer up as OAuth alone");
+
+        var self = await GetAsync("/api/v4/personal_access_tokens/self", ("PRIVATE-TOKEN", "glpat-live")).ConfigureAwait(false);
+
+        self.Json.GetProperty("expires_at").GetString().ShouldBe(DateTimeOffset.UtcNow.AddDays(3).UtcDateTime.ToString("yyyy-MM-dd"), "a date, as GitLab spells it");
+        self.Json.GetProperty("active").GetBoolean().ShouldBeTrue();
+        (await GetAsync("/api/v4/personal_access_tokens/self", ("PRIVATE-TOKEN", "glpat-forever")).ConfigureAwait(false)).Json.GetProperty("expires_at").ValueKind.ShouldBe(JsonValueKind.Null);
+        _gitlab.Count(StubEvent.TokenApi200).ShouldBe(3);
+        _gitlab.Count(StubEvent.TokenApi401).ShouldBe(2, "the lapsed and the revoked token");
+    }
+
+    [Fact]
+    public async Task An_oauth_token_cannot_describe_itself_as_an_access_token_does()
+    {
+        _gitlab.Seed("app1", "nacho", "at-0", "rt-0");
+
+        (await GetAsync("/api/v4/personal_access_tokens/self", ("Authorization", "Bearer at-0")).ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task A_scripted_members_failure_answers_the_next_lookups_for_either_kind_of_token_and_then_the_role_again()
+    {
+        _gitlab.Seed("app1", "nacho", "at-0", "rt-0");
+        _gitlab.AddAccessToken("glpat-live", "nacho");
+        _gitlab.FailMembers(403, times: 2);
+
+        (await GetAsync("/api/v4/projects/42/members/all/7", ("Authorization", "Bearer at-0")).ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.Forbidden);
+        (await GetAsync("/api/v4/projects/42/members/all/7", ("PRIVATE-TOKEN", "glpat-live")).ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.Forbidden);
+        (await GetAsync("/api/v4/projects/42/members/all/7", ("Authorization", "Bearer at-0")).ConfigureAwait(false)).Json.GetProperty("access_level").GetInt32().ShouldBe(30);
+        (await GetAsync("/api/v4/user", ("Authorization", "Bearer at-0")).ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.OK, "only the members lookup is scripted");
+        _gitlab.Count(StubEvent.MembersFailed).ShouldBe(2);
+    }
+
+    [Fact]
     public async Task A_route_the_stub_does_not_know_is_counted_rather_than_silently_answered()
     {
         (await GetAsync("/somewhere/else").ConfigureAwait(false)).Status.ShouldBe(HttpStatusCode.NotImplemented);

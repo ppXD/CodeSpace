@@ -51,9 +51,15 @@ shared `PostgresFixture` type (`CodeSpace.E2ETests/Infrastructure/PostgresCollec
 Provider-credential tests share two more pieces, both in `CodeSpace.IntegrationTests/Infrastructure` (and reused by E2E):
 
 - `GitLabDoorkeeperStub` — a loopback GitLab whose OAuth server is modelled on Doorkeeper: refresh tokens are single use, a
-  refresh revokes the access token it replaces, and the REST and git smart-HTTP endpoints honour only live tokens. Its
-  counters (`Count(StubEvent.Refused)`, …) are how a test says "GitLab was never shown a consumed refresh token".
+  refresh revokes the access token it replaces, and the REST and git smart-HTTP endpoints honour only live tokens. It also
+  stands in for personal, project and group access tokens (`AddAccessToken` / `RevokeAccessToken`: `PRIVATE-TOKEN`, a date-valued
+  `expires_at` at `personal_access_tokens/self`, 401 once revoked or expired) and can script the members lookup to fail
+  (`FailMembers(status, times)`). Its counters (`Count(StubEvent.Refused)`, …) are how a test says "GitLab was never shown a consumed refresh token".
   `GitLabDoorkeeperStubTests` pins what it does, so a red test built on it is the product's and not the stub's.
+- `SilentProviderHost` (`CodeSpace.IntegrationTests/Webhooks`, linked into the unit project like `StubProviderHost`) — a loopback provider that
+  accepts the connection and never answers, for what a hung GitLab costs the caller. A call to it only returns when the caller gives
+  up, so a test of it runs the call on a thread of its own and bounds the wait, and shortens the sweep's deadlines by registering a
+  `CredentialHealthDeadlines` instead of waiting out the real ones.
 - `RefreshPodHarness` — pods as real OS processes (`CodeSpace.StorageTestWorker`'s `oauth-refresh-pod` mode) running the
   production refresher, or the pinned previous build's (`StorageTestWorker/PreviousBuild`), against the fixture's Postgres.
   One process shares one refresh semaphore, so only separate processes exercise the cross-pod advisory lock.
