@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MeResponse, MeTeam, ProviderInstanceSummary } from "@/api/types";
@@ -132,6 +132,181 @@ describe("connect remote modal credential controls", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Team" }));
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Revoke" })).toBeTruthy());
+  });
+});
+
+/**
+ * A credential that stopped working is brought back IN PLACE: Reconnect signs in again to the same credential (its id goes
+ * to the API as replaceCredentialId, so what is bound through it needs no moving), and Replace token pastes a new token into
+ * it. Starting an OAuth connect takes credentials.manage, so Reconnect is absent for a role that would only be refused;
+ * replacing the token of your own credential takes only membership, and a team token takes credentials.manage.
+ */
+describe("connect remote modal re-authorizing a credential in place", () => {
+  const admin: MeTeam = {
+    id: "t1", slug: "acme", name: "Acme", kind: "Workspace", role: "Admin", permissions: ["repos.manage", "credentials.manage", "members.manage"],
+    memberCount: 3, repositoryCount: 0, projectCount: 1, workflowCount: 0,
+  };
+  const member: MeTeam = { ...admin, role: "Member", permissions: ["workflows.write"] };
+
+  const instance: ProviderInstanceSummary = { id: "pi1", teamId: "t1", provider: "GitLab", displayName: "Acme GitLab", baseUrl: "https://gitlab.test", createdDate: "2026-01-01T00:00:00Z", oauthEnabled: true };
+  const credential = (id: string, authType: string, extra: Record<string, unknown> = {}) => ({ id, teamId: "t1", providerInstanceId: "pi1", ownerUserId: "u1", ownerUserName: "Maya", ownership: "Personal", authType, displayName: `Maya's ${id}`, status: "Active", createdDate: "2026-01-01T00:00:00Z", ...extra });
+
+  type Call = { method: string; url: string; body: unknown };
+
+  function renderAs(team: MeTeam, held: unknown[], answers: Record<string, unknown> = {}) {
+    localStorage.setItem("codespace.jwt", "test-jwt");
+    localStorage.setItem("codespace.activeTeamId", team.id);
+
+    const calls: Call[] = [];
+    const routes: Record<string, unknown> = { ...answers, "/api/users/me": { id: "u1", email: "u@test.local", name: "Maya", teams: [team], permissions: [], passwordMustChange: false }, "/capabilities": { credentialId: "any", grantedScopes: [], capabilities: [] }, "/api/provider-instances": [instance], "/api/credentials": held };
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      calls.push({ method: init?.method ?? "GET", url, body: init?.body ? JSON.parse(String(init.body)) : undefined });
+
+      const key = Object.keys(routes).find((k) => url.includes(k));
+      const body = key === undefined ? undefined : routes[key];
+      return new Response(body === undefined ? "" : JSON.stringify(body), { status: body === undefined ? 404 : 200, headers: { "Content-Type": "application/json" } });
+    }));
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+
+    render(
+      <QueryClientProvider client={client}>
+        <DialogProvider><ConnectRemoteModal onClose={() => {}} /></DialogProvider>
+      </QueryClientProvider>,
+    );
+
+    return calls;
+  }
+
+  afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  it("starts the OAuth flow naming the credential, under the credential's own name", async () => {
+    // A blocked popup ends the flow right after the init request, which is the request under test.
+    vi.spyOn(window, "open").mockReturnValue(null);
+    const calls = renderAs(admin, [credential("oauth-1", "OAuth")], { "/api/credentials/oauth/init": { authorizeUrl: "https://gitlab.test/oauth/authorize", state: "s" } });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/api/credentials/oauth/init"))).toBe(true));
+    const init = calls.find((c) => c.url.endsWith("/api/credentials/oauth/init"))!;
+    expect(init.method).toBe("POST");
+    expect(init.body).toMatchObject({ providerInstanceId: "pi1", displayName: "Maya's oauth-1", replaceCredentialId: "oauth-1" });
+  });
+
+  it("starts a plain connect, naming nothing, from Connect with OAuth", async () => {
+    vi.spyOn(window, "open").mockReturnValue(null);
+    const calls = renderAs(admin, [], { "/api/credentials/oauth/init": { authorizeUrl: "https://gitlab.test/oauth/authorize", state: "s" } });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Connect with OAuth/ })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /Connect with OAuth/ }));
+
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/api/credentials/oauth/init"))).toBe(true));
+    const init = calls.find((c) => c.url.endsWith("/api/credentials/oauth/init"))!;
+    expect(init.body).toMatchObject({ providerInstanceId: "pi1", displayName: "Maya's Acme GitLab" });
+    expect(JSON.stringify(init.body)).not.toContain("replaceCredentialId");
+  });
+
+  it("offers a member no Reconnect, which would only be refused, and still offers Replace token on their own token", async () => {
+    renderAs(member, [credential("oauth-1", "OAuth"), credential("pat-1", "Pat")]);
+
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Disconnect" })).toHaveLength(2));
+
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    expect(screen.getAllByRole("button", { name: "Replace token" })).toHaveLength(1);
+  });
+
+  it("puts a pasted token into the credential in place and closes", async () => {
+    const calls = renderAs(member, [credential("pat-1", "Pat")], { "/api/credentials/pat-1/token": { credentialId: "pat-1", providerUsername: "nacho" } });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Replace token" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Replace token" });
+    fireEvent.change(within(dialog).getByPlaceholderText(/glpat/i), { target: { value: "glpat-fresh" } });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Replace token" }));
+
+    await waitFor(() => expect(calls.some((c) => c.method === "PUT")).toBe(true));
+    const put = calls.find((c) => c.method === "PUT")!;
+    expect(put.url).toMatch(/\/api\/credentials\/pat-1\/token$/);
+    expect(put.body).toEqual({ token: "glpat-fresh" });
+    await waitFor(() => expect(screen.queryByPlaceholderText(/glpat/i)).toBeNull());
+  });
+
+  it("keeps a credential the provider refused in the list, marked, with the action that brings it back", async () => {
+    renderAs(admin, [credential("oauth-1", "OAuth", { status: "Error", lastError: "OAuth exchange rejected: invalid_grant" }), credential("pat-1", "Pat", { status: "Error" }), credential("gone", "Pat", { status: "Revoked" })]);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
+
+    expect(screen.getByText("needs reconnect").closest("span")?.getAttribute("title")).toBe("OAuth exchange rejected: invalid_grant");
+    expect(screen.getByText("needs a new token")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy();
+    expect(screen.getAllByRole("button", { name: "Disconnect" })).toHaveLength(2);
+    expect(screen.queryByRole("button", { name: /Connect with OAuth/ })).toBeNull();
+  });
+
+  it("marks a token whose expiry has passed as needing a new one although nothing has marked the row yet", async () => {
+    // The row is still Active — the sweep has not looked — but the backend derives `rejected` from the recorded expiry.
+    renderAs(member, [credential("pat-1", "Pat", { status: "Active", health: "rejected", expiresDate: "2026-01-02T00:00:00Z", daysToExpiry: 0 })]);
+
+    await waitFor(() => expect(screen.getByText("needs a new token")).toBeTruthy());
+
+    expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy();
+  });
+
+  it.each([
+    [3, "expires in 3 days"],
+    [1, "expires in 1 day"],
+    [0, "expires today"],
+  ])("says how long a token that expires in %i days has left, and still lets it be replaced in place", async (days, label) => {
+    renderAs(member, [credential("pat-1", "Pat", { health: "expiring", daysToExpiry: days })]);
+
+    await waitFor(() => expect(screen.getByText(label)).toBeTruthy());
+
+    expect(screen.queryByText("needs a new token")).toBeNull();
+    expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy();
+  });
+
+  it("says nothing about a credential that is fine", async () => {
+    renderAs(member, [credential("oauth-1", "OAuth", { health: "active" }), credential("pat-1", "Pat", { health: "active", daysToExpiry: null })]);
+
+    await waitFor(() => expect(screen.getAllByRole("button", { name: "Disconnect" })).toHaveLength(2));
+
+    expect(screen.queryByText(/needs reconnect|needs a new token|expires/)).toBeNull();
+  });
+
+  it("marks a team token the provider refused, beside the Replace token that brings it back", async () => {
+    const teamToken = credential("team-1", "GroupAccessToken", { ownerUserId: null, ownerUserName: null, ownership: "TeamService", displayName: "Acme group token", status: "Error", health: "rejected", lastError: "token rejected by GitLab" });
+
+    renderAs(admin, [teamToken]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Team" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "Team" }));
+
+    await waitFor(() => expect(screen.getByText("needs a new token")).toBeTruthy());
+    expect(screen.getByText("needs a new token").closest("span")?.getAttribute("title")).toBe("token rejected by GitLab");
+    expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy();
+  });
+
+  it("gives an admin Replace token on a team token and a member none", async () => {
+    const teamToken = credential("team-1", "GroupAccessToken", { ownerUserId: null, ownerUserName: null, ownership: "TeamService", displayName: "Acme group token" });
+
+    renderAs(admin, [teamToken]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Team" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "Team" }));
+    await waitFor(() => expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy());
+  });
+
+  it("offers a member no Replace token on a team token", async () => {
+    const teamToken = credential("team-1", "GroupAccessToken", { ownerUserId: null, ownerUserName: null, ownership: "TeamService", displayName: "Acme group token" });
+
+    renderAs(member, [teamToken]);
+    await waitFor(() => expect(screen.getByRole("tab", { name: "Team" })).toBeTruthy());
+    fireEvent.click(screen.getByRole("tab", { name: "Team" }));
+    await waitFor(() => expect(screen.getByText("Acme group token")).toBeTruthy());
+
+    expect(screen.queryByRole("button", { name: "Replace token" })).toBeNull();
   });
 });
 

@@ -11,5 +11,5 @@ public sealed class InitCredentialOAuthCommandHandler : IRequestHandler<InitCred
     public InitCredentialOAuthCommandHandler(IOAuthFlowService flow) { _flow = flow; }
 
     public async Task<InitCredentialOAuthResult> Handle(InitCredentialOAuthCommand request, CancellationToken cancellationToken) =>
-        await _flow.InitAsync(request.ProviderInstanceId, request.DisplayName, request.IntendedOwnerUserId, request.ReturnUrl, request.Scopes, cancellationToken).ConfigureAwait(false);
+        await _flow.InitAsync(request, cancellationToken).ConfigureAwait(false);
 }

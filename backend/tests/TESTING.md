@@ -54,7 +54,9 @@ Provider-credential tests share two more pieces, both in `CodeSpace.IntegrationT
   refresh revokes the access token it replaces, and the REST and git smart-HTTP endpoints honour only live tokens. It also
   stands in for personal, project and group access tokens (`AddAccessToken` / `RevokeAccessToken`: `PRIVATE-TOKEN`, a date-valued
   `expires_at` at `personal_access_tokens/self`, 401 once revoked or expired) and can script the members lookup to fail
-  (`FailMembers(status, times)`). Its counters (`Count(StubEvent.Refused)`, …) are how a test says "GitLab was never shown a consumed refresh token".
+  (`FailMembers(status, times)`). Every user has an id of their own (`UserIdOf`) and a personal access token can be seeded for one
+  (`SeedPersonalAccessToken`), so a test can tell two accounts apart and drive a pasted token, as the in-place re-authorization tests do.
+  Its counters (`Count(StubEvent.Refused)`, …) are how a test says "GitLab was never shown a consumed refresh token".
   `GitLabDoorkeeperStubTests` pins what it does, so a red test built on it is the product's and not the stub's.
 - `SilentProviderHost` (`CodeSpace.IntegrationTests/Webhooks`, linked into the unit project like `StubProviderHost`) — a loopback provider that
   accepts the connection and never answers, for what a hung GitLab costs the caller. A call to it only returns when the caller gives

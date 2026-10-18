@@ -12,6 +12,7 @@ using CodeSpace.Core.Settings.OAuth;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.OAuth;
@@ -33,11 +34,12 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
     private readonly ICurrentUser _currentUser;
     private readonly IUserProviderIdentityService _identityService;
     private readonly ICredentialSuccessionService _succession;
+    private readonly ICredentialReauthorizer _reauthorizer;
     private readonly ITeamMemberService _members;
     private readonly OAuthCallbackUrlSetting _callbackUrlSetting;
     private readonly OAuthReturnOriginsSetting _returnOrigins;
 
-    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, ICredentialSuccessionService succession, ITeamMemberService members, OAuthCallbackUrlSetting callbackUrlSetting, OAuthReturnOriginsSetting returnOrigins)
+    public OAuthFlowService(CodeSpaceDbContext db, IOAuthClientRegistry oauthClients, IOAuthStateStore stateStore, IPkceGenerator pkce, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, ICurrentTeam currentTeam, ICurrentUser currentUser, IUserProviderIdentityService identityService, ICredentialSuccessionService succession, ICredentialReauthorizer reauthorizer, ITeamMemberService members, OAuthCallbackUrlSetting callbackUrlSetting, OAuthReturnOriginsSetting returnOrigins)
     {
         _db = db;
         _oauthClients = oauthClients;
@@ -49,18 +51,20 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         _currentUser = currentUser;
         _identityService = identityService;
         _succession = succession;
+        _reauthorizer = reauthorizer;
         _members = members;
         _callbackUrlSetting = callbackUrlSetting;
         _returnOrigins = returnOrigins;
     }
 
-    public async Task<InitCredentialOAuthResult> InitAsync(Guid providerInstanceId, string displayName, Guid? intendedOwnerUserId, string? returnUrl, IReadOnlyList<string>? scopes, CancellationToken cancellationToken)
+    public async Task<InitCredentialOAuthResult> InitAsync(InitCredentialOAuthCommand command, CancellationToken cancellationToken)
     {
-        EnsureReturnUrlAllowed(returnUrl);
+        EnsureReturnUrlAllowed(command.ReturnUrl);
 
-        var instance = await LoadOwnedInstanceAsync(providerInstanceId, cancellationToken).ConfigureAwait(false);
+        var instance = await LoadOwnedInstanceAsync(command.ProviderInstanceId, cancellationToken).ConfigureAwait(false);
         var (clientId, _) = ReadOAuthClientCredentials(instance);
-        var ownerUserId = await ResolveOwnerWithinReachAsync(intendedOwnerUserId, cancellationToken).ConfigureAwait(false);
+        var replaced = await LoadReplacedCredentialAsync(command, cancellationToken).ConfigureAwait(false);
+        var ownerUserId = await ResolveOwnerWithinReachAsync(replaced?.OwnerUserId ?? command.IntendedOwnerUserId, cancellationToken).ConfigureAwait(false);
 
         var pkce = _pkce.Generate();
         var browserNonce = OAuthBrowserNonce.Mint();
@@ -71,11 +75,12 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
             TeamId = _currentTeam.Id!.Value,
             InitiatorUserId = _currentUser.Id!.Value,
             CodeVerifier = pkce.Verifier,
-            IntendedDisplayName = displayName,
+            IntendedDisplayName = command.DisplayName,
             IntendedOwnerUserId = ownerUserId,
-            ReturnUrl = returnUrl,
+            ReturnUrl = command.ReturnUrl,
+            ReplaceCredentialId = replaced?.Id,
             BrowserNonceHash = OAuthBrowserNonce.Hash(browserNonce),
-            RequestedScopes = scopes ?? instance.OauthDefaultScopes,
+            RequestedScopes = command.Scopes ?? instance.OauthDefaultScopes,
             Ttl = StateTtl
         }, cancellationToken).ConfigureAwait(false);
 
@@ -122,6 +127,23 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
 
         await HoldOwnerInTeamAsync(pending, cancellationToken).ConfigureAwait(false);
 
+        var credentialId = pending.ReplaceCredentialId is Guid replacedId
+            ? await ReauthorizeAsync(pending, replacedId, token, cancellationToken).ConfigureAwait(false)
+            : await ConnectNewAsync(pending, instance, token, cancellationToken).ConfigureAwait(false);
+
+        return new CompleteCredentialOAuthResult
+        {
+            CredentialId = credentialId,
+            TeamId = pending.TeamId,
+            // Checked again rather than trusted from init: the configured origins can change while a connect is pending.
+            ReturnUrl = OAuthReturnUrl.AllowedOrFallback(pending.ReturnUrl, _returnOrigins.Value),
+            BrowserNonceCookiePath = ResolveCallbackUri().AbsolutePath
+        };
+    }
+
+    /// <summary>A plain connect: a new credential, the bindings of the owner's disconnected ones carried onto it, and the owner's act-as identity linked.</summary>
+    private async Task<Guid> ConnectNewAsync(OAuthPendingState pending, ProviderInstance instance, OAuthTokenResponse token, CancellationToken cancellationToken)
+    {
         var credential = PersistCredential(pending, instance, token);
 
         await _succession.CarryForwardAsync(credential, cancellationToken).ConfigureAwait(false);
@@ -129,14 +151,28 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         if (pending.IntendedOwnerUserId is Guid ownerId)
             await LinkActorIdentityBestEffortAsync(instance, credential, ownerId, cancellationToken).ConfigureAwait(false);
 
-        return new CompleteCredentialOAuthResult
+        return credential.Id;
+    }
+
+    /// <summary>
+    /// A connect that named the credential it replaces: the token goes into THAT row, so what is bound through it needs no
+    /// moving. The account that signed in must be the one the credential was connected as, and a credential retired since
+    /// the connect began is refused — both by the re-authorization itself, which knows the credential.
+    /// </summary>
+    private async Task<Guid> ReauthorizeAsync(OAuthPendingState pending, Guid replacedId, OAuthTokenResponse token, CancellationToken cancellationToken)
+    {
+        var result = await _reauthorizer.ReauthorizeAsync(new CredentialReauthorization
         {
-            CredentialId = credential.Id,
+            CredentialId = replacedId,
             TeamId = pending.TeamId,
-            // Checked again rather than trusted from init: the configured origins can change while a connect is pending.
-            ReturnUrl = OAuthReturnUrl.AllowedOrFallback(pending.ReturnUrl, _returnOrigins.Value),
-            BrowserNonceCookiePath = ResolveCallbackUri().AbsolutePath
-        };
+            ProviderInstanceId = pending.ProviderInstanceId,
+            Payload = PayloadOf(token),
+            Scopes = token.GrantedScopes?.ToList(),
+            DisplayName = pending.IntendedDisplayName,
+            ActorUserId = pending.InitiatorUserId
+        }, cancellationToken).ConfigureAwait(false);
+
+        return result.CredentialId;
     }
 
     /// <summary>
@@ -228,6 +264,35 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         return instance;
     }
 
+    /// <summary>
+    /// The credential a connect re-authorizes in place, or null for a plain connect. Named by id, and a credential id says
+    /// nothing about its team, so it is looked up by (id, the header team): another team's reads as not found. It must be
+    /// a person's own connection on this very provider instance — an OAuth sign-in is somebody's account, and writing one into
+    /// a team-service credential would make a team credential out of a person who can leave — and it is the owner's to
+    /// re-authorize, by the same reach that connecting for them takes.
+    /// </summary>
+    private async Task<Credential?> LoadReplacedCredentialAsync(InitCredentialOAuthCommand command, CancellationToken cancellationToken)
+    {
+        if (command.ReplaceCredentialId is not Guid replacedId) return null;
+
+        var credential = await _db.Credential.AsNoTracking().FirstOrDefaultAsync(c => c.Id == replacedId && c.TeamId == _currentTeam.Id!.Value, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"credential {replacedId} not found");
+
+        if (credential.DeletedDate != null)
+            throw CredentialRetiredException.SoftDeleted(credential.Id, credential.DisplayName);
+
+        if (credential.ProviderInstanceId != command.ProviderInstanceId)
+            throw new ArgumentException("replaceCredentialId belongs to another provider instance than providerInstanceId", nameof(command));
+
+        if (credential.Ownership != CredentialOwnership.Personal || credential.OwnerUserId == null)
+            throw new ArgumentException("replaceCredentialId must be a person's own connection; replace a team token with a new token instead", nameof(command));
+
+        if (command.IntendedOwnerUserId is Guid named && named != credential.OwnerUserId)
+            throw new ArgumentException("intendedOwnerUserId, when given with replaceCredentialId, must be the credential's owner", nameof(command));
+
+        return credential;
+    }
+
     // Complete-internals (callback runs anonymous, no current-team check).
 
     /// <summary>
@@ -287,16 +352,16 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         }, cancellationToken).ConfigureAwait(false);
     }
 
+    private static OAuthPayload PayloadOf(OAuthTokenResponse token) => new()
+    {
+        AccessToken = token.AccessToken,
+        RefreshToken = token.RefreshToken,
+        ExpiresAt = token.ExpiresAt
+    };
+
     private Credential PersistCredential(OAuthPendingState state, ProviderInstance instance, OAuthTokenResponse token)
     {
-        var payload = new OAuthPayload
-        {
-            AccessToken = token.AccessToken,
-            RefreshToken = token.RefreshToken,
-            ExpiresAt = token.ExpiresAt
-        };
-
-        var json = _serializer.Serialize(payload);
+        var json = _serializer.Serialize(PayloadOf(token));
         var encrypted = _encryptor.Encrypt(json);
 
         var credential = new Credential

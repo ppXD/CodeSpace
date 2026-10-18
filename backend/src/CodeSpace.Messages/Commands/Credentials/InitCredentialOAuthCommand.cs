@@ -35,6 +35,17 @@ public sealed record InitCredentialOAuthCommand : ICommand<InitCredentialOAuthRe
 
     /// <summary>Override the provider_instance's default scope list. Usually null.</summary>
     public IReadOnlyList<string>? Scopes { get; init; }
+
+    /// <summary>
+    /// The credential this connect re-authorizes IN PLACE instead of creating another: when the callback completes, the new
+    /// token is written into this row — same id, so what is bound through it needs no moving — and what its dead token had
+    /// turned Error comes back. Null (what a client that predates this field sends) connects a new credential exactly as
+    /// before. It must be a Personal credential of this team and provider instance, owned by the person; the sign-in must
+    /// be the same provider account the credential was connected as, or the callback is refused with
+    /// <c>credential_account_mismatch</c>. A pod from before this field ignores it and creates a new credential, as a
+    /// connect always did.
+    /// </summary>
+    public Guid? ReplaceCredentialId { get; init; }
 }
 
 public sealed record InitCredentialOAuthResult

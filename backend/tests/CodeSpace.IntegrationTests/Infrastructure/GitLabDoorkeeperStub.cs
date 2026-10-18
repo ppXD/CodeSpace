@@ -49,14 +49,18 @@ public enum StubEvent
 /// <para><b>Access tokens.</b> A personal, project or group access token is not part of an OAuth grant: it is added with
 /// <see cref="AddAccessToken"/>, travels as <c>PRIVATE-TOKEN</c> on REST (GitLab resolves that header as exactly that, whatever
 /// the token's length), answers 401 once it is revoked (<see cref="RevokeAccessToken"/>) or past the expiry it was given, and
-/// describes itself — scopes, <c>expires_at</c> as a date, <c>active</c> — at <c>GET /api/v4/personal_access_tokens/self</c>,
-/// which an OAuth token cannot call (404).</para>
+/// describes itself — scopes (<see cref="PersonalAccessTokenScopes"/>), <c>expires_at</c> as a date, <c>active</c> — at
+/// <c>GET /api/v4/personal_access_tokens/self</c>, which an OAuth token cannot call (404). <see cref="SeedPersonalAccessToken"/>
+/// is the short form for a token that never expires.</para>
 ///
 /// <para><b>Endpoints.</b> <c>POST /oauth/token</c> (<c>refresh_token</c> and <c>authorization_code</c> grants; the code
 /// <c>authz:&lt;user&gt;</c> issues <c>&lt;user&gt;</c> a first pair), <c>POST /oauth/revoke</c> (RFC 7009: 200 whatever
 /// it was given), <c>GET /api/v4/user</c> and <c>GET /api/v4/projects/:id/members/all/:user_id</c> (Bearer only — GitLab
 /// resolves an OAuth token from <c>Authorization: Bearer</c> and looks <c>PRIVATE-TOKEN</c> up as a personal access
-/// token), any other <c>GET /api/v4/**</c> as an empty list, and git smart-HTTP <c>GET **/info/refs</c> for both services.
+/// token; an access token is read as <c>PRIVATE-TOKEN</c> alone, see above), <c>GET /api/v4/personal_access_tokens/self</c>
+/// (an access token's own scopes and expiry), any other <c>GET /api/v4/**</c> as an empty list, and git smart-HTTP
+/// <c>GET **/info/refs</c> for both services. Every user has an id of their own, stable for the stub's life
+/// (<see cref="UserIdOf"/>), so a test can tell two accounts apart the way a provider does.
 /// The git endpoint takes an OAuth access token as HTTP Basic with login <c>oauth2</c> — what GitLab through 17.x
 /// requires of an OAuth token — or as <c>Authorization: Bearer</c>; anything else is a 401 with the
 /// <c>WWW-Authenticate: Basic</c> challenge that makes git ask again. A live token gets an empty repository's
@@ -84,6 +88,7 @@ public sealed class GitLabDoorkeeperStub : IDisposable
     private readonly List<StubLogEntry> _log = new();
     private readonly Dictionary<string, string> _applications = new() { [DefaultClientId] = DefaultClientSecret };
     private readonly Dictionary<string, AccessToken> _accessTokens = new();
+    private readonly Dictionary<string, int> _userIds = new();
     private int _sequence;
     private int _membersFailureStatus;
     private int _membersFailuresLeft;
@@ -152,6 +157,23 @@ public sealed class GitLabDoorkeeperStub : IDisposable
         }
     }
 
+    /// <summary>The scopes a personal access token reports for itself at <c>/api/v4/personal_access_tokens/self</c>.</summary>
+    public const string PersonalAccessTokenScopes = "api,read_repository";
+
+    /// <summary>A personal access token <paramref name="user"/> created at GitLab: <see cref="AddAccessToken"/> for a token that never expires. A test that wants a dead one revokes it, or presents a token this never heard of.</summary>
+    public void SeedPersonalAccessToken(string user, string token) => AddAccessToken(token, user);
+
+    /// <summary>The id GitLab knows <paramref name="user"/> by: the first one asked about gets 1001, the next 1002, and so on.</summary>
+    public long UserIdOf(string user)
+    {
+        lock (_gate)
+        {
+            if (!_userIds.TryGetValue(user, out var id)) _userIds[user] = id = 1001 + _userIds.Count;
+
+            return id;
+        }
+    }
+
     /// <summary>A pair issued before the test began: what the credential row held when the story starts.</summary>
     public TokenRow Seed(string app, string user, string accessToken, string refreshToken)
     {
@@ -172,6 +194,12 @@ public sealed class GitLabDoorkeeperStub : IDisposable
     public string? LiveRefreshTokenOf(string user)
     {
         lock (_gate) { return _rows.LastOrDefault(r => r.User == user && r.RevokedAt == null)?.RefreshToken; }
+    }
+
+    /// <summary>The access token GitLab would accept right now for <paramref name="user"/> — the newest one not revoked.</summary>
+    public string? LiveAccessTokenOf(string user)
+    {
+        lock (_gate) { return _rows.LastOrDefault(r => r.User == user && r.RevokedAt == null)?.AccessToken; }
     }
 
     public void Dispose()
@@ -360,7 +388,7 @@ public sealed class GitLabDoorkeeperStub : IDisposable
     }
 
     private static string SelfBody(AccessToken token) =>
-        JsonSerializer.Serialize(new { id = 1, name = "stub", scopes = new[] { "api" }, active = true, revoked = false, expires_at = token.ExpiresAt?.UtcDateTime.ToString("yyyy-MM-dd") });
+        JsonSerializer.Serialize(new { id = 1, name = "stub", scopes = PersonalAccessTokenScopes.Split(','), active = true, revoked = false, expires_at = token.ExpiresAt?.UtcDateTime.ToString("yyyy-MM-dd") });
 
     /// <summary>The members lookup's scripted failure, while any are left (<see cref="FailMembers"/>).</summary>
     private Reply? ScriptedMembersFailure(string path)
@@ -375,7 +403,7 @@ public sealed class GitLabDoorkeeperStub : IDisposable
 
     private string ApiBody(string user, string path)
     {
-        if (path == "/api/v4/user") return JsonSerializer.Serialize(new { id = 1, username = user });
+        if (path == "/api/v4/user") return JsonSerializer.Serialize(new { id = UserIdOf(user), username = user });
 
         var member = path.IndexOf("/members/all/", StringComparison.Ordinal);
 

@@ -24,16 +24,20 @@ export function ProvidersSettings() {
   const loading = instances.isLoading || credentials.isLoading || me.isLoading;
   const rows = instances.data ?? [];
 
-  // Per-instance, whether the current user has an active personal credential on it — same "connected for me"
-  // signal the modal's Personal tab shows, so the summary agrees with what they'll see when they open it.
-  const connectedInstanceIds = useMemo(() => {
-    const set = new Set<string>();
+  // Per-instance, whether the current user has a working personal credential on it — and, failing that, one the provider
+  // refused, which the modal's Personal tab lists with the way to bring it back. The same signals the modal shows, so the
+  // summary agrees with what they'll see when they open it.
+  const { connectedInstanceIds, refusedInstanceIds } = useMemo(() => {
+    const connected = new Set<string>();
+    const refused = new Set<string>();
     const myId = me.data?.id;
-    if (!myId) return set;
+    if (!myId) return { connectedInstanceIds: connected, refusedInstanceIds: refused };
     for (const c of credentials.data ?? []) {
-      if (c.ownerUserId === myId && c.status === "Active") set.add(c.providerInstanceId);
+      if (c.ownerUserId !== myId) continue;
+      if (c.status === "Error" || c.health === "rejected") refused.add(c.providerInstanceId);
+      else if (c.status === "Active") connected.add(c.providerInstanceId);
     }
-    return set;
+    return { connectedInstanceIds: connected, refusedInstanceIds: refused };
   }, [credentials.data, me.data?.id]);
 
   // Rendered inside the Settings layout (it owns the "Settings" header + tab strip), so this is body-only.
@@ -91,7 +95,9 @@ export function ProvidersSettings() {
                       )}
                       {connected
                         ? <span className="cn-status cn-status-active"><span className="cn-status-dot" /> connected</span>
-                        : <span className="cn-status">not connected</span>}
+                        : refusedInstanceIds.has(inst.id)
+                          ? <span className="cn-status cn-status-warn" title="The provider refused your credential. Open Manage providers to reconnect it or replace its token."><Ic.Triangle size={10} /> needs reconnect</span>
+                          : <span className="cn-status">not connected</span>}
                     </div>
                     <div className="cn-sub"><span title={inst.baseUrl}>{inst.baseUrl}</span></div>
                   </div>

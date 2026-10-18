@@ -1,5 +1,5 @@
 import { ApiError, fetchJson } from "./request";
-import type { CompleteOAuthResponse, CredentialCapabilitiesResponse, CredentialSummary, CredentialUsage, DeleteProviderInstanceResponse, InitOAuthResponse, ProviderDefaults, ProviderInstanceSummary, ProviderInstanceUsage, ProviderKind, RevokeCredentialResponse } from "./types";
+import type { CompleteOAuthResponse, CredentialCapabilitiesResponse, CredentialSummary, CredentialUsage, DeleteProviderInstanceResponse, InitOAuthResponse, ProviderDefaults, ProviderInstanceSummary, ProviderInstanceUsage, ProviderKind, ReplaceCredentialTokenResponse, RevokeCredentialResponse } from "./types";
 
 /**
  * Thin typed wrappers around the new OAuth + credential endpoints. They handle:
@@ -17,6 +17,12 @@ export interface InitOAuthRequest {
   intendedOwnerUserId?: string | null;
   returnUrl?: string | null;
   scopes?: string[] | null;
+  /**
+   * Re-authorize THIS credential in place instead of creating another: the new token goes into the same row, so everything
+   * bound through it keeps working. The sign-in must be the same provider account the credential was connected as (the
+   * callback is refused otherwise). Left out, the connect creates a new credential, as it always did.
+   */
+  replaceCredentialId?: string | null;
 }
 
 export interface AddProviderInstanceRequest {
@@ -102,6 +108,14 @@ export const oauthApi = {
   revokeCredential: (credentialId: string) => fetchJson<RevokeCredentialResponse>(`/api/credentials/${credentialId}/revoke`, {
     method: "POST",
   }),
+
+  // Put a new token into an existing credential, in place — it keeps its id, so what is bound through it keeps working. The
+  // token must belong to the same provider account (409 credential_account_mismatch otherwise).
+  replaceCredentialToken: (credentialId: string, token: string) =>
+    fetchJson<ReplaceCredentialTokenResponse>(`/api/credentials/${encodeURIComponent(credentialId)}/token`, {
+      method: "PUT",
+      body: JSON.stringify({ token }),
+    }),
 
   // Pre-revoke preview — drives the confirm dialog's impact wording.
   getCredentialUsage: (credentialId: string) =>

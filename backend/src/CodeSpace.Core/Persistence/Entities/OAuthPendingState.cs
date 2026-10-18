@@ -19,6 +19,13 @@ public class OAuthPendingState : IAuditable
     public string? ReturnUrl { get; set; }
 
     /// <summary>
+    /// The credential the callback re-authorizes in place instead of creating another, or null for a plain connect. Written
+    /// by a version from migration 0250 on; a row an older pod wrote reads null, and an older pod completing a newer row
+    /// ignores it and creates a new credential.
+    /// </summary>
+    public Guid? ReplaceCredentialId { get; set; }
+
+    /// <summary>
     /// SHA-256 of the nonce the starting browser holds in its binding cookie. A callback that presents that nonce finishes
     /// the connect on the spot; one that does not consumes nothing and is handed to the SPA, where only
     /// <see cref="InitiatorUserId"/>, signed in, can finish it. Null only on a row a version before migration 0246 wrote,

@@ -264,6 +264,22 @@ export function useRevokeCredential() {
   });
 }
 
+/**
+ * Replace a credential's token in place. The credential keeps its id, so the repositories its dead token had turned Error
+ * come back — invalidate what shows them, not only the credential list.
+ */
+export function useReplaceCredentialToken() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ credentialId, token }: { credentialId: string; token: string }) => oauthApi.replaceCredentialToken(credentialId, token),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["credentials"] });
+      queryClient.invalidateQueries({ queryKey: ["repositories"] });
+      queryClient.invalidateQueries({ queryKey: ["credential-capabilities"] });
+    },
+  });
+}
+
 /** Backend-driven defaults for the "Add provider" form. Cached aggressively — the source
  *  is a static IProviderModule, so the values change only on a backend deploy. */
 export function useProviderDefaults(provider: ProviderKind | null) {

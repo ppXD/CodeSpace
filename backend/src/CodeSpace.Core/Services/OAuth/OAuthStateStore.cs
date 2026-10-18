@@ -25,6 +25,7 @@ public sealed class OAuthStateStore : IOAuthStateStore, IScopedDependency
             IntendedDisplayName = input.IntendedDisplayName,
             IntendedOwnerUserId = input.IntendedOwnerUserId,
             ReturnUrl = input.ReturnUrl,
+            ReplaceCredentialId = input.ReplaceCredentialId,
             BrowserNonceHash = input.BrowserNonceHash,
             RequestedScopes = input.RequestedScopes?.ToList(),
             ExpiresDate = _clock.GetUtcNow() + input.Ttl

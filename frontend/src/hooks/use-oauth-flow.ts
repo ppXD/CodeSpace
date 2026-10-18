@@ -114,10 +114,11 @@ export function useOAuthFlow() {
 
     try {
       const outcome = await awaitOutcome(popup);
-      // Successful OAuth always lands a new credential row. Invalidate so any open
-      // modal / sidebar showing connection status re-fetches immediately rather than
-      // waiting for the next mount.
+      // A successful OAuth lands a new credential row — or, for a reconnect that named one (`replaceCredentialId`),
+      // brings the same row back to life along with the repositories its dead token had turned Error. Invalidate so any
+      // open modal / sidebar showing connection status re-fetches immediately rather than waiting for the next mount.
       await queryClient.invalidateQueries({ queryKey: ["credentials"] });
+      await queryClient.invalidateQueries({ queryKey: ["repositories"] });
       return outcome;
     } finally {
       try { if (!popup.closed) popup.close(); } catch { /* cross-origin during provider visit; harmless */ }

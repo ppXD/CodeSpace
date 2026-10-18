@@ -144,6 +144,41 @@ public sealed class GitLabDoorkeeperStubTests : IDisposable
         _gitlab.Count(StubEvent.Api401).ShouldBe(1);
     }
 
+    [Fact]
+    public async Task Every_user_has_an_id_of_their_own_that_the_user_endpoint_reports_for_whoever_holds_the_token()
+    {
+        _gitlab.Seed("app1", "nacho", "at-nacho", "rt-nacho");
+        _gitlab.Seed("app1", "maya", "at-maya", "rt-maya");
+        _gitlab.SeedPersonalAccessToken("maya", "glpat-maya");
+
+        var nacho = await GetAsync("/api/v4/user", ("Authorization", "Bearer at-nacho")).ConfigureAwait(false);
+        var maya = await GetAsync("/api/v4/user", ("Authorization", "Bearer at-maya")).ConfigureAwait(false);
+        var mayaByToken = await GetAsync("/api/v4/user", ("PRIVATE-TOKEN", "glpat-maya")).ConfigureAwait(false);
+
+        nacho.Json.GetProperty("id").GetInt64().ShouldBe(_gitlab.UserIdOf("nacho"));
+        maya.Json.GetProperty("id").GetInt64().ShouldBe(_gitlab.UserIdOf("maya"));
+        mayaByToken.Json.GetProperty("id").GetInt64().ShouldBe(_gitlab.UserIdOf("maya"), "one account, one id, whichever kind of token asked");
+        _gitlab.UserIdOf("nacho").ShouldNotBe(_gitlab.UserIdOf("maya"), "a re-authorization is refused for another account by its id, so two users must not share one");
+        maya.Json.GetProperty("username").GetString().ShouldBe("maya");
+    }
+
+    [Fact]
+    public async Task A_seeded_personal_access_token_is_an_access_token_that_never_expires_and_reports_its_own_scopes()
+    {
+        _gitlab.SeedPersonalAccessToken("nacho", "glpat-live");
+
+        var asPrivateToken = await GetAsync("/api/v4/user", ("PRIVATE-TOKEN", "glpat-live")).ConfigureAwait(false);
+        var asBearer = await GetAsync("/api/v4/user", ("Authorization", "Bearer glpat-live")).ConfigureAwait(false);
+        var unknown = await GetAsync("/api/v4/user", ("PRIVATE-TOKEN", "glpat-never-heard-of")).ConfigureAwait(false);
+        var self = await GetAsync("/api/v4/personal_access_tokens/self", ("PRIVATE-TOKEN", "glpat-live")).ConfigureAwait(false);
+
+        asPrivateToken.Status.ShouldBe(HttpStatusCode.OK);
+        asBearer.Status.ShouldBe(HttpStatusCode.Unauthorized, "an access token is not an OAuth token: GitLab looks a Bearer up as OAuth alone");
+        unknown.Status.ShouldBe(HttpStatusCode.Unauthorized);
+        self.Json.GetProperty("scopes").EnumerateArray().Select(e => e.GetString()).ShouldBe(GitLabDoorkeeperStub.PersonalAccessTokenScopes.Split(','));
+        self.Json.GetProperty("expires_at").ValueKind.ShouldBe(JsonValueKind.Null);
+    }
+
     [Theory]
     [InlineData("oauth2", true, HttpStatusCode.OK)]
     [InlineData("nacho", true, HttpStatusCode.Unauthorized)]

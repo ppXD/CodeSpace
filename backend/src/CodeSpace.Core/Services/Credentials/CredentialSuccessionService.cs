@@ -170,26 +170,38 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
             .Where(w => w.ProviderInstanceId == successor.ProviderInstanceId && predecessorIds.Contains(w.CredentialId) && WebhookRegistrationLifecycle.InService.Contains(w.RegistrationStatus))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-    /// <summary>The inverse of the disconnect cascade: bind the live credential and lift the Error it set. Any other status (Paused, Unreachable) is the repository's own and stays.</summary>
+    /// <summary>Bind the live credential, and lift the Error the dead one's disconnect set (<see cref="Revive(Repository)"/>).</summary>
     private static void Adopt(Repository repository, Credential successor)
     {
         repository.CredentialId = successor.Id;
 
+        Revive(repository);
+    }
+
+    /// <summary>The inverse of the disconnect cascade: lift the Error it set. Any other status (Paused, Unreachable) is the repository's own and stays.</summary>
+    private static void Revive(Repository repository)
+    {
         if (repository.Status != RepositoryStatus.Error) return;
 
         repository.Status = RepositoryStatus.Active;
         repository.LastError = null;
     }
 
-    /// <summary>
-    /// Bind the live credential, and revive a hook the dead one failed — attempts reset, due now — exactly as a bind
-    /// revives it: a reconnect is the operator intervention that fixes what buried it. Registered, Enqueued and
-    /// Registering keep their state; they only need a live credential for their next call.
-    /// </summary>
+    /// <summary>Bind the live credential, and revive a hook the dead one failed (<see cref="Revive(ConnectionWebhook)"/>).</summary>
     private static void Adopt(ConnectionWebhook hook, Credential successor)
     {
         hook.CredentialId = successor.Id;
 
+        Revive(hook);
+    }
+
+    /// <summary>
+    /// Revive a hook a dead credential failed — attempts reset, due now — exactly as a bind revives it: a reconnect is the
+    /// operator intervention that fixes what buried it. Registered, Enqueued and Registering keep their state; they only
+    /// need a live credential for their next call.
+    /// </summary>
+    private static void Revive(ConnectionWebhook hook)
+    {
         if (!Revivable.Contains(hook.RegistrationStatus)) return;
 
         hook.RegistrationStatus = RepositoryWebhookRegistrationStatus.Pending;

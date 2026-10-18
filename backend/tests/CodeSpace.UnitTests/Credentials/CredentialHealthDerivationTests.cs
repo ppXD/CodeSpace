@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Messages.Dtos.Credentials;
+using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using Shouldly;
 
@@ -110,5 +111,30 @@ public class CredentialHealthDerivationTests
 
         JsonSerializer.Serialize(health, options).ShouldBe($"\"{wire}\"", "a rename is a breaking change to every client that branches on it");
         JsonSerializer.Deserialize<CredentialHealth>($"\"{wire}\"", options).ShouldBe(health);
+    }
+
+    [Theory]
+    // auth type, did the provider describe the token, what it said about the expiry (days; null = never), expected record (null = leave the column alone)
+    [InlineData(AuthType.Pat, true, 90, true, 90)]
+    [InlineData(AuthType.ProjectAccessToken, true, 3, true, 3)]
+    [InlineData(AuthType.GroupAccessToken, true, 400, true, 400)]
+    [InlineData(AuthType.Pat, true, null, true, null)]     // described, and "never expires" is recorded as no expiry: the replaced token's must not outlive it
+    [InlineData(AuthType.Pat, false, null, false, null)]   // not described: nothing is known, so the column is left alone
+    [InlineData(AuthType.Pat, false, 90, false, null)]     // an expiry the provider did not describe the token with is not trusted
+    [InlineData(AuthType.OAuth, true, 90, false, null)]    // an OAuth credential's expiry is its access token's, written by the refresher
+    public void A_static_tokens_expiry_is_recorded_only_when_the_provider_described_the_token(AuthType type, bool described, int? days, bool recorded, int? expectedDays)
+    {
+        var probe = new CredentialProbeResult { IsValid = true, Active = described ? true : null, ExpiresAt = days is { } d ? Now.AddDays(d) : null };
+
+        var record = CredentialHealthDerivation.RecordedExpiry(type, probe);
+
+        if (!recorded) record.ShouldBeNull();
+        else record.ShouldNotBeNull().ExpiresAt.ShouldBe(expectedDays is { } e ? Now.AddDays(e) : null);
+    }
+
+    [Fact]
+    public void No_probe_records_nothing()
+    {
+        CredentialHealthDerivation.RecordedExpiry(AuthType.Pat, null).ShouldBeNull();
     }
 }

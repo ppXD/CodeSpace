@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Credentials;
@@ -33,6 +34,16 @@ public static class CredentialHealthDerivation
 
     /// <summary>The credentials whose provider-side expiry CodeSpace records: access tokens a person created, not tokens the provider issued for a grant.</summary>
     public static bool IsStaticToken(AuthType authType) => authType is AuthType.Pat or AuthType.ProjectAccessToken or AuthType.GroupAccessToken;
+
+    /// <summary>
+    /// What to record about a static token's expiry from what its provider said about the token: the expiry as reported —
+    /// recorded even when it is "none" — but only when the provider described the token (<see cref="CredentialProbeResult.Active"/>
+    /// is set). Null leaves the column alone: nothing was described, or the credential is an OAuth one, whose expiry is its
+    /// access token's and is the refresher's to write. One rule for every writer that has just probed a token — the sweep, a
+    /// credential being added, a token that replaces another — so they cannot disagree about what "expires" means.
+    /// </summary>
+    public static ExpiryRecord? RecordedExpiry(AuthType authType, CredentialProbeResult? probe) =>
+        IsStaticToken(authType) && probe is { Active: not null } ? new ExpiryRecord(probe.ExpiresAt) : null;
 
     private static bool HasExpired(AuthType authType, DateTimeOffset? expiresDate, DateTimeOffset now) => IsStaticToken(authType) && expiresDate is { } at && at <= now;
 

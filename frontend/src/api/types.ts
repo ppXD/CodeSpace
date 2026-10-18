@@ -14,6 +14,9 @@ export type CredentialOwnership = "Personal" | "TeamService";
 
 export type CredentialStatus = "Active" | "Expired" | "Revoked" | "Error";
 
+/** What to read off a credential, derived by the backend from its row — never stored. `rejected` is the provider having refused it (a dead OAuth grant, a rejected or lapsed token): it needs reconnecting, or a new token. */
+export type CredentialHealth = "active" | "expiring" | "rejected" | "revoked" | "owner_left";
+
 export interface ProviderInstanceSummary {
   id: string;
   teamId: string;
@@ -44,6 +47,10 @@ export interface CredentialSummary {
   lastValidatedDate?: string | null;
   lastError?: string | null;
   createdDate: string;
+  /** Absent from a server that predates credential health, which is why every reader treats `status === "Error"` as `rejected` too. */
+  health?: CredentialHealth;
+  /** Whole days until a static token expires at its provider; null for an OAuth credential and for a token with no recorded expiry. */
+  daysToExpiry?: number | null;
 }
 
 export interface InitOAuthResponse {
@@ -63,6 +70,12 @@ export interface RevokeCredentialResponse {
    *  were bound through this credential. Zero when the credential wasn't tied to
    *  any active repo. UI uses this to confirm the cascade hit what the preview said. */
   affectedRepositoryCount: number;
+}
+
+export interface ReplaceCredentialTokenResponse {
+  credentialId: string;
+  /** The provider account the new token belongs to, when the provider could say — what the person can check it against. */
+  providerUsername?: string | null;
 }
 
 export interface CredentialUsage {

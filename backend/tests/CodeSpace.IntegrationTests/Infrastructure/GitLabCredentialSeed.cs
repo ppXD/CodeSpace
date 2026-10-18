@@ -108,13 +108,16 @@ public static class GitLabCredentialSeed
         await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE credential SET last_validated_date = {at} WHERE id = {credentialId}").ConfigureAwait(false);
     }
 
-    /// <summary>What the credential row holds now, decrypted — what the next refresh would present.</summary>
-    public static async Task<OAuthPayload> ReadStoredPayloadAsync(PostgresFixture fixture, Guid credentialId)
+    /// <summary>What the credential row holds now, decrypted — what the next refresh would present. Read as the row stands, not through <see cref="ICredentialResolver"/>, which refuses a credential its provider refused (Error): a test asks what is stored, whatever the row says about its health.</summary>
+    public static async Task<OAuthPayload> ReadStoredPayloadAsync(PostgresFixture fixture, Guid credentialId) => (OAuthPayload)await ReadPayloadAsync(fixture, credentialId).ConfigureAwait(false);
+
+    /// <summary>The payload the row holds, as the type its auth type says — read past the resolver's health gate (see <see cref="ReadStoredPayloadAsync"/>).</summary>
+    public static async Task<CredentialPayload> ReadPayloadAsync(PostgresFixture fixture, Guid credentialId)
     {
         using var scope = fixture.BeginScope();
         var credential = await scope.Resolve<CodeSpaceDbContext>().Credential.AsNoTracking().SingleAsync(c => c.Id == credentialId).ConfigureAwait(false);
 
-        return (OAuthPayload)scope.Resolve<ICredentialResolver>().Resolve(credential);
+        return scope.Resolve<ICredentialPayloadSerializer>().Deserialize(credential.AuthType, scope.Resolve<IPayloadEncryptor>().Decrypt(credential.EncryptedPayload));
     }
 
     public static async Task<Credential> ReadCredentialAsync(PostgresFixture fixture, Guid credentialId)

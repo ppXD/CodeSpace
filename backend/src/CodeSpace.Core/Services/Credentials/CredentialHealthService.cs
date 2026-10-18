@@ -12,7 +12,7 @@ using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Credentials;
 
-public sealed class CredentialHealthService : ICredentialHealthService, IScopedDependency
+public sealed class CredentialHealthService : ICredentialHealthService, IBoundedCredentialProbe, IScopedDependency
 {
     private const string SweepName = "credential-health-probe";
 
@@ -140,7 +140,7 @@ public sealed class CredentialHealthService : ICredentialHealthService, IScopedD
     /// verdict in its row stops anything resolving its token, and the probe is how the verdict is lifted. The copy is read
     /// without tracking and never saved, so the pretence reaches no row.
     /// </summary>
-    private async Task<CredentialProbeResult> ProbeAsync(ProviderInstance instance, Credential credential, CancellationToken cancellationToken)
+    public async Task<CredentialProbeResult> ProbeAsync(ProviderInstance instance, Credential credential, CancellationToken cancellationToken)
     {
         var provider = instance.Provider;
         var probe = _registry.Require<ICredentialProbeCapability>(provider);
@@ -176,7 +176,7 @@ public sealed class CredentialHealthService : ICredentialHealthService, IScopedD
 
         if (result.IsValid)
         {
-            await _writer.MarkValidatedAsync(credential.Id, credential.EncryptedPayload, _clock.GetUtcNow(), ExpiryOf(credential, result), cancellationToken).ConfigureAwait(false);
+            await _writer.MarkValidatedAsync(credential.Id, credential.EncryptedPayload, _clock.GetUtcNow(), CredentialHealthDerivation.RecordedExpiry(credential.AuthType, result), cancellationToken).ConfigureAwait(false);
 
             return true;
         }
@@ -200,7 +200,7 @@ public sealed class CredentialHealthService : ICredentialHealthService, IScopedD
 
         credential.LastValidatedDate = _clock.GetUtcNow();
 
-        if (ExpiryOf(credential, result) is { } expiry) credential.ExpiresDate = expiry.ExpiresAt;
+        if (CredentialHealthDerivation.RecordedExpiry(credential.AuthType, result) is { } expiry) credential.ExpiresDate = expiry.ExpiresAt;
     }
 
     /// <summary>The probe of a credential that is not saved yet, or null when it could not be asked: a failure here is the provider's, and adding the credential does not wait on it or fail with it. The caller's own cancellation still ends the add.</summary>
@@ -217,10 +217,6 @@ public sealed class CredentialHealthService : ICredentialHealthService, IScopedD
             return null;
         }
     }
-
-    /// <summary>A static token's expiry as its provider reports it — recorded even when it is "none" — but only when the provider described the token; an OAuth credential's expiry is its access token's and is not this sweep's to write.</summary>
-    private static ExpiryRecord? ExpiryOf(Credential credential, CredentialProbeResult result) =>
-        CredentialHealthDerivation.IsStaticToken(credential.AuthType) && result.Active.HasValue ? new ExpiryRecord(result.ExpiresAt) : null;
 
     private sealed record DueCredential(Guid Id) : ISweepCandidate;
 }

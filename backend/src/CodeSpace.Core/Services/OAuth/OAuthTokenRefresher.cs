@@ -17,7 +17,8 @@ public interface IOAuthTokenRefresher
 }
 
 /// <summary>
-/// Shared refresh logic for any provider's OAuth strategy. Two-tier lock:
+/// Shared refresh logic for any provider's OAuth strategy. Two-tier lock (<see cref="CredentialRefreshLock"/>, the same one a
+/// re-authorization takes):
 ///   1. Per-credential in-process <see cref="SemaphoreSlim"/> — cheap, blocks sibling
 ///      requests in the same process.
 ///   2. <see cref="ICrossProcessLock"/> — coordinates across multiple API instances. Held
@@ -48,9 +49,8 @@ public interface IOAuthTokenRefresher
 /// refresh token has marked the credential <c>Error</c> by then, and the fail-fast on that verdict would otherwise stand in
 /// front of the one live pair.</para>
 /// </summary>
-public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IOAuthTokenRecovery, IScopedDependency
+public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IOAuthTokenRecovery, IKeptOAuthPairs, IScopedDependency
 {
-    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> RefreshLocks = new();
     private static readonly TimeSpan RefreshBuffer = TimeSpan.FromMinutes(2);
 
     /// <summary>Waits between the attempts to store a rotated pair: one store and two retries, each on a connection of its own.</summary>
@@ -73,7 +73,7 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IOAuthTokenRecov
     /// <summary>
     /// Pairs the provider issued that no attempt could store, by credential: what the row held when the refresh began
     /// (the compare-and-swap's expected value) and the pair. Only this process knows them; the next use of the credential in
-    /// it stores them. Refreshes of one credential run one at a time per process, under <see cref="RefreshLocks"/>.
+    /// it stores them. Refreshes of one credential run one at a time per process, under <see cref="CredentialRefreshLock"/>.
     /// </summary>
     private static readonly ConcurrentDictionary<Guid, KeptRotation> KeptRotations = new();
 
@@ -106,19 +106,7 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IOAuthTokenRecov
     {
         if (!ShouldRefresh(current)) return current;
 
-        var sem = RefreshLocks.GetOrAdd(context.Credential.Id, _ => new SemaphoreSlim(1, 1));
-        await sem.WaitAsync(cancellationToken).ConfigureAwait(false);
-
-        try
-        {
-            await using var crossLock = await _crossProcessLock.AcquireAsync(CredentialIdToLockKey(context.Credential.Id), cancellationToken).ConfigureAwait(false);
-
-            return await RefreshStoredPayloadAsync(context, cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            sem.Release();
-        }
+        return await UnderRefreshLockAsync(context, ct => RefreshStoredPayloadAsync(context, ct), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -145,22 +133,18 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IOAuthTokenRecov
         await UnderRefreshLockAsync(context, async ct => await ReadStoredAfterKeptPairAsync(context, ct).ConfigureAwait(false), cancellationToken).ConfigureAwait(false);
     }
 
+    public void Discard(Guid credentialId)
+    {
+        if (KeptRotations.TryRemove(credentialId, out _))
+            _logger.LogWarning("Credential {CredentialId} was re-authorized; the rotated pair this process had kept for the grant it replaced is dropped, not stored over the new authorization", credentialId);
+    }
+
     /// <summary>The credential's two refresh locks — this process's, then every process's — held for <paramref name="work"/>.</summary>
     private async Task<T> UnderRefreshLockAsync<T>(ProviderContext context, Func<CancellationToken, Task<T>> work, CancellationToken cancellationToken)
     {
-        var sem = RefreshLocks.GetOrAdd(context.Credential.Id, _ => new SemaphoreSlim(1, 1));
-        await sem.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await using var held = await CredentialRefreshLock.AcquireAsync(_crossProcessLock, context.Credential.Id, cancellationToken).ConfigureAwait(false);
 
-        try
-        {
-            await using var crossLock = await _crossProcessLock.AcquireAsync(CredentialIdToLockKey(context.Credential.Id), cancellationToken).ConfigureAwait(false);
-
-            return await work(cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            sem.Release();
-        }
+        return await work(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -450,13 +434,6 @@ public sealed class OAuthTokenRefresher : IOAuthTokenRefresher, IOAuthTokenRecov
             ExpiresAt = response.ExpiresAt ?? current.ExpiresAt
         };
     }
-
-    /// <summary>
-    /// Stable int64 derived from the credential GUID. pg_advisory_lock takes int8 (bigint).
-    /// We take the first 8 bytes of the GUID — uniform distribution, collision probability
-    /// is the same as a 64-bit random key. Same credential id always maps to same key.
-    /// </summary>
-    internal static long CredentialIdToLockKey(Guid credentialId) => BitConverter.ToInt64(credentialId.ToByteArray(), 0);
 
     private sealed record KeptRotation(string Expected, OAuthPayload Issued);
 }
