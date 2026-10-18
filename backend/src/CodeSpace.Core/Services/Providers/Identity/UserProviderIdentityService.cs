@@ -104,12 +104,29 @@ public sealed class UserProviderIdentityService : IUserProviderIdentityService, 
 
         identity.DeletedDate = DateTimeOffset.UtcNow;
 
+        await MoveBindingsToOnlyOtherConnectionAsync(identity.Credential, userId, cancellationToken).ConfigureAwait(false);
+
         // Retire the backing credential through the same cascade a Disconnect runs — an unlinked identity must leave
         // nothing usable at rest, and a repository bound through its token must say it needs a new one rather than
         // stay Active on a blanked payload. Still the caller's own token, from whichever team they ask.
         await _revocation.RetireAsync(identity.Credential, cancellationToken).ConfigureAwait(false);
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// An unlink ends the person's connection exactly as a Disconnect does, so what a Disconnect that names nobody carries
+    /// forward — everything bound through it, onto their one other live connection — an unlink carries forward too, before
+    /// the cascade that would otherwise strand it. The same rule, the same refusals, one place:
+    /// <see cref="ICredentialSuccessionService.FindOnlyOtherConnectionAsync"/>.
+    /// </summary>
+    private async Task MoveBindingsToOnlyOtherConnectionAsync(Credential ending, Guid userId, CancellationToken cancellationToken)
+    {
+        var successor = await _succession.FindOnlyOtherConnectionAsync(ending, userId, cancellationToken).ConfigureAwait(false);
+
+        if (successor == null) return;
+
+        await _succession.MoveBindingsAsync(ending, successor, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task EnsureIdentityForCredentialAsync(ProviderInstance instance, Credential credential, Guid userId, CancellationToken cancellationToken)

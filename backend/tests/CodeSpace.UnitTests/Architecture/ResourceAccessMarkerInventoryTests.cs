@@ -55,6 +55,10 @@ public class ResourceAccessMarkerInventoryTests
         ["RevokeStorageCredentialCommand.CredentialId"] = "a storage credential; StorageCredentialService loads it by (header team, id).",
         ["GetStorageCredentialQuery.CredentialId"] = "a storage credential; StorageCredentialService loads it by (header team, id).",
 
+        // The credential marker refuses a soft-deleted credential, and a departed member's retired token is the one these two exist for.
+        ["GetCredentialDependentsQuery.CredentialId"] = "CredentialRelinkService.LoadTeamCredentialAsync loads the credential by (id, header team), soft-deleted or not, and reads it as not found otherwise.",
+        ["GetRelinkSuggestionsQuery.CredentialId"] = "the same CredentialRelinkService.LoadTeamCredentialAsync (id, header team) load as GetCredentialDependentsQuery.",
+
         // Bind names an instance AND a credential; the marker can vouch for one id, the service vouches for both.
         ["BindRepositoryCommand.CredentialId"] = "RepositoryBindingService.LoadCredentialAsync loads the credential by (id, header team).",
         ["BindRepositoryCommand.ProviderInstanceId"] = "RepositoryBindingService.LoadProviderInstanceAsync loads the instance by (id, header team), and the credential must belong to it.",

@@ -67,7 +67,14 @@ export interface RevokeCredentialResponse {
 
 export interface CredentialUsage {
   credentialId: string;
+  /** Working repositories a Disconnect would turn to "needs a new credential". Zero when they would follow another
+   *  connection instead (see willMoveRepositoryCount). */
   activeRepositoryCount: number;
+  /** Repositories a Disconnect would carry — in the same unit of work, so they never stop working — to the person's one
+   *  other live connection. Absent from an API that predates the move; read it as zero. */
+  willMoveRepositoryCount?: number;
+  /** Display name of the connection they would move to; null or absent when nothing would move. */
+  willMoveToDisplayName?: string | null;
 }
 
 /** Pre-delete preview for a provider instance — drives the confirm dialog's wording

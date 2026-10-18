@@ -55,6 +55,7 @@ public class TeamWritePermissionAdoptionTests
     [InlineData("UnbindRepositoryCommand", TeamPermissions.ReposManage)]
     [InlineData("RelinkRepositoryCredentialCommand", TeamPermissions.ReposManage)]
     [InlineData("TestRepositoryBindingCommand", TeamPermissions.ReposManage)]
+    [InlineData("RelinkCredentialBindingsCommand", TeamPermissions.ReposManage)]
     public void A_write_addressed_by_a_resource_id_holds_the_bar_of_the_write_that_creates_it(string command, string permission)
     {
         // These carried only their resource marker, which proves team and membership and no role — so a Viewer
