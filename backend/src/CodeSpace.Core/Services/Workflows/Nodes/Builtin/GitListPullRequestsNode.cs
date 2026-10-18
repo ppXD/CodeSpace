@@ -1,6 +1,7 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.PullRequests;
 using CodeSpace.Core.Services.Workflows.Runtime;
+using CodeSpace.Messages.Dtos.Providers;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Repositories;
 using Microsoft.Extensions.Logging;
@@ -16,7 +17,8 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// (e.g. "review every open PR": list → loop → fetch diff → agent → post review). Read-only; reuses
 /// the same catalog capability the Pulls tab uses, so it's provider-agnostic (GitHub + GitLab). Page and page size are
 /// held to the Pulls tab's own ceilings (<see cref="ListPullRequestsQuery.MaxPage"/>, <see cref="ListPullRequestsQuery.MaxPerPage"/>):
-/// called by an agent, they are the model's numbers.
+/// called by an agent, they are the model's numbers. A page size past its ceiling is the ceiling; a page past its is an
+/// empty page, with no request to the provider.
 /// </summary>
 public sealed class GitListPullRequestsNode : INodeRuntime
 {
@@ -59,7 +61,7 @@ public sealed class GitListPullRequestsNode : INodeRuntime
               "properties": {
                 "repositoryId": { "type": "string", "format": "uuid", "x-selector": "repository", "description": "The repository. Pick one, or switch to Expression to bind from the trigger (e.g. {{trigger.repositoryId}})." },
                 "state": { "type": "string", "enum": ["Open","Draft","Merged","Closed"], "description": "Only list requests in this state. Leave empty to list all." },
-                "page": { "type": "integer", "minimum": 1, "maximum": 1000, "x-control": "stepper", "x-advanced": true, "description": "Page of results (default 1, max 1000)." },
+                "page": { "type": "integer", "minimum": 1, "maximum": 1000, "x-control": "stepper", "x-advanced": true, "description": "Page of results (default 1, max 1000; a later page is empty)." },
                 "perPage": { "type": "integer", "minimum": 1, "maximum": 100, "default": 30, "x-control": "stepper", "x-advanced": true, "description": "Results per page (default 30, max 100)." }
               },
               "required": ["repositoryId"]
@@ -103,8 +105,10 @@ public sealed class GitListPullRequestsNode : INodeRuntime
         if (!TryReadState(context, out var state)) return NodeResult.Fail("Input 'state' must be one of Open, Draft, Merged, Closed.");
         if (!NodeScopeReader.TryReadTeamId(context, out var teamId)) return NodeResult.Fail("This run has no team context, so a repository can't be resolved.");
 
-        var page = Math.Min(ReadPositiveInt(context, "page", DefaultPage), ListPullRequestsQuery.MaxPage);
+        var page = ReadPositiveInt(context, "page", DefaultPage);
         var perPage = Math.Min(ReadPositiveInt(context, "perPage", DefaultPerPage), ListPullRequestsQuery.MaxPerPage);
+
+        if (page > ListPullRequestsQuery.MaxPage) return PastTheLastPage(context, repoId, page);
 
         var pullRequests = await context.Observability.TraceExternalCallAsync(
             target: $"git.list_prs:{repoId}",
@@ -117,16 +121,28 @@ public sealed class GitListPullRequestsNode : INodeRuntime
             },
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        var outputs = new Dictionary<string, JsonElement>
-        {
-            ["pullRequests"] = JsonSerializer.SerializeToElement(pullRequests, WorkflowJson.Options),
-            ["count"] = JsonSerializer.SerializeToElement(pullRequests.Count)
-        };
-
         context.Logger.LogInformation("Listed {Count} pull request(s) for repo {RepoId} (state {State})", pullRequests.Count, repoId, state?.ToString() ?? "any");
 
-        return NodeResult.Ok(outputs);
+        return NodeResult.Ok(OutputsOf(pullRequests));
     }
+
+    /// <summary>
+    /// A page past the last one the list allows is an empty page. Reading the last page for it instead returned the rows the
+    /// caller had just seen under a page number that said it was further on, so a loop paging until it got an empty page
+    /// never got one.
+    /// </summary>
+    private static NodeResult PastTheLastPage(NodeRunContext context, Guid repoId, int page)
+    {
+        context.Logger.LogInformation("Page {Page} of the pull requests for repo {RepoId} is past the last page the list allows ({MaxPage}); returning an empty page", page, repoId, ListPullRequestsQuery.MaxPage);
+
+        return NodeResult.Ok(OutputsOf([]));
+    }
+
+    private static Dictionary<string, JsonElement> OutputsOf(IReadOnlyList<RemotePullRequest> pullRequests) => new()
+    {
+        ["pullRequests"] = JsonSerializer.SerializeToElement(pullRequests, WorkflowJson.Options),
+        ["count"] = JsonSerializer.SerializeToElement(pullRequests.Count)
+    };
 
     private static bool TryReadRepositoryId(NodeRunContext context, out Guid repoId)
     {
@@ -154,12 +170,17 @@ public sealed class GitListPullRequestsNode : INodeRuntime
         return true;
     }
 
-    /// <summary>Read an optional positive-int input, falling back to <paramref name="fallback"/> when absent or non-positive.</summary>
+    /// <summary>
+    /// Read an optional positive-int input, falling back to <paramref name="fallback"/> when absent, not a number, or below one.
+    /// A number is read by its value, not by how it is written: one an Int32 cannot hold (3000000000) is the very large number
+    /// it is — <see cref="int.MaxValue"/> — and not a missing one, which would turn "a page far past the last" into page 1;
+    /// one written with a fraction or an exponent (1001.0, 1.001e3, 1001.5) is read at its whole part.
+    /// </summary>
     private static int ReadPositiveInt(NodeRunContext context, string key, int fallback)
     {
-        if (context.Inputs.TryGetValue(key, out var value) && value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var n) && n > 0)
-            return n;
+        if (!context.Inputs.TryGetValue(key, out var value) || value.ValueKind != JsonValueKind.Number) return fallback;
+        if (value.TryGetInt32(out var whole)) return whole > 0 ? whole : fallback;
 
-        return fallback;
+        return value.TryGetDouble(out var number) && number >= 1 ? (int)Math.Min(number, int.MaxValue) : fallback;
     }
 }

@@ -21,7 +21,9 @@ public sealed record ListPullRequestsQuery : IQuery<IReadOnlyList<RemotePullRequ
 
     /// <summary>
     /// The furthest page a caller may name (with <see cref="MaxPerPage"/>, the newest 100,000 requests). A page past it
-    /// reads this one: the number cannot run past what a page index and offset hold, and no list is paged this deep.
+    /// is an empty page, and the provider is not asked: the number cannot run past what a page index and offset hold,
+    /// and no list is paged this deep. (Reading this page again for it would answer a caller who pages on with rows it
+    /// already has.)
     /// </summary>
     public const int MaxPage = 1000;
 

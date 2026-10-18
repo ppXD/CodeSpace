@@ -1,5 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { authApi } from "./auth";
+import { invitationsApi } from "./invitations";
 import { ApiError, fetchJson } from "./request";
 
 /**
@@ -77,6 +79,22 @@ describe("fetchJson", () => {
     const headers = capturedHeaders();
     expect(headers.get("X-CodeSpace-Csrf")).toBe("1");
     expect(headers.has("Authorization")).toBe(false);
+  });
+
+  it.each([
+    ["sign-in", () => authApi.signIn({ name: "maya@team.dev", password: "correct-horse-battery" }), "/api/auth/sign-in"],
+    ["change-password", () => authApi.changePassword({ currentPassword: "old-passphrase-1", newPassword: "new-passphrase-2" }), "/api/auth/change-password"],
+    ["invitation accept", () => invitationsApi.accept("an-invite-token", { name: "Maya", password: "correct-horse-battery" }), "/api/invitations/an-invite-token/accept"],
+  ])("sends the CSRF header on %s, the one thing that makes the API hand this browser its session as a cookie", async (_, call, path) => {
+    // The API sets the session cookie only for a request that carries the header: a client that predates the cookie (an
+    // older bundle, an API client) cannot clear one, so it is never given one. This SPA is the client that can, and the
+    // header is how it says so. Sent from a signed-out browser, a first sign-in, which holds no cookie and no token yet.
+    fetchMock.mockResolvedValueOnce(ok({ expiresAt: "2026-10-19T00:00:00Z", user: {} }));
+
+    await call();
+
+    expect(new URL(String(fetchMock.mock.calls[0]?.[0]), "http://spa.test").pathname).toBe(path);
+    expect(capturedHeaders().get("X-CodeSpace-Csrf")).toBe("1");
   });
 
   it("injects the Bearer JWT header when a pre-cookie token is in localStorage", async () => {

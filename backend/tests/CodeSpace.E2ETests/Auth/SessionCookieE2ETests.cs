@@ -44,7 +44,10 @@ public sealed class SessionCookieE2ETests : IClassFixture<TaskLaunchApiFactory>
     {
         var account = await AccountAsync();
 
-        var signIn = await _tenants.Client(new Uri($"{scheme}://localhost")).PostAsJsonAsync("/api/auth/sign-in", new { name = account.Email, password = Password });
+        var request = new HttpRequestMessage(HttpMethod.Post, "/api/auth/sign-in") { Content = JsonContent.Create(new { name = account.Email, password = Password }) };
+        request.Headers.Add(SessionCookie.CsrfHeader, "1");   // the SPA sends it on every request, sign-in included
+
+        var signIn = await _tenants.Client(new Uri($"{scheme}://localhost")).SendAsync(request);
 
         signIn.StatusCode.ShouldBe(HttpStatusCode.OK, await TenantHarness.DescribeAsync(signIn));
 
@@ -96,7 +99,7 @@ public sealed class SessionCookieE2ETests : IClassFixture<TaskLaunchApiFactory>
         var browserUser = await AccountAsync();
         var apiClient = await AccountAsync();
         var strayCookie = await SignInAsync(browserUser.Email);
-        var bearer = await TokenInBodyAsync(await SignInResponseAsync(apiClient.Email));
+        var bearer = await TokenInBodyAsync(await SignInResponseAsync(apiClient.Email, csrf: false));
 
         var me = await SendAsync(HttpMethod.Get, "/api/users/me", cookie: strayCookie, bearer: bearer);
         var write = await SendAsync(HttpMethod.Post, "/api/auth/change-password", cookie: strayCookie, bearer: bearer, body: new { currentPassword = Password, newPassword = "a-brand-new-passphrase" });
@@ -156,7 +159,8 @@ public sealed class SessionCookieE2ETests : IClassFixture<TaskLaunchApiFactory>
         var session = await SignInAsync(account.Email);
         var (path, body) = await SessionMintingRequestAsync(endpoint, account.Email);
 
-        var response = ridesCookie ? await SendAsync(HttpMethod.Post, path, cookie: session, csrf: true, body: body) : await SendAsync(HttpMethod.Post, path, bearer: session, body: body);
+        // Off the cookie it is a browser still on its token (a header-carrying client that asks for the cookie by sending the CSRF header).
+        var response = ridesCookie ? await SendAsync(HttpMethod.Post, path, cookie: session, csrf: true, body: body) : await SendAsync(HttpMethod.Post, path, bearer: session, csrf: true, body: body);
 
         response.StatusCode.ShouldBe(HttpStatusCode.OK, $"{endpoint} — {await TenantHarness.DescribeAsync(response)}");
 
@@ -167,6 +171,46 @@ public sealed class SessionCookieE2ETests : IClassFixture<TaskLaunchApiFactory>
 
         if (ridesCookie) raw.ShouldNotContain(minted, Case.Sensitive, "no form of the minted session may reach a body a page script reads");
         else JsonDocument.Parse(raw).RootElement.GetProperty("token").GetString().ShouldBe(minted, "a bearer client reads the session it was minted from the body, exactly as before");
+    }
+
+    /// <summary>
+    /// A client that predates the cookie signs in without the CSRF header, and has no way to sign out of a cookie: the
+    /// older SPA's sign-out only empties its own storage, an API client has no cookie jar, and only the API can clear an
+    /// HttpOnly cookie. Handed one anyway, it holds a 24-hour session it cannot end — through a rolling deploy, API
+    /// first, that is every browser with the older bundle open. It gets the session in the body, as it always did.
+    /// </summary>
+    [Theory]
+    [InlineData("sign-in")]
+    [InlineData("change-password")]
+    [InlineData("accept")]
+    public async Task A_client_that_does_not_send_the_csrf_header_gets_its_session_in_the_body_and_never_a_cookie(string endpoint)
+    {
+        var account = await AccountAsync();
+        var bearer = await TokenInBodyAsync(await SignInResponseAsync(account.Email, csrf: false));
+        var (path, body) = await SessionMintingRequestAsync(endpoint, account.Email);
+
+        var response = await SendAsync(HttpMethod.Post, path, bearer: endpoint == "sign-in" ? null : bearer, body: body);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, $"{endpoint} — {await TenantHarness.DescribeAsync(response)}");
+        SessionCookieOf(response).ShouldBeNull($"{endpoint} without {SessionCookie.CsrfHeader} must not set a cookie — Set-Cookie: {string.Join(" | ", SetCookies(response))}");
+
+        var minted = await TokenInBodyAsync(response);
+
+        (await SendAsync(HttpMethod.Get, "/api/users/me", bearer: minted)).StatusCode.ShouldBe(HttpStatusCode.OK, "fixture check: the body's session is a working one, so nothing is lost by withholding the cookie");
+    }
+
+    [Fact]
+    public async Task A_failed_sign_in_sets_no_cookie_whoever_asked()
+    {
+        var account = await AccountAsync();
+
+        var wrong = new HttpRequestMessage(HttpMethod.Post, "/api/auth/sign-in") { Content = JsonContent.Create(new { name = account.Email, password = "not-the-password-at-all" }) };
+        wrong.Headers.Add(SessionCookie.CsrfHeader, "1");
+
+        var response = await _tenants.Client().SendAsync(wrong);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized, await TenantHarness.DescribeAsync(response));
+        SessionCookieOf(response).ShouldBeNull();
     }
 
     [Fact]
@@ -205,7 +249,7 @@ public sealed class SessionCookieE2ETests : IClassFixture<TaskLaunchApiFactory>
         // A browser signed in before the cookie existed holds its token in localStorage. It trades it, once, for the
         // cookie. The SAME token: minting a fresh one here would turn the exchange into a way to extend a stolen token.
         var account = await AccountAsync();
-        var bearer = await TokenInBodyAsync(await SignInResponseAsync(account.Email));
+        var bearer = await TokenInBodyAsync(await SignInResponseAsync(account.Email, csrf: false));
 
         var exchange = await SendAsync(HttpMethod.Post, "/api/auth/session", bearer: bearer);
 
@@ -271,9 +315,10 @@ public sealed class SessionCookieE2ETests : IClassFixture<TaskLaunchApiFactory>
         return (await _tenants.AccountAsync(email: email, password: Password), email);
     }
 
-    private async Task<HttpResponseMessage> SignInResponseAsync(string email)
+    /// <summary>Signs in as the SPA does (with the CSRF header it sends on every request) unless <paramref name="csrf"/> is false: an API client, the CLI, or the SPA bundle that predates the cookie.</summary>
+    private async Task<HttpResponseMessage> SignInResponseAsync(string email, bool csrf = true)
     {
-        var response = await _tenants.Client().PostAsJsonAsync("/api/auth/sign-in", new { name = email, password = Password });
+        var response = await SendAsync(HttpMethod.Post, "/api/auth/sign-in", csrf: csrf, body: new { name = email, password = Password });
 
         response.StatusCode.ShouldBe(HttpStatusCode.OK, await TenantHarness.DescribeAsync(response));
 

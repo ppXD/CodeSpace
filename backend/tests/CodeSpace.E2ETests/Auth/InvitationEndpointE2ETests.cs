@@ -42,7 +42,7 @@ public sealed class InvitationEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     {
         var (token, email) = await SeedInvitationAsync();
 
-        var response = await _factory.CreateClient().PostAsJsonAsync($"/api/invitations/{token}/accept", new { name = "Wire Newcomer", password = "correct-horse-battery" });
+        var response = await AcceptAsync(token, "Wire Newcomer", asBrowser: true);
 
         response.StatusCode.ShouldBe(HttpStatusCode.OK, await DescribeAsync(response, "200 with a session"));
 
@@ -58,6 +58,20 @@ public sealed class InvitationEndpointE2ETests : IClassFixture<TaskLaunchApiFact
 
         // The shipped page reads user.teams to pick which team to land in.
         body.GetProperty("user").GetProperty("teams").GetArrayLength().ShouldBeGreaterThanOrEqualTo(2, "the invited team plus the personal workspace acceptance creates");
+    }
+
+    [Fact]
+    public async Task Accepting_without_the_csrf_header_returns_the_session_in_the_body_and_sets_no_cookie()
+    {
+        // The invite page that shipped before the cookie, running against an API that is already newer, sends no CSRF header
+        // and signs out by emptying its own storage. A cookie it cannot clear would outlive the sign-out for a day.
+        var (token, _) = await SeedInvitationAsync();
+
+        var response = await AcceptAsync(token, "Older Page Newcomer", asBrowser: false);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, await DescribeAsync(response, "200 with a session"));
+        (response.Headers.TryGetValues("Set-Cookie", out var setCookies) ? setCookies : []).ShouldNotContain(c => c.StartsWith($"{SessionCookie.Name}=", StringComparison.Ordinal));
+        JsonDocument.Parse(await response.Content.ReadAsStringAsync()).RootElement.GetProperty("token").GetString().ShouldNotBeNullOrWhiteSpace("the page reads its session from the body, as it always did");
     }
 
     [Fact]
@@ -147,6 +161,16 @@ public sealed class InvitationEndpointE2ETests : IClassFixture<TaskLaunchApiFact
     }
 
     // ─── Helpers ────────────────────────────────────────────────────────────────
+
+    /// <summary>Accepts as the SPA does (with the CSRF header it sends on every request) or as a client that predates the cookie does (without).</summary>
+    private async Task<HttpResponseMessage> AcceptAsync(string token, string name, bool asBrowser)
+    {
+        var request = new HttpRequestMessage(HttpMethod.Post, $"/api/invitations/{token}/accept") { Content = JsonContent.Create(new { name, password = "correct-horse-battery" }) };
+
+        if (asBrowser) request.Headers.Add(SessionCookie.CsrfHeader, "1");
+
+        return await _factory.CreateClient().SendAsync(request);
+    }
 
     /// <summary>
     /// Seeds a pending invitation straight to the row, hashing the token the same way the service does.

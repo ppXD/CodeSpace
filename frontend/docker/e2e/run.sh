@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # SPA image E2E: build the REAL frontend image and start it the way the cluster does (the ConfigMap's .env mounted at
 # /usr/share/nginx/html/.env, the image's own CMD /init.sh), then prove over HTTP what static-hosting.test.ts can only
-# pin as source text: init.sh derives the API origin from the substituted env, nginx accepts the config and reads that
-# origin, and every response carries the CSP, nosniff and Referrer-Policy, with /env.js handing the SPA its env. It also
-# reads the container log back: a token in an invitation, reset or callback path, or in a Referer naming one, is logged as
-# {token}, and every other request verbatim.
+# pin as source text: init.sh derives the API origin from the substituted env (into /tmp/codespace, nothing under /etc/nginx),
+# nginx accepts the config and reads that origin, and every response carries the CSP, nosniff and Referrer-Policy, with
+# /env.js handing the SPA its env. It also reads the container log back: a token in an invitation, reset or callback
+# path, or in a Referer naming one, is logged as {token}, and every other request verbatim. The container is started with a
+# writable root filesystem: the image does not yet start with a read-only one (see nginx.conf, at the include).
 #
 # Fidelity: high. The real Dockerfile, init.sh, @import-meta-env/cli (fetched by npx at start, as in production),
 # csp-api-origin.mjs and nginx. The expected CSP is nginx.conf's own header with the derived source filled in, so the
@@ -85,6 +86,11 @@ expect_served() { # $1 = case, $2 = VITE_API_URL, $3 = the CSP source init.sh mu
   base="http://127.0.0.1:$port"
 
   docker exec "$name" nginx -t >/dev/null 2>&1 || fail "$1: nginx -t rejects the config init.sh completed (run 'docker exec $name nginx -t')" "$name"
+
+  # The API-origin include nginx.conf reads is the one write init.sh used to make under /etc/nginx; it is under /tmp now, and
+  # nothing is left behind at the old path. This checks where that file is, not that the image starts read-only.
+  docker exec "$name" test -s /tmp/codespace/api-origin.conf || fail "$1: init.sh wrote no API-origin include at /tmp/codespace/api-origin.conf, where nginx.conf reads it" "$name"
+  ! docker exec "$name" test -e /etc/nginx/codespace || fail "$1: init.sh still writes under /etc/nginx/codespace, the path it moved off" "$name"
 
   expected="${CSP_TEMPLATE//\$codespace_api_origin/$3}"
 

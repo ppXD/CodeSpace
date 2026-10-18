@@ -76,7 +76,7 @@ public sealed class OpenAWorkspaceAndFillItE2ETests : IClassFixture<TaskLaunchAp
 
         var offer = JsonDocument.Parse(await preview.Content.ReadAsStringAsync()).RootElement;
         offer.GetProperty("teamName").GetString().ShouldBe("Design Guild", "a person deciding whether to accept is owed the name of what they are joining");
-        offer.TryGetProperty("accountExists", out _).ShouldBeFalse("an anonymous preview never says whether the address has an account");
+        offer.GetProperty("accountExists").GetBoolean().ShouldBeFalse("an anonymous preview never says whether the address has an account (the old spelling of forSignedInAccount, kept for the previous invite page)");
         offer.GetProperty("forSignedInAccount").GetBoolean().ShouldBeFalse("nobody is signed in");
 
         // ── And accepts ───────────────────────────────────────────────────────────

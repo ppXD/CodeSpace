@@ -187,9 +187,9 @@ public class GitListPullRequestsNodeTests
     }
 
     [Theory]
-    [InlineData(1_000_000, 4, ListPullRequestsQuery.MaxPage, 4)]
+    [InlineData(ListPullRequestsQuery.MaxPage, 4, ListPullRequestsQuery.MaxPage, 4)]   // the last page the list allows is still a page
     [InlineData(2, int.MaxValue, 2, ListPullRequestsQuery.MaxPerPage)]
-    [InlineData(int.MaxValue, 101, ListPullRequestsQuery.MaxPage, ListPullRequestsQuery.MaxPerPage)]
+    [InlineData(ListPullRequestsQuery.MaxPage, 101, ListPullRequestsQuery.MaxPage, ListPullRequestsQuery.MaxPerPage)]
     public async Task Clamps_pagination_to_the_ceilings_the_list_query_declares(int page, int perPage, int expectedPage, int expectedPerPage)
     {
         // An agent names page and perPage itself. Unclamped, one call asked a provider for its whole pull request list in a
@@ -201,6 +201,59 @@ public class GitListPullRequestsNodeTests
             ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
             ["page"] = JsonSerializer.SerializeToElement(page),
             ["perPage"] = JsonSerializer.SerializeToElement(perPage),
+        }), CancellationToken.None);
+
+        stub.Page.ShouldBe(expectedPage);
+        stub.PerPage.ShouldBe(expectedPerPage);
+    }
+
+    [Theory]
+    [InlineData("1001")]
+    [InlineData("1000000")]
+    [InlineData("2147483647")]
+    [InlineData("2147483648")]    // the first number an Int32 cannot hold: it used to be read as no page at all, and so as page 1
+    [InlineData("3000000000")]
+    [InlineData("1e12")]
+    [InlineData("1e999")]         // past what a double holds as well
+    [InlineData("1001.0")]        // a spelling is not a different number
+    [InlineData("1.001e3")]
+    [InlineData("1001.5")]
+    public async Task A_page_past_the_last_one_the_list_allows_is_an_empty_page_and_asks_no_provider(string page)
+    {
+        // It used to read page 1000 again — the same rows an agent had just seen, under a number that said it was further on,
+        // so a loop paging until an empty page never reached one. A number too large for an Int32 fell through to page 1.
+        var stub = new StubPrService();
+
+        var result = await new GitListPullRequestsNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+            ["page"] = Raw(page),
+            ["perPage"] = JsonSerializer.SerializeToElement(100),
+        }), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["pullRequests"].GetArrayLength().ShouldBe(0);
+        result.Outputs["count"].GetInt32().ShouldBe(0);
+        stub.Calls.ShouldBe(0, "there is nothing at that page to fetch, so nothing is fetched");
+    }
+
+    [Theory]
+    [InlineData("2.0", "30.0", 2, 30)]                                    // written with a fraction, the whole number it says
+    [InlineData("1e1", "5E1", 10, 50)]                                    // or with an exponent
+    [InlineData("2.5", "50.9", 2, 50)]                                    // a number with a fraction is read at its whole part
+    [InlineData("3", "3000000000", 3, ListPullRequestsQuery.MaxPerPage)]  // a size too large for an Int32 is the ceiling, as 101 is — not the default
+    [InlineData("1", "1e12", 1, ListPullRequestsQuery.MaxPerPage)]
+    [InlineData("0.5", "0.5", 1, 30)]                                     // below one it is not a page or a size, as 0 is not
+    [InlineData("-3000000000", "-1e12", 1, 30)]                           // and a number far below one is no more one than -5 is
+    public async Task Reads_a_number_by_its_value_and_not_by_how_it_is_written(string page, string perPage, int expectedPage, int expectedPerPage)
+    {
+        var stub = new StubPrService();
+
+        await new GitListPullRequestsNode(stub).RunAsync(ContextFrom(new()
+        {
+            ["repositoryId"] = JsonSerializer.SerializeToElement(Repo),
+            ["page"] = Raw(page),
+            ["perPage"] = Raw(perPage),
         }), CancellationToken.None);
 
         stub.Page.ShouldBe(expectedPage);
@@ -236,6 +289,9 @@ public class GitListPullRequestsNodeTests
         result.Status.ShouldBe(NodeStatus.Failure);
         result.Error.ShouldContain("repositoryId");
     }
+
+    /// <summary>A JSON value exactly as a caller wrote it — <c>1001.0</c> and <c>1001</c> are different tokens to a reader.</summary>
+    private static JsonElement Raw(string json) => JsonDocument.Parse(json).RootElement.Clone();
 
     private static NodeRunContext Context(string repositoryId, string? state = null)
     {

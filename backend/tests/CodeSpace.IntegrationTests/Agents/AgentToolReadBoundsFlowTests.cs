@@ -26,9 +26,10 @@ namespace CodeSpace.IntegrationTests.Agents;
 /// <c>GitListPullRequestsNode</c> → <c>PullRequestService</c> → the real GitLab provider and NGitLab) and the real mediator
 /// pipeline behind the Pulls tab, on Postgres, against a loopback GitLab that holds as many merge requests as anyone asks for.
 ///
-/// <para>Covers: a page and page size an agent names are held to the list's ceilings and read as one request for that one
-/// page (the deep-page walk spent a request per page before it); the Pulls tab's and the Issues tab's queries are held the
-/// same way; one agent run spends only its share of the connection's requests a minute, so the Pulls tab is still served
+/// <para>Covers: a page size an agent names is held to the list's ceiling and the page it names is read as one request for
+/// that one page (the deep-page walk spent a request per page before it), while a page past the last one the list allows is
+/// an empty page that asks the provider nothing (it used to read the last page again); the Pulls tab's and the Issues tab's
+/// queries are held the same way; one agent run spends only its share of the connection's requests a minute, so the Pulls tab is still served
 /// while it lists; a list too large for one tool result reaches the model cut, as an error that says so; and a command
 /// whose output is too large is answered as done, cut, and never invited to run again.</para>
 ///
@@ -43,13 +44,13 @@ public sealed class AgentToolReadBoundsFlowTests(PostgresFixture fixture)
     private const string IssuesPath = "/api/v4/projects/4242/issues";
 
     [Fact]
-    public async Task An_agents_list_asks_GitLab_for_one_bounded_page_whatever_it_names()
+    public async Task An_agents_list_asks_GitLab_for_one_bounded_page_whatever_size_it_names()
     {
         using var gitlab = LoopbackGitLab(titleLength: 8);
         var world = await SeedWorldAsync(gitlab.BaseUrl);
 
         using var scope = fixture.BeginScope();
-        var result = await CallToolAsync(Handler(scope, world), "git.list_prs", new { repositoryId = world.RepositoryId.ToString(), page = 1_000_000, perPage = int.MaxValue });
+        var result = await CallToolAsync(Handler(scope, world), "git.list_prs", new { repositoryId = world.RepositoryId.ToString(), page = ListPullRequestsQuery.MaxPage, perPage = int.MaxValue });
 
         result.GetProperty("isError").GetBoolean().ShouldBeFalse(Text(result));
         var page = ForgeQueryOf(gitlab.Requests.Where(r => r.PathAndQuery.Contains(MergeRequestsPath)).ShouldHaveSingleItem("one request for the one page, never a walk through the pages before it"));
@@ -60,13 +61,40 @@ public sealed class AgentToolReadBoundsFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task An_agent_paging_past_the_last_page_is_given_an_empty_one_and_GitLab_is_not_asked()
+    {
+        using var gitlab = LoopbackGitLab(titleLength: 8);
+        var world = await SeedWorldAsync(gitlab.BaseUrl);
+
+        using var scope = fixture.BeginScope();
+        var handler = Handler(scope, world);
+        var last = await CallToolAsync(handler, "git.list_prs", new { repositoryId = world.RepositoryId.ToString(), page = ListPullRequestsQuery.MaxPage, perPage = 100 });
+        var asked = gitlab.Requests.Count;
+
+        last.GetProperty("structuredContent").GetProperty("count").GetInt32().ShouldBe(ListPullRequestsQuery.MaxPerPage, "fixture check: the last page the list allows holds a full page, so an empty answer past it is the guard and not an empty loopback");
+
+        // Past what an Int32 holds too: an agent names the number, and a JSON number is not limited to an int. It used to be
+        // read as no page at all, so GitLab was asked for page 1 and the first page's rows came back as "a page far on".
+        foreach (var page in new long[] { ListPullRequestsQuery.MaxPage + 1, 1_000_000, int.MaxValue, 2_147_483_648, 3_000_000_000 })
+        {
+            var past = await CallToolAsync(handler, "git.list_prs", new { repositoryId = world.RepositoryId.ToString(), page, perPage = 100 });
+
+            past.GetProperty("isError").GetBoolean().ShouldBeFalse(Text(past));
+            past.GetProperty("structuredContent").GetProperty("count").GetInt32().ShouldBe(0, $"page {page}");
+            past.GetProperty("structuredContent").GetProperty("pullRequests").GetArrayLength().ShouldBe(0, $"page {page}");
+        }
+
+        gitlab.Requests.Count.ShouldBe(asked, "a page past the last one is answered without a request to GitLab");
+    }
+
+    [Fact]
     public async Task The_pulls_tab_asks_GitLab_for_one_bounded_page_too()
     {
         using var gitlab = LoopbackGitLab(titleLength: 8);
         var world = await SeedWorldAsync(gitlab.BaseUrl);
 
         using var scope = fixture.BeginScopeAs(world.OwnerId, world.TeamId, Roles.Admin);
-        var listed = await scope.Resolve<IMediator>().Send(new ListPullRequestsQuery { RepositoryId = world.RepositoryId, Page = 1_000_000, PerPage = int.MaxValue });
+        var listed = await scope.Resolve<IMediator>().Send(new ListPullRequestsQuery { RepositoryId = world.RepositoryId, Page = ListPullRequestsQuery.MaxPage, PerPage = int.MaxValue });
 
         listed.Count.ShouldBe(ListPullRequestsQuery.MaxPerPage);
         var page = ForgeQueryOf(gitlab.Requests.Where(r => r.PathAndQuery.Contains(MergeRequestsPath)).ShouldHaveSingleItem());
@@ -92,18 +120,54 @@ public sealed class AgentToolReadBoundsFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task The_pulls_tab_paging_past_the_last_page_is_given_an_empty_one_and_GitLab_is_not_asked()
+    {
+        using var gitlab = LoopbackGitLab(titleLength: 8);
+        var world = await SeedWorldAsync(gitlab.BaseUrl);
+
+        using var scope = fixture.BeginScopeAs(world.OwnerId, world.TeamId, Roles.Admin);
+        var mediator = scope.Resolve<IMediator>();
+
+        (await mediator.Send(new ListPullRequestsQuery { RepositoryId = world.RepositoryId, Page = ListPullRequestsQuery.MaxPage, PerPage = 100 })).Count.ShouldBe(ListPullRequestsQuery.MaxPerPage, "fixture check: the last page the list allows holds a full page");
+        var asked = gitlab.Requests.Count;
+
+        foreach (var page in new[] { ListPullRequestsQuery.MaxPage + 1, 1_000_000, int.MaxValue })
+            (await mediator.Send(new ListPullRequestsQuery { RepositoryId = world.RepositoryId, Page = page, PerPage = 100 })).ShouldBeEmpty($"page {page}");
+
+        gitlab.Requests.Count.ShouldBe(asked, "a page past the last one is answered without a request to GitLab");
+    }
+
+    [Fact]
     public async Task The_issues_tab_asks_GitLab_for_one_bounded_page_too()
     {
         using var gitlab = LoopbackGitLab(titleLength: 8);
         var world = await SeedWorldAsync(gitlab.BaseUrl);
 
         using var scope = fixture.BeginScopeAs(world.OwnerId, world.TeamId, Roles.Admin);
-        var listed = await scope.Resolve<IMediator>().Send(new ListIssuesQuery { RepositoryId = world.RepositoryId, Page = 1_000_000, PerPage = int.MaxValue });
+        var listed = await scope.Resolve<IMediator>().Send(new ListIssuesQuery { RepositoryId = world.RepositoryId, Page = ListIssuesQuery.MaxPage, PerPage = int.MaxValue });
 
         listed.Count.ShouldBe(ListIssuesQuery.MaxPerPage);
         var page = ForgeQueryOf(gitlab.Requests.Where(r => r.PathAndQuery.Contains(IssuesPath)).ShouldHaveSingleItem("one request for the one page, never a walk through the pages before it"));
         page["page"].ShouldBe(ListIssuesQuery.MaxPage.ToString());
         page["per_page"].ShouldBe(ListIssuesQuery.MaxPerPage.ToString());
+    }
+
+    [Fact]
+    public async Task The_issues_tab_paging_past_the_last_page_is_given_an_empty_one_and_GitLab_is_not_asked()
+    {
+        using var gitlab = LoopbackGitLab(titleLength: 8);
+        var world = await SeedWorldAsync(gitlab.BaseUrl);
+
+        using var scope = fixture.BeginScopeAs(world.OwnerId, world.TeamId, Roles.Admin);
+        var mediator = scope.Resolve<IMediator>();
+
+        (await mediator.Send(new ListIssuesQuery { RepositoryId = world.RepositoryId, Page = ListIssuesQuery.MaxPage, PerPage = 100 })).Count.ShouldBe(ListIssuesQuery.MaxPerPage, "fixture check: the last page the list allows holds a full page");
+        var asked = gitlab.Requests.Count;
+
+        foreach (var page in new[] { ListIssuesQuery.MaxPage + 1, 1_000_000, int.MaxValue })
+            (await mediator.Send(new ListIssuesQuery { RepositoryId = world.RepositoryId, Page = page, PerPage = 100 })).ShouldBeEmpty($"page {page}");
+
+        gitlab.Requests.Count.ShouldBe(asked, "a page past the last one is answered without a request to GitLab");
     }
 
     [Fact]
