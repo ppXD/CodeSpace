@@ -2,7 +2,8 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import type { MeResponse, MeTeam, ProviderKind, RejectedDelivery, RepositoryWebhookAttemptDetail, RepositoryWebhookCoverage, RepositoryWebhookDetail } from "@/api/types";
+import type { MeResponse, MeTeam, ProviderKind, ProviderRemedy, RejectedDelivery, RepositoryWebhookAttemptDetail, RepositoryWebhookCoverage, RepositoryWebhookDetail } from "@/api/types";
+import { DialogProvider } from "@/components/dialog";
 import { rejectionCopy } from "@/lib/webhookState";
 import { RepositoryWebhooksPanel } from "./RepositoryWebhooksPanel";
 
@@ -78,7 +79,7 @@ describe("repository webhooks panel", () => {
     }));
   }
 
-  function renderPanel(hooks: RepositoryWebhookDetail[], { provider = "GitLab" as ProviderKind, permissions = ["repos.manage"], secret = "s3cr3t-from-the-server", refusals = [] as RejectedDelivery[], cap = 50, coverage = { scope: "Repository", ownerPath: null, hook: null } as RepositoryWebhookCoverage } = {}) {
+  function renderPanel(hooks: RepositoryWebhookDetail[], { provider = "GitLab" as ProviderKind, permissions = ["repos.manage"], secret = "s3cr3t-from-the-server", refusals = [] as RejectedDelivery[], cap = 50, remedy = null as ProviderRemedy | null, coverage = { scope: "Repository", ownerPath: null, hook: null } as RepositoryWebhookCoverage } = {}) {
     localStorage.setItem("codespace.jwt", "test-jwt");
     localStorage.setItem("codespace.activeTeamId", "t1");
 
@@ -86,7 +87,7 @@ describe("repository webhooks panel", () => {
       "/webhooks/coverage": coverage,
       "/webhooks/w1/secret": { webhookId: "w1", secret },
       "/webhooks": hooks,
-      "/rejected-deliveries": { deliveries: refusals, cap },
+      "/rejected-deliveries": { deliveries: refusals, cap, ...(remedy ? { remedy } : {}) },
       "/api/users/me": me(team(permissions)),
     });
 
@@ -94,7 +95,9 @@ describe("repository webhooks panel", () => {
 
     return render(
       <QueryClientProvider client={client}>
-        <RepositoryWebhooksPanel repositoryId="r1" fullPath="ruhappy/ruhappy-web" provider={provider} />
+        <DialogProvider>
+          <RepositoryWebhooksPanel repositoryId="r1" fullPath="ruhappy/ruhappy-web" provider={provider} />
+        </DialogProvider>
       </QueryClientProvider>,
     );
   }
@@ -593,5 +596,52 @@ describe("repository webhooks panel", () => {
     expect(toneOf(copy.headline)).toBe("bad");
     expect(screen.getByText(/GitHub sends an id with every delivery/)).toBeTruthy();
     expect(screen.queryByText("The signature did not match")).toBeNull();
+  });
+
+  // ── Refusals that blame the repository's CREDENTIAL carry the way out ──
+
+  const credentialRemedy = (code: string): ProviderRemedy => ({
+    code,
+    title: "GitLab refused the credential this trigger uses",
+    cause: "GitLab refused “GitLab · nacho”, so CodeSpace could not check who wrote the pull request on ruhappy/ruhappy-web. The author is not in question — the credential is.",
+    resolved: false,
+    credential: { id: "c1", displayName: "GitLab · nacho", ownership: "Personal", ownerUserId: "u1", ownerName: "Mars P", authType: "OAuth", status: "Error", health: "rejected", retired: false, providerInstanceId: "pi1" },
+    repositories: [{ id: "r1", fullPath: "ruhappy/ruhappy-web", status: "Active", credentialId: "c1", credentialWorks: false }],
+    providerInstance: { id: "pi1", displayName: "GitLab", provider: "GitLab", baseUrl: "https://gitlab.test" },
+    actions: [{ kind: "reconnect", label: "Reconnect GitLab", enabled: true }, { kind: "relink", label: "Re-link repository", enabled: true }, { kind: "open_providers", label: "Open Providers", enabled: true }],
+    askPeople: [],
+  });
+
+  it.each([
+    ["credential_rejected", "The repository's credential was refused", /The author is not in question — the credential is/],
+    ["author_standing_unknown", "Who wrote the pull request could not be read", /Setting “Pull requests from” to Anyone is not the fix/],
+  ] as const)("reads a %s refusal as its own news — not as an unrecognised reason, and not as an author who is not a member", async (reason, headline, remedyText) => {
+    renderPanel([hook()], { refusals: [refusal({ reason, detail: "GitLab answered HTTP 401 to the repository's credential 'GitLab · nacho'", verificationResultJson: null })], remedy: credentialRemedy(reason) });
+
+    await waitFor(() => expect(screen.getByText(headline)).toBeTruthy());
+
+    expect(toneOf(headline)).toBe("bad");
+    expect(screen.getAllByText(remedyText).length).toBeGreaterThan(0);
+    expect(screen.queryByText("Refused on arrival")).toBeNull();
+    expect(screen.queryByText("A pull request from someone without a role on the repository")).toBeNull();
+  });
+
+  it("puts the credential's remediation card above the refusals once, with the fixes the backend says are the caller's", async () => {
+    renderPanel([hook()], { refusals: [refusal({ id: "d1", reason: "credential_rejected", detail: "x" }), refusal({ id: "d2", reason: "credential_rejected", detail: "y" })], remedy: credentialRemedy("credential_rejected") });
+
+    await waitFor(() => expect(screen.getByRole("alert", { name: "Connection problem" })).toBeTruthy());
+
+    expect(screen.getAllByRole("alert", { name: "Connection problem" })).toHaveLength(1);
+    expect(screen.getByRole("button", { name: "Reconnect GitLab" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Re-link repository" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Re-run" })).toBeNull();   // a refused delivery started no run
+  });
+
+  it("shows no remediation card for refusals that blame nothing about the credential", async () => {
+    renderPanel([hook()], { refusals: [refusal({ reason: "signature_invalid" })] });
+
+    await waitFor(() => expect(screen.getByText(rejectionCopy("signature_invalid", "GitLab").headline)).toBeTruthy());
+
+    expect(screen.queryByRole("alert", { name: "Connection problem" })).toBeNull();
   });
 });

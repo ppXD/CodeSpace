@@ -13,11 +13,19 @@ namespace CodeSpace.Core.Services.Workflows.RunSources.Admission.Exceptions;
 /// </summary>
 public sealed class PullRequestStandingUnavailableException : Exception, IFailure
 {
-    public PullRequestStandingUnavailableException(string reason, string detail, string auditKey) : base(detail)
+    public PullRequestStandingUnavailableException(string reason, string detail, string auditKey, PersistedFailure? lookup = null) : base(detail)
     {
         Reason = reason;
         AuditKey = auditKey;
+        Lookup = lookup;
     }
+
+    /// <summary>
+    /// What failed, as the machine-readable half of <see cref="Exception.Message"/>: the refusal's reason as the code, the
+    /// <see cref="StandingLookupCauses"/> cause and the status the provider answered as details. Kept on the audit row so the repository's
+    /// remedy can tell a credential that may not read members from a provider that did not answer. Null for a refusal blamed on the credential outright.
+    /// </summary>
+    public PersistedFailure? Lookup { get; }
 
     /// <summary>The <see cref="WorkflowRunRequestRejectionReasons"/> value the refusal is recorded under.</summary>
     public string Reason { get; } = WorkflowRunRequestRejectionReasons.AuthorStandingUnknown;

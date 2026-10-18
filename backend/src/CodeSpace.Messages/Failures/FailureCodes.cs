@@ -191,6 +191,23 @@ public static class FailureCodes
     public const string ModelCredentialLeaseLost = "model_credential_lease_lost";
 
     /// <summary>
+    /// The failures that say a provider CONNECTION needs a person's attention — a credential disconnected, refused by its
+    /// provider, or an address that redirects — and that a person can repair without anyone touching the run: reconnect, replace
+    /// the token, re-link the repository, correct the provider's address. These are the ones a run's record writes down as a
+    /// <see cref="PersistedFailure"/> and the run detail answers with a remedy; every other code stays the sentence it was.
+    /// Pinned member-by-member by a unit test: a member added here is a new kind of card on the run page.
+    /// </summary>
+    public static readonly IReadOnlySet<string> ProviderConnection = new HashSet<string>(StringComparer.Ordinal)
+    {
+        CredentialDisconnected,
+        CredentialNeedsReconnect,
+        ProviderUnauthorized,
+        GitCredentialRejected,
+        ProviderBaseUrlRedirects,
+        OAuthExchangeFailed,
+    };
+
+    /// <summary>
     /// The codes that, worn as an agent attempt's <c>AgentRunResult.ExitReason</c>, say the attempt died on OUR
     /// INFRASTRUCTURE — the worker went away, the broker could not bind, the host could not seal a network-off run to
     /// its broker — rather than on anything the agent did or

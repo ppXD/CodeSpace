@@ -16,4 +16,11 @@ public sealed record RepositoryRejectedDeliveries
 
     /// <summary>The most rows this answer will ever carry. A full list cannot be told apart from exactly-the-cap — the read asks for the cap and gets no count beyond it, so the UI says the list stops there rather than claiming more exist.</summary>
     public required int Cap { get; init; }
+
+    /// <summary>
+    /// What to do about the refusals that blame the repository's credential (<c>credential_rejected</c>, <c>author_standing_unknown</c>),
+    /// for the asking user. Present only when the list holds one of those; the same remedy serves every such row, because it
+    /// is about the credential the repository runs through NOW and not about any one delivery.
+    /// </summary>
+    public Credentials.ProviderRemedy? Remedy { get; init; }
 }

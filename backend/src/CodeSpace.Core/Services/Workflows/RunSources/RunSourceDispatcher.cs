@@ -2,6 +2,7 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using CodeSpace.Core.Services.Completion.Exceptions;
+using CodeSpace.Core.Services.Workflows.Failures;
 using CodeSpace.Core.Services.Workflows.RunSources.Admission;
 using CodeSpace.Core.Services.Workflows.RunSources.Admission.Exceptions;
 using CodeSpace.Core.Middlewares.Transactional;
@@ -11,6 +12,7 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Events.PullRequest;
 using CodeSpace.Messages.Events.Push;
+using CodeSpace.Messages.Failures;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -181,7 +183,7 @@ public sealed class RunSourceDispatcher :
             {
                 anyRefused = true;
                 _logger.LogWarning("Webhook activation could not read a pull request author's standing. ActivationId={ActivationId} WorkflowId={WorkflowId} TeamId={TeamId} Reason={Reason} Detail={Detail}", activation.Id, activation.WorkflowId, activation.Workflow.TeamId, ex.Reason, ex.Message);
-                await AuditRefusalAsync(activation, normalizedEvent, ex.Reason, ex.Message, ex.AuditKey, cancellationToken).ConfigureAwait(false);
+                await AuditRefusalAsync(activation, normalizedEvent, ex.Reason, ex.Message, ex.AuditKey, cancellationToken, ex.Lookup).ConfigureAwait(false);
             }
             catch (PullRequestTriggerDebouncedException ex)
             {
@@ -195,13 +197,14 @@ public sealed class RunSourceDispatcher :
     }
 
     /// <summary>One Rejected row per <paramref name="dedupKey"/>, so a provider's redelivery of the same refused event collapses onto it.</summary>
-    private async Task AuditRefusalAsync(WorkflowActivation activation, NormalizedEvent normalizedEvent, string reason, string detail, string dedupKey, CancellationToken cancellationToken) =>
+    private async Task AuditRefusalAsync(WorkflowActivation activation, NormalizedEvent normalizedEvent, string reason, string detail, string dedupKey, CancellationToken cancellationToken, PersistedFailure? failure = null) =>
         await _auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
         {
             TeamId = activation.Workflow.TeamId, RepositoryId = normalizedEvent.RepositoryId, SourceType = activation.TypeKey,
             ExternalEventId = normalizedEvent.ProviderEventId, Reason = reason,
             Detail = $"Activation {activation.Id} workflow {activation.WorkflowId}: {detail}",
             DedupKey = dedupKey,
+            RequestMetadataJson = failure is null ? null : PersistedFailureJson.AsPayload(failure),
         }, cancellationToken).ConfigureAwait(false);
 
     /// <summary>One row per (activation, delivery, refusal kind) — a refusal that is the activation's own property and rare.</summary>

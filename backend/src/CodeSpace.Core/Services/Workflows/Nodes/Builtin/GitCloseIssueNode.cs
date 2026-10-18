@@ -95,7 +95,7 @@ public sealed class GitCloseIssueNode : INodeRuntime
         }
         catch (InvalidOperationException ex) { return NodeResult.Fail(ex.Message); }
         catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number)); }
-        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number)); }
+        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number), ex); }
 
         context.Logger.LogInformation("Closed issue #{Num} on repo {RepoId} (state={State})", number, repoId, issue.State);
 

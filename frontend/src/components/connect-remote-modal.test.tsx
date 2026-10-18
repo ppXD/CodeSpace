@@ -236,7 +236,7 @@ describe("connect remote modal re-authorizing a credential in place", () => {
   });
 
   it("keeps a credential the provider refused in the list, marked, with the action that brings it back", async () => {
-    renderAs(admin, [credential("oauth-1", "OAuth", { status: "Error", lastError: "OAuth exchange rejected: invalid_grant" }), credential("pat-1", "Pat", { status: "Error" }), credential("gone", "Pat", { status: "Revoked" })]);
+    renderAs(admin, [credential("oauth-1", "OAuth", { status: "Error", lastError: "OAuth exchange rejected: invalid_grant" }), credential("pat-1", "Pat", { status: "Error" })]);
 
     await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
 
@@ -245,6 +245,27 @@ describe("connect remote modal re-authorizing a credential in place", () => {
     expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy();
     expect(screen.getAllByRole("button", { name: "Disconnect" })).toHaveLength(2);
     expect(screen.queryByRole("button", { name: /Connect with OAuth/ })).toBeNull();
+  });
+
+  it("lists a disconnected credential too, marked, with how many repositories are still bound and a way back — and no second Disconnect", async () => {
+    renderAs(admin, [credential("oauth-1", "OAuth", { status: "Revoked", boundRepositoryCount: 3 }), credential("pat-1", "Pat", { status: "Revoked", boundRepositoryCount: 1 })]);
+
+    await waitFor(() => expect(screen.getAllByText("disconnected")).toHaveLength(2));
+
+    expect(screen.getAllByTestId("bound-repositories").map((e) => e.textContent)).toEqual(["3 repositories bound", "1 repository bound"]);
+    expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
+    expect(screen.queryByText("connected")).toBeNull();   // a disconnected credential is listed, but it is not a connection
+  });
+
+  it("puts the credentials that need a person first and says how many repositories each holds", async () => {
+    renderAs(admin, [credential("pat-1", "Pat", { status: "Active", boundRepositoryCount: 2, createdDate: "2026-03-01T00:00:00Z" }), credential("oauth-1", "OAuth", { status: "Error", boundRepositoryCount: 5, createdDate: "2026-01-01T00:00:00Z" })]);
+
+    await waitFor(() => expect(screen.getByText("needs reconnect")).toBeTruthy());
+
+    const rows = screen.getAllByTestId("bound-repositories").map((e) => e.textContent);
+    expect(rows).toEqual(["5 repositories bound", "2 repositories bound"]);   // the refused one leads although it is older
   });
 
   it("marks a token whose expiry has passed as needing a new one although nothing has marked the row yet", async () => {
@@ -269,12 +290,19 @@ describe("connect remote modal re-authorizing a credential in place", () => {
     expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy();
   });
 
-  it("says nothing about a credential that is fine", async () => {
+  it("marks a credential that is fine as active, with no warning", async () => {
     renderAs(member, [credential("oauth-1", "OAuth", { health: "active" }), credential("pat-1", "Pat", { health: "active", daysToExpiry: null })]);
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Disconnect" })).toHaveLength(2));
 
-    expect(screen.queryByText(/needs reconnect|needs a new token|expires/)).toBeNull();
+    expect(screen.getAllByText("active")).toHaveLength(2);
+    expect(screen.queryByText(/needs reconnect|needs a new token|expires|disconnected|owner left/)).toBeNull();
+  });
+
+  it("says a credential lent by someone who left the team is about to be retired", async () => {
+    renderAs(admin, [credential("pat-1", "Pat", { health: "owner_left" })]);
+
+    await waitFor(() => expect(screen.getByText("owner left")).toBeTruthy());
   });
 
   it("marks a team token the provider refused, beside the Replace token that brings it back", async () => {

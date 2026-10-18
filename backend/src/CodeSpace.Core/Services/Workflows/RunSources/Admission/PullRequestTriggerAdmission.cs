@@ -11,6 +11,7 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Events.PullRequest;
 using CodeSpace.Messages.Exceptions;
+using CodeSpace.Messages.Failures;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -96,7 +97,7 @@ public sealed class PullRequestTriggerAdmission : IPullRequestTriggerAdmission, 
 
         var audit = BuildRefusalAuditKey(failure.Reason == WorkflowRunRequestRejectionReasons.CredentialRejected ? "credential-rejected" : "standing-unknown", activation.Id, pullRequest, DateTimeOffset.UtcNow);
 
-        throw new PullRequestStandingUnavailableException(failure.Reason, StandingUnavailable(pullRequest, whose, failure), audit);
+        throw new PullRequestStandingUnavailableException(failure.Reason, StandingUnavailable(pullRequest, whose, failure), audit, failure.Lookup);
     }
 
     /// <summary>The pusher's standing is asked only when the rule needs it: someone other than the author pushed to a fork head.</summary>
@@ -191,7 +192,7 @@ public sealed class PullRequestTriggerAdmission : IPullRequestTriggerAdmission, 
 
         if (repository.Credential == null)
         {
-            _standingFailures[userExternalId] = new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, "the repository has no credential bound to ask the provider with");
+            _standingFailures[userExternalId] = new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, "the repository has no credential bound to ask the provider with", Lookup(StandingLookupCauses.NoCredential));
 
             return PullRequestAuthorAssociation.Unknown;
         }
@@ -235,14 +236,21 @@ public sealed class PullRequestTriggerAdmission : IPullRequestTriggerAdmission, 
             CredentialNeedsReconnectException => new StandingFailure(WorkflowRunRequestRejectionReasons.CredentialRejected, $"its provider refused the repository's credential '{credential}' and it needs to be reconnected"),
             CredentialDisconnectedException => new StandingFailure(WorkflowRunRequestRejectionReasons.CredentialRejected, $"the repository's credential '{credential}' was disconnected"),
             ProviderApiException { StatusCode: 401 } => new StandingFailure(WorkflowRunRequestRejectionReasons.CredentialRejected, $"{provider} answered HTTP 401 to the repository's credential '{credential}'"),
-            ProviderApiException { StatusCode: 403 } => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"{provider} refused the lookup (HTTP 403): the repository's credential '{credential}' needs the read_api scope and a role on the project to read its members"),
-            ProviderInsufficientScopeException scope => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"{provider} refused the lookup: the repository's credential '{credential}' lacks the {string.Join(", ", scope.MissingScopes)} scope"),
-            ProviderApiException api => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"{provider} answered HTTP {api.StatusCode} to the lookup"),
-            OperationCanceledException => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"{provider} did not answer within {AuthorLookupTimeout.TotalSeconds:0} seconds"),
-            _ => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"the lookup failed ({failure.GetType().Name})")
+            ProviderApiException { StatusCode: 403 } => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"{provider} refused the lookup (HTTP 403): the repository's credential '{credential}' needs the read_api scope and a role on the project to read its members", Lookup(StandingLookupCauses.AccessRefused, 403)),
+            ProviderInsufficientScopeException scope => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"{provider} refused the lookup: the repository's credential '{credential}' lacks the {string.Join(", ", scope.MissingScopes)} scope", Lookup(StandingLookupCauses.AccessRefused)),
+            ProviderApiException api => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"{provider} answered HTTP {api.StatusCode} to the lookup", Lookup(StandingLookupCauses.NoAnswer, api.StatusCode)),
+            OperationCanceledException => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"{provider} did not answer within {AuthorLookupTimeout.TotalSeconds:0} seconds", Lookup(StandingLookupCauses.NoAnswer)),
+            _ => new StandingFailure(WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, $"the lookup failed ({failure.GetType().Name})", Lookup(StandingLookupCauses.NoAnswer))
         };
     }
 
+    /// <summary>The machine-readable cause kept on the refusal row: which of <see cref="StandingLookupCauses"/>, and the status the provider answered when it did.</summary>
+    private static PersistedFailure Lookup(string cause, int? providerStatus = null) => new()
+    {
+        Code = WorkflowRunRequestRejectionReasons.AuthorStandingUnknown,
+        Details = providerStatus is { } status ? new Dictionary<string, string> { [StandingLookupCauses.DetailKey] = cause, ["providerStatus"] = status.ToString(System.Globalization.CultureInfo.InvariantCulture) } : new Dictionary<string, string> { [StandingLookupCauses.DetailKey] = cause }
+    };
+
     /// <summary>Why a lookup failed: the <see cref="WorkflowRunRequestRejectionReasons"/> value it is refused under, and the cause in words.</summary>
-    private sealed record StandingFailure(string Reason, string Cause);
+    private sealed record StandingFailure(string Reason, string Cause, PersistedFailure? Lookup = null);
 }

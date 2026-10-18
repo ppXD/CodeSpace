@@ -1,5 +1,6 @@
 import { ApiError, fetchJson, fetchResponse } from "./request";
 import type { RoomFileIdentity, RoomPullRequestResult } from "./sessions";
+import type { ProviderRemedy } from "./types";
 
 // ─── Types (mirror backend DTOs) ───────────────────────────────────────────────
 
@@ -462,6 +463,11 @@ export interface WorkflowRunDetail {
   outputs?: unknown;
   /** Set when the run is Suspended — tells the UI why it's paused + what affordance to show. */
   pendingWait?: WorkflowRunWaitInfo | null;
+  /**
+   * What is wrong with the provider connection the run failed on, and what the CALLER can do about it. Present only for a run
+   * whose recorded failure is one a person can repair; absent for every other run and for a run recorded before failures were kept.
+   */
+  remedy?: ProviderRemedy | null;
 }
 
 /**
@@ -1654,6 +1660,13 @@ export const workflowsApi = {
   replayRun: (runId: string) => fetchJson<{ runId: string }>(`/api/workflows/runs/${runId}/replay`, {
     method: "POST",
   }),
+
+  /**
+   * What is wrong with the provider connection a run failed on, and what the caller can do about it — the lean read behind the
+   * run page's remediation card. `null` when the run recorded no failure a person can repair (the API answers 204).
+   */
+  getRunRemedy: async (runId: string): Promise<ProviderRemedy | null> =>
+    (await fetchJson<ProviderRemedy | undefined>(`/api/workflows/runs/${encodeURIComponent(runId)}/remedy`)) ?? null,
 
   /**
    * The Room's "Open PR" action (PR-6): opens (or, on a repeat call, reuses) a pull/merge request for a terminal

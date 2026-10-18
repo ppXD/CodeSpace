@@ -973,11 +973,11 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             }
             catch (CredentialDisconnectedException ex)
             {
-                throw new GitCredentialRejectedException($"The credential this repository pushes with was disconnected while the run worked, so its branch could not be published. {ReconnectRemedy} ({Redact(ex.Message, repo.Token)})", ex);
+                throw new GitCredentialRejectedException($"The credential this repository pushes with was disconnected while the run worked, so its branch could not be published. {ReconnectRemedy} ({Redact(ex.Message, repo.Token)})", ex, repo.RepositoryId);
             }
             catch (CredentialNeedsReconnectException ex)
             {
-                throw new GitCredentialRejectedException($"The credential this repository pushes with was refused by its provider while the run worked, so its branch could not be published. {ReconnectRemedy} ({Redact(ex.Message, repo.Token)})", ex);
+                throw new GitCredentialRejectedException($"The credential this repository pushes with was refused by its provider while the run worked, so its branch could not be published. {ReconnectRemedy} ({Redact(ex.Message, repo.Token)})", ex, repo.RepositoryId);
             }
             catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
             {
@@ -1036,7 +1036,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         }
 
         private static GitCredentialRejectedException Rejected(MaterializedRepo repo, string remoteUrl, string detail, SandboxResult refusal) =>
-            new($"The remote refused the git credential for {remoteUrl}, {detail}, so the branch was not published. {ReconnectRemedy} git said: {Redact(Summarize(refusal.Stderr), repo.Token)}");
+            new($"The remote refused the git credential for {remoteUrl}, {detail}, so the branch was not published. {ReconnectRemedy} git said: {Redact(Summarize(refusal.Stderr), repo.Token)}", repo.RepositoryId);
 
         /// <summary>Commit everything staged under a fixed CodeSpace identity; returns false (no commit) when there was nothing to commit. The identity AND <c>commit.gpgsign=false</c> are set inline via <c>-c</c> so the clone's git config is never mutated — and the automated capture commit can never inherit a host/global <c>commit.gpgsign=true</c> that would make it block on a signing key the unattended agent does not have (which would fail the branch push → the produced branch is silently lost). An internal automation commit under a synthetic identity has no meaningful signature, so signing is always disabled here.</summary>
         private async Task<bool> CommitOrDetectEmptyAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)

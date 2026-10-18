@@ -62,6 +62,18 @@ Provider-credential tests share two more pieces, both in `CodeSpace.IntegrationT
   accepts the connection and never answers, for what a hung GitLab costs the caller. A call to it only returns when the caller gives
   up, so a test of it runs the call on a thread of its own and bounds the wait, and shortens the sweep's deadlines by registering a
   `CredentialHealthDeadlines` instead of waiting out the real ones.
+- Provider failures that reach a person: a failed run's record keeps the failure as a code and what it names, and the run page answers
+  what is wrong and what the caller can do. `ProviderFailureThroughTheEngineFlowTests` drives the real engine against the stub or a
+  loopback host: a real `git.list_prs` (a dead OAuth grant, a token GitLab revoked, a disconnected credential, a renewal GitLab did not
+  answer, an address that redirects) and the six git write nodes that word a provider 401 themselves (`git.open_pr`, `git.merge_pr`,
+  `git.pr_review`, `git.create_issue`, `git.close_issue`, `git.comment_issue`), and asserts what the node's ledger record carries and what
+  the remedy says. A repair the remedy offers is proved against the real command the button runs: the redirect test sends
+  `UpdateProviderInstanceCommand` (refused while a token is connected, accepted once it is disconnected) and `InitCredentialOAuthCommand`
+  is sent as the credential's own Member to show the button's enabled state is the endpoint's answer — never an edit by SQL that
+  production would refuse. `ProviderRemedyFlowTests` pins the per-role matrix and every other source of a failure (a run that failed on
+  another node than the one that handled a provider failure has none; a standing lookup that got no answer blames nobody);
+  `ProviderRemedyHttpE2ETests` pins the wire shape for an Owner, a Member and a Viewer. Those fixtures write the failure with
+  the real `IRunRecordLogger` from the real exception through `ProviderFailureCapture`, never a hand-typed payload.
 - `RefreshPodHarness` — pods as real OS processes (`CodeSpace.StorageTestWorker`'s `oauth-refresh-pod` mode) running the
   production refresher, or the pinned previous build's (`StorageTestWorker/PreviousBuild`), against the fixture's Postgres.
   One process shares one refresh semaphore, so only separate processes exercise the cross-pod advisory lock.

@@ -34,4 +34,16 @@ public class WorkflowRunRequestRejectionReasonsTests
             $"WorkflowRunRequestRejectionReasons.{constantName} MUST be wire string '{expected}' — operators filter " +
             "audit views on these literals. Rename → migration to update every existing row, OR don't rename.");
     }
+
+    [Theory]
+    [InlineData("lookup", nameof(StandingLookupCauses.DetailKey))]
+    [InlineData("no_credential", nameof(StandingLookupCauses.NoCredential))]
+    [InlineData("access_refused", nameof(StandingLookupCauses.AccessRefused))]
+    [InlineData("no_answer", nameof(StandingLookupCauses.NoAnswer))]
+    public void Standing_lookup_cause_strings_are_pinned(string expected, string constantName)
+    {
+        // They are written into workflow_run_request.request_metadata_json on every refusal that could not read a standing, and read back
+        // by the remedy that words it. A rename would turn every stored row into "cause unknown" — which reads as a credential fault.
+        (typeof(StandingLookupCauses).GetField(constantName)!.GetValue(null) as string).ShouldBe(expected, $"StandingLookupCauses.{constantName} MUST stay '{expected}'");
+    }
 }

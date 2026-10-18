@@ -62,6 +62,9 @@ public sealed record WebhookRejectionContext
     /// </summary>
     public required string SourceType { get; init; }
 
+    /// <summary>The refusal's machine-readable cause (<c>{"failure": {...}}</c>, see <c>PersistedFailureJson</c>), kept on the row's request metadata beside the sentence. Null — what every refusal but one that could not read an author's standing writes — leaves the row's metadata as it always was.</summary>
+    public string? RequestMetadataJson { get; init; }
+
     /// <summary>Delivery id from the provider's header (X-GitHub-Delivery, etc). Null if we couldn't extract it before failing.</summary>
     public string? ExternalEventId { get; init; }
 

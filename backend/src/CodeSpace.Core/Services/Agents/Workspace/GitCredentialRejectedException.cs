@@ -21,7 +21,24 @@ public sealed class GitCredentialRejectedException : Exception, IFailure
 
     public string Code => FailureCodes.GitCredentialRejected;
 
+    /// <summary>What a person acting on the failure needs to find the subject: the repository the push was for and, when the refusal came from a credential that is gone, that credential — both identifiers, never a token.</summary>
+    public IReadOnlyDictionary<string, object?>? Details => _details;
+
+    private readonly Dictionary<string, object?>? _details;
+
     public GitCredentialRejectedException(string message) : base(message) { }
 
-    public GitCredentialRejectedException(string message, Exception inner) : base(message, inner) { }
+    public GitCredentialRejectedException(string message, Guid? repositoryId) : base(message) { _details = DetailsOf(repositoryId, inner: null); }
+
+    public GitCredentialRejectedException(string message, Exception inner, Guid? repositoryId = null) : base(message, inner) { _details = DetailsOf(repositoryId, inner); }
+
+    private static Dictionary<string, object?>? DetailsOf(Guid? repositoryId, Exception? inner)
+    {
+        var details = new Dictionary<string, object?>();
+
+        if (repositoryId is { } repository) details["repositoryId"] = repository;
+        if (inner is IFailure { Details: { } innerDetails } && innerDetails.TryGetValue("credentialId", out var credentialId)) details["credentialId"] = credentialId;
+
+        return details.Count == 0 ? null : details;
+    }
 }

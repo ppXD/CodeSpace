@@ -60,6 +60,11 @@ vi.mock("@/hooks/use-team-members", () => ({
   useTeamMemberIdentityMap: () => new Map(),
 }));
 
+// The card asks the backend what to do about a provider-connection failure; its own tests cover what it renders. Here only WHEN the view mounts it.
+vi.mock("@/components/remedy/RunRemedyCard", () => ({
+  RunRemedyCard: ({ runId }: { runId: string }) => <div data-testid="run-remedy-card" data-run-id={runId} />,
+}));
+
 vi.mock("./GovernedToolsPanel", () => ({
   GovernedToolsPanel: ({ runId, active }: { runId: string; active: boolean }) => {
     governedToolsPanelMock({ runId, active });
@@ -528,5 +533,25 @@ describe("RunDetailView — Live-work center", () => {
 
     expect(screen.getByText("Workflow nodes")).toBeInTheDocument();        // folded (collapsed disclosure), not expanded
     expect(screen.queryByText("Node execution")).not.toBeInTheDocument();  // …so the trace can't show-then-collapse
+  });
+});
+
+describe("RunDetailView — the remedy for a provider-connection failure", () => {
+  it("mounts the remediation card for a run that failed, so a connection problem says what to do", () => {
+    useWorkflowRunViewMetadataMock.mockReturnValue({ isLoading: false, error: null, data: viewMetadata({ status: "Failure", hasError: true }) });
+    useWorkflowRunMock.mockImplementation(() => ok(detail({ status: "Failure", error: "Node 'list' failed." })));
+
+    render(<RunDetailView defaultView="activity" runId="parent-1" />);
+
+    expect(screen.getByTestId("run-remedy-card").getAttribute("data-run-id")).toBe("parent-1");
+    expect(screen.getByText("Run failed")).toBeTruthy();   // the failure is still told; the card adds the way out
+  });
+
+  it("mounts nothing for a run that did not fail", () => {
+    useWorkflowRunMock.mockImplementation(() => ok(detail({})));
+
+    render(<RunDetailView defaultView="activity" runId="parent-1" />);
+
+    expect(screen.queryByTestId("run-remedy-card")).toBeNull();
   });
 });

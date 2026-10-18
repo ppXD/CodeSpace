@@ -65,6 +65,15 @@ public sealed record WorkflowRunDetail
     /// Timer). <c>null</c> unless the run is parked on a pending wait.
     /// </summary>
     public WorkflowRunWaitInfo? PendingWait { get; init; }
+
+    /// <summary>
+    /// What is wrong with the provider connection this run failed on, and what the CALLER can do about it — present only for a run
+    /// whose recorded failure is one a person can repair (a credential disconnected or refused, a provider that redirects, a push
+    /// the remote refused). Computed for the asking user at read time, so the same run reads differently to an Owner, a Member and
+    /// a Viewer and reads "resolved" once the connection works again. Null for every other run, and for a run recorded before
+    /// failures were written down, which keeps reading as <see cref="Error"/> alone.
+    /// </summary>
+    public Dtos.Credentials.ProviderRemedy? Remedy { get; init; }
 }
 
 /// <summary>The pending wait a Suspended run is parked on. Drives the run-detail resume affordance.</summary>

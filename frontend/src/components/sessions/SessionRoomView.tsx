@@ -58,7 +58,8 @@ import { formatTokens } from "@/components/workflows/runActivity";
 import { planAgentStatus, planDepsLabel, planStateIcon, planStateTone, planStateWord, composePlanFeedback } from "@/lib/planChecklist";
 import { useConfirm } from "@/components/dialog";
 import { LaunchTaskModal } from "@/components/tasks/LaunchTaskModal";
-import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun } from "@/hooks/use-workflows";
+import { isRunActive, useCancelRun, useContinueRun, useOpenPullRequest, usePendingDecisions, useReplayRun, useRunRemedy } from "@/hooks/use-workflows";
+import { RunRemedyCard } from "@/components/remedy/RunRemedyCard";
 import { statusWord } from "@/lib/runStatus";
 import { shortRunTitle } from "@/lib/runTitle";
 import { useRunRoomStream } from "@/hooks/use-run-room-stream";
@@ -2121,6 +2122,25 @@ function formatBytes(bytes: number): string {
  * error red, which would tell an operator their run broke when it is simply waiting on them.
  */
 export function ErrorCard({ diag, onOpenTrace }: { diag: DiagnosticBlock; onOpenTrace?: () => void }) {
+  const run = useContext(RunActionsContext);
+
+  // A failure the run recorded as a provider connection problem carries its code; the card that says what to do about it — and who
+  // may — is read live for whoever is looking. A diagnostic with no code never mounts the query, so it renders as it always did.
+  return diag.failureCode && run ? <DiagnosticWithRemedy diag={diag} runId={run.runId} onOpenTrace={onOpenTrace} /> : <PlainDiagnostic diag={diag} onOpenTrace={onOpenTrace} />;
+}
+
+/**
+ * A provider-connection failure: the remediation card when the backend has a remedy for the person looking, and the ordinary
+ * diagnostic (the failure's own words) until it does — or when it has none, or cannot be read. The remedy never replaces the
+ * failure; it adds the way out.
+ */
+function DiagnosticWithRemedy({ diag, runId, onOpenTrace }: { diag: DiagnosticBlock; runId: string; onOpenTrace?: () => void }) {
+  const remedy = useRunRemedy(runId);
+
+  return remedy.data ? <RunRemedyCard runId={runId} rawDetail={diag.rawDetail} /> : <PlainDiagnostic diag={diag} onOpenTrace={onOpenTrace} />;
+}
+
+function PlainDiagnostic({ diag, onOpenTrace }: { diag: DiagnosticBlock; onOpenTrace?: () => void }) {
   const [showRaw, setShowRaw] = useState(false);
   const actions = diag.actions ?? [];
   const attention = diag.tone === "Info";

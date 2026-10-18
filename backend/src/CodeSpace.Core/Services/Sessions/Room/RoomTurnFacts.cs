@@ -83,6 +83,9 @@ public sealed record RoomTurnFacts
     /// </summary>
     public bool CompletionParked { get; init; }
 
+    /// <summary>The provider failure the run recorded — a connection disconnected, refused or redirecting — when it ended on one. Decides the diagnostic: such a failure is not a model credential problem, so it is never told as one, and it carries its code so the page can ask for the live remedy. Null for every other failure.</summary>
+    public Messages.Failures.PersistedFailure? Failure { get; init; }
+
     /// <summary>The raw engine error, surfaced behind "Show raw error" on a failure diagnostic. Null when there's nothing rawer than the humanized text.</summary>
     public string? RawError { get; init; }
 

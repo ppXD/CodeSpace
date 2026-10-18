@@ -51,6 +51,8 @@ export interface CredentialSummary {
   health?: CredentialHealth;
   /** Whole days until a static token expires at its provider; null for an OAuth credential and for a token with no recorded expiry. */
   daysToExpiry?: number | null;
+  /** How many live repositories are bound through it — what reconnecting, replacing or disconnecting it puts at stake. Absent from a server that predates it; read it as zero. */
+  boundRepositoryCount?: number;
 }
 
 export interface InitOAuthResponse {
@@ -70,6 +72,89 @@ export interface RevokeCredentialResponse {
    *  were bound through this credential. Zero when the credential wasn't tied to
    *  any active repo. UI uses this to confirm the cascade hit what the preview said. */
   affectedRepositoryCount: number;
+}
+
+/**
+ * The kinds of fix a remedy offers. The backend names them; the page renders the ones it is told are enabled, and only the
+ * backend decides which that is for the person looking.
+ */
+export type RemedyActionKind = "relink" | "reconnect" | "replace_token" | "edit_provider_url" | "open_providers" | "rerun";
+
+export interface RemedyAction {
+  kind: RemedyActionKind;
+  label: string;
+  /** False when the caller may not do this — shown disabled, with `disabledReason`, never hidden. */
+  enabled: boolean;
+  disabledReason?: string | null;
+}
+
+/** The credential a remedy is about. */
+export interface RemedyCredential {
+  id: string;
+  displayName: string;
+  ownership: CredentialOwnership;
+  ownerUserId?: string | null;
+  ownerName?: string | null;
+  authType: AuthType;
+  status: CredentialStatus;
+  health: CredentialHealth;
+  /** Soft-deleted: its person left the team or its connection was removed. It cannot be reconnected; what leans on it can only be moved. */
+  retired: boolean;
+  providerInstanceId: string;
+}
+
+/** A repository the failing step acted on, and whether what it runs through works now. */
+export interface RemedyRepository {
+  id: string;
+  fullPath: string;
+  status: RepositoryStatus;
+  credentialId?: string | null;
+  credentialWorks: boolean;
+}
+
+export interface RemedyProviderInstance {
+  id: string;
+  displayName: string;
+  provider: ProviderKind;
+  baseUrl: string;
+}
+
+export interface RemedyPerson {
+  userId: string;
+  name: string;
+  /** Why this person: "Owner" or "Admin" of the team, or "Owner of the credential". */
+  role: string;
+}
+
+/**
+ * What is wrong with a provider connection, and what the CALLER can do about it — read fresh for whoever is looking, so the
+ * same failure reads one way to an Owner and another to a Viewer, and reads `resolved` once the connection works again. The
+ * words are the backend's: the page renders them and never maps a code to copy of its own.
+ */
+export interface ProviderRemedy {
+  /** The failure's stable code (or, for a refused trigger delivery, its refusal reason). */
+  code: string;
+  title: string;
+  cause: string;
+  resolved: boolean;
+  credential?: RemedyCredential | null;
+  repositories: RemedyRepository[];
+  providerInstance?: RemedyProviderInstance | null;
+  /** For a redirecting provider: the origin it answered with — what its base URL would be edited to. */
+  redirectsTo?: string | null;
+  actions: RemedyAction[];
+  askPeople: RemedyPerson[];
+}
+
+/** A credential the caller could move a dead credential's bindings onto, best first. */
+export interface RelinkSuggestion {
+  credentialId: string;
+  displayName: string;
+  authType: AuthType;
+  ownership: CredentialOwnership;
+  kind: "YourConnection" | "TeamServiceToken" | "OwnersOtherConnection";
+  createdDate: string;
+  connectedBeforeDisconnect: boolean;
 }
 
 export interface ReplaceCredentialTokenResponse {
@@ -316,6 +401,7 @@ export type RejectionReason =
   | "signature_invalid" | "webhook_inactive" | "event_not_mapped" | "malformed_payload" | "no_matching_activation"
   | "repository_not_bound" | "webhook_retired"
   | "delivery_id_missing" | "delivery_replayed" | "author_not_member" | "pull_request_debounced"
+  | "credential_rejected" | "author_standing_unknown"
   | (string & {});
 
 /** One delivery that arrived and was refused. Every field here was captured at rejection with secrets already stripped. */
@@ -340,6 +426,12 @@ export interface RepositoryRejectedDeliveries {
   deliveries: RejectedDelivery[];
   /** A full list cannot be told apart from exactly-the-cap, so the page says the list stops here rather than claiming more exist. It uses this number rather than one of its own. */
   cap: number;
+  /**
+   * What to do about the refusals that blame the repository's credential (`credential_rejected`, `author_standing_unknown`),
+   * for the person asking. Present only when the list holds one; one remedy serves every such row, because it is about the
+   * credential the repository runs through now and not about any one delivery.
+   */
+  remedy?: ProviderRemedy | null;
 }
 
 export interface RemoteRepository {

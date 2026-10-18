@@ -14,6 +14,7 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Plans;
 using CodeSpace.Messages.Tasks.Phases;
 using CodeSpace.UnitTests.Tasks.Phases;
+using CodeSpace.Messages.Failures;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Sessions.Room;
@@ -236,6 +237,37 @@ public class RoomNarrativeTests
         diag.Actions.ShouldNotContain(a => a.Kind == RoomActionKind.FixCredentials, "rotating a working key fixes nothing and costs the operator the hour this failure exists to save");
         diag.Text.ShouldContain("worker", Case.Insensitive, "the diagnostic must show what actually happened");
         diag.Text.ShouldContain("Retry", Case.Insensitive, "and what to do about it");
+    }
+
+    [Theory]
+    [InlineData(FailureCodes.CredentialDisconnected, "The credential 'GitLab · nacho' was disconnected, so nothing bound through it can authenticate.")]
+    [InlineData(FailureCodes.CredentialNeedsReconnect, "The credential 'GitLab · nacho' cannot authenticate: its provider refused it (invalid_grant).")]
+    [InlineData(FailureCodes.ProviderUnauthorized, "GitLab returned HTTP 401 for ListPullRequestsAsync: 401 Unauthorized")]
+    [InlineData(FailureCodes.GitCredentialRejected, "The remote refused the git credential, so the branch was not published.")]
+    [InlineData(FailureCodes.ProviderBaseUrlRedirects, "GitLab answered a request with a redirect to another origin. The credential was not sent.")]
+    [InlineData(FailureCodes.OAuthExchangeFailed, "OAuth exchange rejected: http_503 (credential x)")]
+    public void A_provider_connection_failure_is_never_told_as_a_rejected_model_credential(string code, string raw)
+    {
+        // Every one of these sentences contains "credential", "unauthorized" or "401" — exactly what the auth scan reads as a rejected
+        // MODEL key — so without the recorded failure the Room sent a person to the model credentials to fix a git connection.
+        var facts = new RoomTurnFacts { RawError = raw, Failure = new PersistedFailure { Code = code } };
+
+        var diag = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, facts: facts).Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+
+        diag.Title.ShouldNotBe("Authentication failed");
+        diag.Title.ShouldNotBeNullOrWhiteSpace("the failure is named in plain language");
+        diag.Actions.ShouldNotContain(a => a.Kind == RoomActionKind.FixCredentials, "the model credentials are not what is broken");
+        diag.FailureCode.ShouldBe(code, "the page asks for the live remedy by this code");
+        diag.Text.ShouldBe(raw, "the card's words are the failure's own, not a rewrite");
+    }
+
+    [Fact]
+    public void A_failure_that_is_not_a_provider_connection_carries_no_failure_code()
+    {
+        var diag = Build(Array.Empty<RunPhase>(), WorkflowRunStatus.Failure, facts: new RoomTurnFacts { RawError = "OpenAI API error: 401 Unauthorized" }).Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+
+        diag.FailureCode.ShouldBeNull();
+        diag.Title.ShouldBe("Authentication failed", "a rejected MODEL key still gets its own fix");
     }
 
     [Fact]

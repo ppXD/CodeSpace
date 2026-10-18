@@ -327,6 +327,8 @@ export function useRelinkRepositoryCredential() {
       // the detail view need a refresh so the status badge clears immediately.
       queryClient.invalidateQueries({ queryKey: ["repositories"] });
       queryClient.invalidateQueries({ queryKey: ["repository"] });
+      // A run that failed on this repository's connection reads "fixed" once the repository runs through a live one.
+      queryClient.invalidateQueries({ queryKey: ["run-remedy"] });
     },
   });
 }

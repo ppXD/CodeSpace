@@ -33,6 +33,8 @@ import { formatBytes } from "@/lib/codeTree";
 import { DiffViewer } from "./diff-viewer";
 import { Ic } from "./icons";
 import { Pager } from "./pager";
+import { ConnectionIssueChip, RepositoryConnectionFix } from "@/components/remedy/RepositoryConnectionIssue";
+import { useRepositoryConnectionIssues } from "@/hooks/use-repository-connection-issues";
 
 /**
  * Repository detail. Split into URL-driven pieces:
@@ -84,6 +86,7 @@ interface RepoDetailHeaderProps {
 export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, children }: RepoDetailHeaderProps) {
   const repository = useRepository(repoId);
   const instances = useProviderInstances();
+  const connection = useRepositoryConnectionIssues();
   const navigate = useNavigate();
   const [launchOpen, setLaunchOpen] = useState(false);
 
@@ -193,6 +196,7 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
   // yet) could return undefined. Fall back to just "Projects / {repo.name}"
   // in that case rather than rendering an empty middle crumb.
   const hasParentProject = !!repo.projectId && !!repo.projectSlug && !!repo.projectName;
+  const issue = connection.issueOf(repo);
 
   return (
     <section className="rd">
@@ -268,6 +272,16 @@ export function RepoDetailHeader({ repoId, activeTab, onTabChange, teamSlug, chi
             </button>
           </div>
         </div>
+
+        {/* The repository's connection, when it does not work: what is wrong and the way out, above the tabs — every tab below reads
+            through this credential, so a dead one is the first thing to know, not a status word in the Overview. */}
+        {issue && (
+          <div className="rmd-repo-issue" role="alert">
+            <ConnectionIssueChip issue={issue} />
+            <span className="rmd-repo-issue-text">{issue.title}</span>
+            <RepositoryConnectionFix repository={repo} issue={issue} />
+          </div>
+        )}
 
         {launchOpen && (
           <LaunchTaskModal

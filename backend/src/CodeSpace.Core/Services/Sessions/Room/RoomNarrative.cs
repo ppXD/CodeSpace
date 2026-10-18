@@ -761,7 +761,10 @@ public static class RoomNarrative
     private static DiagnosticBlock RichDiagnostic(string idPrefix, long seq, WorkflowRunStatus status, string? error, RoomTurnFacts facts, IReadOnlyList<RunPhase> narrativePhases)
     {
         var raw = facts.RawError ?? error;
-        var auth = IsAuthError(raw);
+
+        // A provider failure the run recorded outranks the scan below: "the credential was disconnected" contains the word the scan
+        // reads as a rejected model key, and telling a person to fix their MODEL credentials for a git connection is exactly wrong.
+        var auth = facts.Failure is null && IsAuthError(raw);
 
         // Humanize the DEEP error (raw), not the generic run-row error — so the headline is the specific cause
         // ("OpenAI API error … the request timed out") the projector surfaced, not the "Node 'sup' failed." placeholder.
@@ -775,12 +778,13 @@ public static class RoomNarrative
             Id = $"{idPrefix}:diagnostic",
             Seq = seq,
             Tone = NarrativeTone.Error,
-            Title = auth ? "Authentication failed" : null,
+            Title = auth ? "Authentication failed" : facts.Failure is { } failure ? Credentials.Remedy.RemedyCopy.Title(failure.Code, new Credentials.Remedy.RemedyFacts()) : null,
             Text = text,
             Actions = auth
                 ? new[] { new RoomAction { Kind = RoomActionKind.FixCredentials, Label = "Fix credentials", Enabled = true } }
                 : Array.Empty<RoomAction>(),
             RawDetail = raw is { Length: > 0 } r && r != text ? r : null,
+            FailureCode = facts.Failure?.Code,
         };
     }
 

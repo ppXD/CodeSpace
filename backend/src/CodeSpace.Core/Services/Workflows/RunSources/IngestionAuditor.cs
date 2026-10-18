@@ -52,7 +52,7 @@ public sealed class IngestionAuditor : IIngestionAuditor, IScopedDependency
             ActorType = WorkflowRunActorTypes.Webhook,
             ActorId = null,
             NormalizedPayloadJson = "{}",
-            RequestMetadataJson = "{}",
+            RequestMetadataJson = context.RequestMetadataJson ?? "{}",
             RawHeadersRedactedJson = context.RawHeadersRedactedJson,
             VerificationResultJson = context.VerificationResultJson,
             Status = WorkflowRunRequestStatus.Rejected,

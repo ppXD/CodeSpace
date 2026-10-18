@@ -105,6 +105,17 @@ public class WorkflowRunsController : ControllerBase
     }
 
     /// <summary>
+    /// What is wrong with the provider connection a run failed on, and what the CALLER can do about it. The run page asks this for a
+    /// failed turn instead of a whole run detail; 200 with <c>null</c> when the run recorded no failure a person can repair. Team-scoped.
+    /// </summary>
+    [HttpGet("{runId:guid}/remedy")]
+    public async Task<IActionResult> GetRemedy([FromRoute] Guid runId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetWorkflowRunRemedyQuery { RunId = runId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Bounded, metadata-only canvas view. It exposes exact cell coordinates and a narrow frozen topology, never run
     /// outputs, node inputs/outputs, wait payloads, artifact references, prompts or node configuration.
     /// </summary>

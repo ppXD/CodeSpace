@@ -133,7 +133,7 @@ public sealed class GitMergePullRequestNode : INodeRuntime
         }
         catch (PullRequestMovedException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number, input.ExpectedHeadSha)); }
         catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number, input.ExpectedHeadSha)); }
-        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number, input.ExpectedHeadSha)); }
+        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeMergeFailure(ex, number, input.ExpectedHeadSha), ex); }
 
         context.Logger.LogInformation("Merged PR #{Num} on repo {RepoId} (merged={Merged}, method {Method}, source branch {SourceBranchDeletion})", number, repoId, result.Merged, method, result.SourceBranchDeletion);
 
