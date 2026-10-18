@@ -55,6 +55,9 @@ public static class FailureCodes
     /// <summary>Something tried to authenticate through a credential that was disconnected — revoked, its token material destroyed. Remedy: reconnect the provider (bound repositories follow their owner's reconnect) or re-link to an active credential; a retry as-is reads the same dead row.</summary>
     public const string CredentialDisconnected = "credential_disconnected";
 
+    /// <summary>The remote refused the git credential a push carried even after it was resolved again immediately before the push (or the credential was disconnected while the run worked), so the agent's branch was not published. Remedy: reconnect the provider, or re-link the repository to an active credential, then re-run — a retry as-is is refused the same way.</summary>
+    public const string GitCredentialRejected = "git_credential_rejected";
+
     /// <summary>An update moved a model credential's endpoint (scheme, host or port) without entering its key again. Remedy: send the key with the new endpoint; a stored key never follows a repoint on its own.</summary>
     public const string ModelEndpointKeyRequired = "model_endpoint_key_required";
 

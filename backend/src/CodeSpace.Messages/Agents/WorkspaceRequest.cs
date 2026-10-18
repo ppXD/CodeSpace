@@ -33,6 +33,18 @@ public sealed record WorkspaceRequest
     /// <summary>Basic-auth username paired with <see cref="Token"/> — provider-specific ("x-access-token", "oauth2"). Ignored when <see cref="Token"/> is null; defaults to "x-access-token".</summary>
     public string? TokenUsername { get; init; }
 
+    /// <summary>
+    /// The repository <see cref="Token"/> was resolved for, together with <see cref="TeamId"/>. An access token has a
+    /// lifetime (a GitLab OAuth one lasts two hours, and is revoked the moment any caller refreshes it), while a workspace
+    /// outlives it, so a provider that pushes at the END of a long run asks for the credential again by these two ids
+    /// instead of carrying <see cref="Token"/> across the run. Null (the default) → the run carries <see cref="Token"/>
+    /// and nothing else, exactly as before; set by the resolver that produced this request.
+    /// </summary>
+    public Guid? RepositoryId { get; init; }
+
+    /// <summary>The team that owns <see cref="RepositoryId"/>; read only together with it. Null whenever <see cref="RepositoryId"/> is.</summary>
+    public Guid? TeamId { get; init; }
+
     /// <summary>Shallow-clone depth. 1 (default) fetches only the tip; 0 → a full clone. With <see cref="PinnedSha"/> set the clone STARTS at this depth and only deepens (fetch-by-sha, then unshallow) when the pin is not the fetched tip — the common pin-equals-tip launch stays shallow.</summary>
     public int Depth { get; init; } = 1;
 

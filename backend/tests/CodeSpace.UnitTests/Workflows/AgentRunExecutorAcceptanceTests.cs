@@ -438,6 +438,64 @@ public class AgentRunExecutorAcceptanceTests
         grader.Calls.ShouldBe(0);
     }
 
+    // ── A push the remote refused for its credential: the grade names it instead of "no-branch-or-repo" ──────────
+
+    [Fact]
+    public async Task A_contract_whose_push_was_refused_for_its_credential_fails_closed_naming_the_credential_and_is_infra()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+
+        var rejected = Succeeded() with { ProducedBranch = null, PublishError = "The remote refused the git credential for https://example.test/r.git", PublishFailureCode = "git_credential_rejected" };
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), rejected, workspace: null, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed, "the contract still was not met — only the reason it states changes");
+        result.AcceptanceDetail.ShouldBe("credential-rejected");
+        result.AcceptancePassed.ShouldBe(false);
+        grader.Calls.ShouldBe(0, "there is nothing to clone — fail closed, never a phantom pass");
+        AgentAcceptanceContract.IsInfraFailure(result.AcceptanceDetail, workPresent: false).ShouldBeTrue("the check never ran, and no revise round can change a credential the remote refuses");
+        AgentRunExecutor.ReviseReasonFor(TaskWith(Spec("sh", "check.sh")), result).ShouldBeNull("the revise loop is never spent on a credential");
+    }
+
+    [Fact]
+    public async Task A_multi_repo_contract_whose_pushes_were_refused_for_the_credential_names_the_credential_too()
+    {
+        var (executor, grader) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+
+        var multi = Succeeded() with
+        {
+            RepositoryResults = new[] { new RepositoryRunResult { RepositoryId = Guid.NewGuid(), Alias = "api", PublishError = "refused", PublishFailureCode = "git_credential_rejected" } },
+        };
+
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), multi, workspace: null, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Failed);
+        result.AcceptanceDetail.ShouldBe("credential-rejected");
+        grader.Calls.ShouldBe(0);
+    }
+
+    [Fact]
+    public async Task A_contract_whose_push_failed_for_any_other_reason_keeps_the_long_standing_detail()
+    {
+        var (executor, _) = NewExecutor(new BenchmarkGrade { Passed = true, Detail = "unused" });
+
+        var failed = Succeeded() with { ProducedBranch = null, PublishError = "git push failed: connection reset" };
+        var result = await executor.GradeAcceptanceIfPresentAsync(Run(), TaskWith(Spec("sh", "check.sh")), failed, workspace: null, CancellationToken.None);
+
+        result.AcceptanceDetail.ShouldBe("no-branch-or-repo", "byte-identical for every publish failure that is not a rejected credential");
+    }
+
+    [Fact]
+    public void The_credential_rejected_detail_is_pinned_and_infra_with_or_without_visible_work()
+    {
+        // The executor writes this string and the shared infra classification reads it: renaming one side silently turns a
+        // credential problem back into "the agent did nothing" for the decider, the receipts and the revise loop.
+        AgentAcceptanceContract.CredentialRejectedDetail.ShouldBe("credential-rejected");
+        AgentAcceptanceContract.IsInfraFailure("credential-rejected", workPresent: false).ShouldBeTrue();
+        AgentAcceptanceContract.IsInfraFailure("credential-rejected", workPresent: true).ShouldBeTrue();
+        AgentAcceptanceContract.IsInfraFailure("repo 'api': credential-rejected", workPresent: false).ShouldBeTrue("sees through the multi-repo display tag like every other infra detail");
+        AgentAcceptanceContract.IsInfraFailure("no-branch-or-repo", workPresent: false).ShouldBeFalse("unchanged: with no work the fix is to do the work");
+    }
+
     [Fact]
     public async Task A_contract_with_no_branch_and_no_patch_fails_closed_without_grading()
     {

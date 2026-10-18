@@ -251,6 +251,78 @@ public class RepositoryWorkspaceResolverTests
         provision.Primary!.Alias.ShouldBe("web");
     }
 
+    // ─── The repository a token was resolved for, and the source that resolves it again ──────────────────
+
+    [Fact]
+    public async Task Every_resolved_request_names_the_repository_and_team_its_token_was_resolved_for()
+    {
+        // The workspace provider re-asks for the credential by these two ids right before it pushes, so a request that
+        // lost them would silently push with the token it was provisioned with — hours stale on a long run.
+        var teamId = await SeedTeamAsync();
+        var githubId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/web.git", "main", token: "ghp_web");
+        var anonymousId = await SeedRepoAsync(teamId, ProviderKind.GitLab, "https://gitlab.com/org/public.git", "main", token: null);
+
+        var legacy = await ResolveAsync(TaskFor(githubId), teamId);
+        var authored = await ResolveAsync(new AgentTask { Goal = "g", Harness = "h", Model = "m", Workspace = WorkspaceSpec.FromRepository(githubId) }, teamId);
+        var anonymous = await ResolveAsync(TaskFor(anonymousId), teamId);
+
+        foreach (var (request, repositoryId) in new[] { (legacy, githubId), (authored, githubId), (anonymous, anonymousId) })
+        {
+            request.ShouldNotBeNull();
+            request.RepositoryId.ShouldBe(repositoryId);
+            request.TeamId.ShouldBe(teamId);
+        }
+
+        var multi = await ResolveProvisionAsync(new AgentTask
+        {
+            Goal = "g", Harness = "h", Model = "m",
+            Workspace = new WorkspaceSpec { PrimaryAlias = "web", Repositories = new[] { new WorkspaceRepositorySpec { Alias = "web", RepositoryId = githubId, Access = WorkspaceAccess.Write, IsPrimary = true }, new WorkspaceRepositorySpec { Alias = "docs", RepositoryId = anonymousId, Access = WorkspaceAccess.Read } } },
+        }, teamId);
+
+        multi!.Repositories.Single(r => r.Alias == "web").CloneRequest.RepositoryId.ShouldBe(githubId);
+        multi.Repositories.Single(r => r.Alias == "docs").CloneRequest.RepositoryId.ShouldBe(anonymousId, "each repo of a multi-repo workspace names its own repository");
+    }
+
+    [Fact]
+    public async Task The_token_source_answers_the_credential_the_repository_holds_now_not_the_one_it_held_when_first_asked()
+    {
+        // Nothing is cached: the source opens a fresh scope per ask and the resolver loads the row untracked, so a credential
+        // the repository was re-linked to between two asks is the one the second ask gets.
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedRepoAsync(teamId, ProviderKind.GitLab, "https://gitlab.com/org/repo.git", "main", token: "glpat_first");
+        var source = _fixture.BeginScope().Resolve<IWorkspaceTokenSource>();
+
+        (await source.ResolveAsync(repoId, teamId, CancellationToken.None)).ShouldBe("glpat_first");
+
+        await RelinkToANewTokenAsync(repoId, teamId, "glpat_second");
+
+        (await source.ResolveAsync(repoId, teamId, CancellationToken.None)).ShouldBe("glpat_second");
+    }
+
+    [Fact]
+    public async Task The_token_source_answers_null_for_a_repository_with_no_credential()
+    {
+        var teamId = await SeedTeamAsync();
+        var repoId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/public.git", "main", token: null);
+
+        (await _fixture.BeginScope().Resolve<IWorkspaceTokenSource>().ResolveAsync(repoId, teamId, CancellationToken.None)).ShouldBeNull();
+    }
+
+    [Fact]
+    public async Task The_token_source_fails_closed_for_an_unknown_foreign_or_deleted_repository()
+    {
+        var teamId = await SeedTeamAsync();
+        var otherTeam = await SeedTeamAsync();
+        var foreignId = await SeedRepoAsync(otherTeam, ProviderKind.GitHub, "https://github.com/org/r.git", "main", token: "ghp_foreign");
+        var deletedId = await SeedRepoAsync(teamId, ProviderKind.GitHub, "https://github.com/org/d.git", "main", token: "ghp_deleted");
+        await SoftDeleteRepoAsync(deletedId);
+        var source = _fixture.BeginScope().Resolve<IWorkspaceTokenSource>();
+
+        await Should.ThrowAsync<WorkspaceException>(() => source.ResolveAsync(Guid.NewGuid(), teamId, CancellationToken.None));
+        await Should.ThrowAsync<WorkspaceException>(() => source.ResolveAsync(foreignId, teamId, CancellationToken.None));
+        await Should.ThrowAsync<WorkspaceException>(() => source.ResolveAsync(deletedId, teamId, CancellationToken.None));
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     private static AgentTask TaskFor(Guid repositoryId) => new() { Goal = "g", Harness = "h", Model = "m", RepositoryId = repositoryId };
@@ -319,6 +391,22 @@ public class RepositoryWorkspaceResolverTests
 
         await db.SaveChangesAsync();
         return repoId;
+    }
+
+    /// <summary>Re-link a seeded repo to a new credential holding <paramref name="token"/> — what the relink command does to the binding.</summary>
+    private async Task RelinkToANewTokenAsync(Guid repoId, Guid teamId, string token)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var encryptor = scope.Resolve<IPayloadEncryptor>();
+        var serializer = scope.Resolve<ICredentialPayloadSerializer>();
+        var repo = await db.Repository.SingleAsync(r => r.Id == repoId);
+
+        var credentialId = Guid.NewGuid();
+        db.Credential.Add(new Credential { Id = credentialId, TeamId = teamId, ProviderInstanceId = repo.ProviderInstanceId, AuthType = AuthType.Pat, DisplayName = "relinked", Status = CredentialStatus.Active, EncryptedPayload = encryptor.Encrypt(serializer.Serialize(new PatPayload { Token = token })) });
+        repo.CredentialId = credentialId;
+
+        await db.SaveChangesAsync();
     }
 
     /// <summary>Soft-delete a seeded repo (set <c>DeletedDate</c>) so the clone gate's <c>DeletedDate == null</c> filter must refuse it.</summary>

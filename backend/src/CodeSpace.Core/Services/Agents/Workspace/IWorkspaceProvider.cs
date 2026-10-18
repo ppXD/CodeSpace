@@ -88,7 +88,9 @@ public interface IWorkspacePushHandle
     /// Commit everything in the PRIMARY clone and force-push it to <paramref name="branchName"/> on the origin
     /// remote, returning the pushed branch name on success. Returns null when the run made no changes
     /// (nothing to commit) or the clone carries no push credential (an anonymous clone) — neither is a
-    /// failure. Throws <see cref="WorkspaceException"/> (with the token REDACTED) on a git failure.
+    /// failure. Throws <see cref="WorkspaceException"/> (with the token REDACTED) on a git failure, or
+    /// <see cref="GitCredentialRejectedException"/> when the remote refused the credential even after it was resolved
+    /// again — a failure no retry of the same push can fix.
     /// </summary>
     Task<string?> PushChangesAsync(string branchName, CancellationToken cancellationToken);
 
@@ -96,7 +98,8 @@ public interface IWorkspacePushHandle
     /// Multi-repo PR3: commit + push the repo named <paramref name="alias"/> (one of <c>Repositories</c>) to
     /// <paramref name="branchName"/> on ITS own origin. Same semantics as the primary-only overload, scoped to
     /// one repo — each repo pushes to its distinct remote, so the same branch name across the set is fine.
-    /// Throws <see cref="WorkspaceException"/> for an unknown / read-only alias or a git failure.
+    /// Throws <see cref="WorkspaceException"/> for an unknown / read-only alias or a git failure, and
+    /// <see cref="GitCredentialRejectedException"/> as the primary-only overload does.
     /// </summary>
     Task<string?> PushChangesAsync(string alias, string branchName, CancellationToken cancellationToken);
 
