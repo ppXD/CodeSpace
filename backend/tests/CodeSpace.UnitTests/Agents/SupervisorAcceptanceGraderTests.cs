@@ -141,6 +141,24 @@ public class SupervisorAcceptanceGraderTests
     }
 
     [Fact]
+    public async Task A_tokened_clone_refused_for_want_of_a_credential_by_a_git_before_2_31_fails_closed_with_the_cause()
+    {
+        var runners = new RecordingRunnerRegistry();
+        runners.Script(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = "fatal: could not read Username for 'https://gitlab.example.test': terminal prompts disabled" });
+        var grader = Build(new FakeResolver(new WorkspaceRequest { RepositoryUrl = "https://gitlab.example.test/a/b.git", Token = "test-token" }), new FakeGrader(Pass), runners: runners);
+        using var _ = CodeSpace.Core.Services.Agents.Workspace.HostGit.Use(new CodeSpace.Messages.Health.GitReading(new CodeSpace.Messages.Health.GitVersion(2, 30, 2), "git version 2.30.2"));
+
+        var grade = await grader.GradeBaseAsync(Guid.NewGuid(), Guid.NewGuid(), "b", Spec(), 30, CancellationToken.None);
+
+        runners.Invocations.ShouldHaveSingleItem().Args.ShouldContain("clone", customMessage: "fixture check: the refusal came from the clone");
+        grade.Passed.ShouldBeFalse();
+        grade.Detail.ShouldStartWith("clone-failed:");
+        grade.Detail.ShouldContain("2.30.2");
+        grade.Detail.ShouldContain("GIT_CONFIG_COUNT");
+        grade.Class.ShouldBe(GradeFailureClass.Environment);
+    }
+
+    [Fact]
     public async Task A_resolve_failure_fails_closed_without_throwing()
     {
         var grade = await Build(new FakeResolver(throwOnResolve: new WorkspaceException("repo 404")), new FakeGrader(Pass))

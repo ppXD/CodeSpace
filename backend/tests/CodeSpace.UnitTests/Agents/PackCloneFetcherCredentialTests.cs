@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Agents.Workspace.Providers;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Health;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -112,6 +113,34 @@ public sealed class PackCloneFetcherCredentialTests
 
         failure.Message.ShouldNotContain(Marker);
         Directory.Exists(runner.Specs.Single().WorkingDirectory).ShouldBeFalse("a failed clone is reclaimed before the throw");
+    }
+
+    [Theory]
+    [InlineData(Tokened, "git version 2.30.2", true)]
+    [InlineData("https://fake-pasted-token-0123456789@github.com/owner/repo.git", "git version 2.30.2", true)]   // a token pasted as the user alone is a credential too
+    [InlineData(Tokened, "git version 2.39.5", false)]                                                          // a git that reads GIT_CONFIG_COUNT: the credential really was refused
+    [InlineData("https://github.com/owner/repo.git", "git version 2.30.2", false)]                              // nothing was pasted: an old git is not the explanation
+    public async Task A_clone_the_remote_asked_a_credential_for_names_an_old_git_only_when_a_credential_was_pasted_and_git_is_old(string url, string gitOutput, bool oldGitIsTheCause)
+    {
+        var runner = new ScriptedRunner { CloneStderr = "fatal: could not read Username for 'https://github.com': terminal prompts disabled" };
+        using var _ = HostGit.Use(new GitReading(GitVersion.Parse(gitOutput), gitOutput));
+
+        var failure = await Should.ThrowAsync<PackImportException>(() => Fetcher(runner).FetchAsync(url, null, CancellationToken.None));
+
+        (failure.InnerException is GitCredentialHelperUnsupportedException).ShouldBe(oldGitIsTheCause, failure.Message);
+        failure.Message.ShouldNotContain(Marker);
+        failure.Message.ShouldStartWith("git clone of 'https://github.com/owner/repo.git' failed", Case.Sensitive, "the URL is still named, without its userinfo");
+
+        if (oldGitIsTheCause)
+        {
+            failure.Message.ShouldContain("2.30.2");
+            failure.Message.ShouldContain("GIT_CONFIG_COUNT");
+            failure.Message.ShouldNotContain("could not read Username", Case.Sensitive, "the message names the cause in place of git's own words");
+        }
+        else
+        {
+            failure.Message.ShouldContain("could not read Username", Case.Sensitive, "otherwise the message is exactly what it always was");
+        }
     }
 
     [Theory]

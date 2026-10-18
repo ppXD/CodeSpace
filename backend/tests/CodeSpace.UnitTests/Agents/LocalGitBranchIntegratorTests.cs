@@ -1,7 +1,9 @@
 using CodeSpace.Core.Services.Agents.Sandbox;
+using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Agents.Workspace.Integrators;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Health;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -132,6 +134,57 @@ public class LocalGitBranchIntegratorTests
 
         runner.Specs.Single(s => Subcommand(s) == "clone").Args.ShouldContain("https://example.test/repo.git", "the remote is named without its credential");
         runner.Specs.Where(s => TokenedGitSpecs.ArgvCarriesACredential(s, "test-token")).Select(s => string.Join(' ', s.Args)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_tokened_clone_refused_for_want_of_a_credential_by_a_git_before_2_31_fails_with_the_cause()
+    {
+        var runner = new RefusedCloneRunner("fatal: could not read Username for 'https://example.test': terminal prompts disabled");
+        var integrator = new LocalGitBranchIntegrator(new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), new InlineOffloader(), NullLogger<LocalGitBranchIntegrator>.Instance);
+        using var _ = HostGit.Use(new GitReading(new GitVersion(2, 30, 2), "git version 2.30.2"));
+
+        var failure = await Should.ThrowAsync<GitCredentialHelperUnsupportedException>(() => integrator.IntegrateAsync(new IntegrationRequest
+        {
+            TeamId = Guid.NewGuid(), RepositoryUrl = "https://example.test/repo.git", BaseSha = "base", Token = "test-token", IntegrationBranch = "codespace/integration/run",
+            Contributions = new[] { new BranchContribution { Label = "agent", BaseSha = "base", Patch = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n" } },
+        }, CancellationToken.None));
+
+        failure.Message.ShouldContain("2.30.2");
+        runner.Specs.ShouldContain(spec => Subcommand(spec) == "clone", "fixture check: the refusal came from the clone");
+    }
+
+    [Fact]
+    public async Task A_tokened_push_refused_for_want_of_a_credential_by_a_git_before_2_31_fails_with_the_cause()
+    {
+        var runner = new RefusedCloneRunner("fatal: could not read Username for 'https://example.test': terminal prompts disabled", refuses: "push");
+        var integrator = new LocalGitBranchIntegrator(new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), new InlineOffloader(), NullLogger<LocalGitBranchIntegrator>.Instance);
+        using var _ = HostGit.Use(new GitReading(new GitVersion(2, 30, 2), "git version 2.30.2"));
+
+        await Should.ThrowAsync<GitCredentialHelperUnsupportedException>(() => integrator.IntegrateAsync(new IntegrationRequest
+        {
+            TeamId = Guid.NewGuid(), RepositoryUrl = "https://example.test/repo.git", BaseSha = "base", Token = "test-token", IntegrationBranch = "codespace/integration/run",
+            Contributions = new[] { new BranchContribution { Label = "agent", BaseSha = "base", Patch = "diff --git a/f.txt b/f.txt\n--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+b\n" } },
+        }, CancellationToken.None));
+
+        runner.Specs.ShouldContain(spec => Subcommand(spec) == "push", "fixture check: the refusal came from the push, after a clean apply");
+    }
+
+    /// <summary>Refuses one git subcommand (the clone, unless told otherwise) the way git does for a remote that wanted a credential and got none; every other command answers as an integration would (the branch is new, the rest succeed).</summary>
+    private sealed class RefusedCloneRunner(string stderr, string refuses = "clone") : ISandboxRunner
+    {
+        public string Kind => "local";
+        public List<SandboxSpec> Specs { get; } = new();
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            Specs.Add(spec);
+
+            if (Subcommand(spec) == refuses) return Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = stderr });
+
+            var absent = spec.Args.Contains("--quiet") || spec.Args.Contains("--verify");
+
+            return Task.FromResult(new SandboxResult { Status = absent ? SandboxStatus.Failed : SandboxStatus.Success, ExitCode = absent ? 1 : 0, Stdout = "", Stderr = "" });
+        }
     }
 
     /// <summary>The git subcommand, past any leading <c>-c key=value</c> and <c>-C dir</c>.</summary>

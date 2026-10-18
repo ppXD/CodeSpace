@@ -2,6 +2,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Health;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Workflows;
@@ -197,6 +198,25 @@ public sealed class RemoteTipResolverTests
         if (tokened) TokenedGitSpecs.CarriesTheCredential(probe, "x-access-token", "test-token").ShouldBeTrue();
     }
 
+    [Theory]
+    [InlineData("git version 2.30.2", true)]
+    [InlineData("git version 2.39.5", false)]
+    public async Task A_tokened_probe_the_remote_refused_for_want_of_a_credential_names_an_old_git_only_when_git_is_old(string gitOutput, bool oldGitIsTheCause)
+    {
+        // The launch probe runs on the API pod, which installs git for it alone. With a git before 2.31 its token is never
+        // offered, and the launch failed with git's "could not read Username" — a sentence that points at the credential.
+        var runner = new RefusingRunner("fatal: could not read Username for 'https://gitlab.example.test': terminal prompts disabled");
+        var request = new WorkspaceRequest { RepositoryUrl = "https://gitlab.example.test/a/b.git", Token = "test-token", Ref = "main" };
+        using var _ = HostGit.Use(new GitReading(GitVersion.Parse(gitOutput), gitOutput));
+
+        var failure = await Should.ThrowAsync<WorkspaceException>(() =>
+            new RemoteTipResolver(new SandboxRunnerRegistry(new ISandboxRunner[] { runner })).ResolveTipShaAsync(request, refRequired: true, CancellationToken.None));
+
+        (failure is GitCredentialHelperUnsupportedException).ShouldBe(oldGitIsTheCause, failure.Message);
+        failure.Message.Contains("could not read Username", StringComparison.Ordinal).ShouldBe(!oldGitIsTheCause, "the typed failure replaces git's sentence; otherwise git's own words stand");
+        failure.Message.ShouldNotContain("test-token");
+    }
+
     // ─── harness (the LocalGitWorkspaceProviderTests pattern) ───────────────────────
 
     private sealed class LsRemoteRunner(string stdout) : ISandboxRunner
@@ -208,6 +228,13 @@ public sealed class RemoteTipResolverTests
             Specs.Add(spec);
             return Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = stdout, Stderr = "" });
         }
+    }
+
+    private sealed class RefusingRunner(string stderr) : ISandboxRunner
+    {
+        public string Kind => "local";
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken) =>
+            Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = stderr });
     }
 
     private static RemoteTipResolver NewResolver() =>

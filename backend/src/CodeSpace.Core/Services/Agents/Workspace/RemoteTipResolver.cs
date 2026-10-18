@@ -93,7 +93,7 @@ public sealed class RemoteTipResolver : IRemoteTipResolver, ISingletonDependency
         }
 
         if (result.Status != SandboxStatus.Success)
-            throw new WorkspaceException($"git ls-remote failed (exit {result.ExitCode}) resolving the launch base for {SanitizeUrl(request.RepositoryUrl)}: {LocalGitWorkspaceProvider.Redact(Truncate(result.Stderr), request.Token)} — the launch base pin requires a reachable remote; the clone would fail the same way later");
+            throw TokenedGitCommand.OldGitFailure(remote.IsTokened, result.Stderr) ?? new WorkspaceException($"git ls-remote failed (exit {result.ExitCode}) resolving the launch base for {SanitizeUrl(request.RepositoryUrl)}: {LocalGitWorkspaceProvider.Redact(Truncate(result.Stderr), request.Token)} — the launch base pin requires a reachable remote; the clone would fail the same way later");
 
         // sha1 (40) and sha256 (64) object formats both count — a sha256 remote must not read as "ref missing".
         return result.Stdout

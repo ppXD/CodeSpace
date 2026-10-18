@@ -363,7 +363,7 @@ public sealed partial class SupervisorAcceptanceGrader : ISupervisorAcceptanceGr
             TokenedGitCommand.Spec(remote, new SandboxSpec { Command = "git", Args = new[] { "clone", remote.Url, directory }, WorkingDirectory = directory, TimeoutSeconds = CloneTimeoutSeconds, AllowNetwork = true }), cancellationToken).ConfigureAwait(false);
 
         if (cloneResult.Status != SandboxStatus.Success)
-            throw new WorkspaceException($"git clone failed (exit {cloneResult.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(cloneResult.Stderr), clone.Token)}");
+            throw TokenedGitCommand.OldGitFailure(remote.IsTokened, cloneResult.Stderr) ?? new WorkspaceException($"git clone failed (exit {cloneResult.ExitCode}): {LocalGitWorkspaceProvider.Redact(Summarize(cloneResult.Stderr), clone.Token)}");
 
         // Model-authored setup/acceptance commands run INSIDE this clone next. The clone named the remote without its
         // credential, so origin holds none; the strip stays as a belt, via the SAME shared helper LocalGitWorkspaceProvider's

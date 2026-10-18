@@ -232,6 +232,34 @@ public sealed class ProviderReconnectFlowTests : IDisposable
         WasDispatched(hookId).ShouldBeTrue("the revived hook is handed to the registrar, not left Pending for a bind that may never come");
     }
 
+    [Theory]
+    [InlineData(StrandedShape.ReconnectedAfterTheDisconnect, true)]
+    [InlineData(StrandedShape.TokenLinkedInTheSameSave, true)]
+    [InlineData(StrandedShape.OnlyAnOlderLiveCredential, false)]
+    [InlineData(StrandedShape.ReconnectedByAnotherMember, false)]
+    [InlineData(StrandedShape.ReconnectedThenDisconnectedAgain, false)]
+    [InlineData(StrandedShape.BoundToALiveCredentialWithANewerSibling, false)]
+    public async Task The_census_counts_exactly_the_shapes_the_sweep_moves_and_falls_as_it_moves_them(StrandedShape shape, bool counted)
+    {
+        // The health report's backlog is only worth reading if it is the sweep's own candidate set. The shapes are the sweep
+        // theory's, so a rule changed for one and not the other fails here; the baseline is taken after a drain, so rows other
+        // tests in this shared database left cannot move it.
+        var world = await SeedWorldAsync();
+
+        using var dispatches = Jobs().ManualExecution();
+        await SweepUntilDrainedAsync();
+        var baseline = await CountStrandedAsync();
+
+        var (bound, _) = await SeedStrandedCredentialsAsync(world, shape);
+        await SeedRepositoryAsync(world, bound, shape is StrandedShape.TokenLinkedInTheSameSave or StrandedShape.BoundToALiveCredentialWithANewerSibling ? RepositoryStatus.Active : RepositoryStatus.Error);
+
+        (await CountStrandedAsync()).ShouldBe(baseline + (counted ? 1 : 0), $"{shape}: counted only when the sweep would move it");
+
+        await SweepUntilDrainedAsync();
+
+        (await CountStrandedAsync()).ShouldBe(baseline, $"{shape}: a moved binding leaves the backlog, and one that stays was never in it");
+    }
+
     [Fact]
     public async Task The_repair_sweep_moves_a_group_hook_that_is_the_disconnected_credentials_only_binding()
     {
@@ -312,6 +340,14 @@ public sealed class ProviderReconnectFlowTests : IDisposable
         }
 
         throw new ShouldAssertException($"RepairDisconnectedCredentialBindingsCommand still repaired bindings after {MaxSweepPasses} passes — a repaired credential is not leaving the candidate set. Check that the sweep's candidate query drops a revoked credential once nothing live is bound to it.");
+    }
+
+    /// <summary>The health report's backlog: what the sweep would take, counted without its batch bound.</summary>
+    private async Task<int> CountStrandedAsync()
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<IStrandedCredentialCensus>().CountAsync(CancellationToken.None);
     }
 
     /// <summary>The Personal tab's "Disconnect".</summary>
