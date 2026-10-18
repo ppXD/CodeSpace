@@ -341,7 +341,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         var result = await RunGitAsync(args, context, cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success)
-            throw new WorkspaceException($"git clone failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), request.Token)}");
+            throw TokenedGitCommand.OldGitFailure(context.Remote.IsTokened, result.Stderr) ?? new WorkspaceException($"git clone failed (exit {result.ExitCode}): {Redact(Summarize(result.Stderr), request.Token)}");
 
         if (!string.IsNullOrWhiteSpace(request.PinnedSha))
             await MaterializePinAsync(request, context, cancellationToken).ConfigureAwait(false);
@@ -934,7 +934,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             ExecuteGitAsync(repo, args, PublishGitSpec(publishDir, args, network, timeoutSeconds), cancellationToken);
 
         private Task<string> RunTokenedPublishGitOrThrowAsync(MaterializedRepo repo, string publishDir, TokenedGitCommand.Remote remote, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
-            EnsureSuccessAsync(repo, args, RunTokenedPublishGitAsync(repo, publishDir, remote, args, cancellationToken));
+            EnsureSuccessAsync(repo, args, RunTokenedPublishGitAsync(repo, publishDir, remote, args, cancellationToken), remote.IsTokened);
 
         /// <summary>Run a publish-repo command that reaches <paramref name="remote"/> — the LFS upload, the push, the readback — as a <see cref="TokenedGitCommand"/>, with the network and the push budget.</summary>
         private Task<SandboxResult> RunTokenedPublishGitAsync(MaterializedRepo repo, string publishDir, TokenedGitCommand.Remote remote, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
@@ -1029,13 +1029,17 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             }
         }
 
-        /// <summary>Await a git result and throw a redacted <see cref="WorkspaceException"/> on a non-success status; the argv is redacted too, as a belt.</summary>
-        private static async Task<string> EnsureSuccessAsync(MaterializedRepo repo, IReadOnlyList<string> args, Task<SandboxResult> run)
+        /// <summary>
+        /// Await a git result and throw a redacted <see cref="WorkspaceException"/> on a non-success status; the argv is redacted too, as a belt.
+        /// <paramref name="tokened"/> is whether the command ran against a remote that carried a credential (<see cref="TokenedGitCommand.Remote.IsTokened"/>),
+        /// the only commands an old git can fail for want of one: it is the remote's own answer, not the run's clone token, so the two cannot disagree.
+        /// </summary>
+        private static async Task<string> EnsureSuccessAsync(MaterializedRepo repo, IReadOnlyList<string> args, Task<SandboxResult> run, bool tokened = false)
         {
             var result = await run.ConfigureAwait(false);
 
             if (result.Status != SandboxStatus.Success)
-                throw new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), repo.Token)}");
+                throw TokenedGitCommand.OldGitFailure(tokened, result.Stderr) ?? new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), repo.Token)}");
 
             SandboxOutputCompleteness.RequireStdout(result);
             return result.Stdout;

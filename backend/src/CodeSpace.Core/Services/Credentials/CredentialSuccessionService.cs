@@ -20,7 +20,7 @@ namespace CodeSpace.Core.Services.Credentials;
 /// (<see cref="ICredentialRelinkService"/>), each a deliberate act rather than a side effect of connecting. The repair sweep
 /// stays the fallback for what none of those doors reached, and walks its backlog in bounded pages (<see cref="SweepPass{TCandidate}"/>).
 /// </summary>
-public sealed partial class CredentialSuccessionService : ICredentialSuccessionService, IScopedDependency
+public sealed partial class CredentialSuccessionService : ICredentialSuccessionService, IStrandedCredentialCensus, IScopedDependency
 {
     private const string SweepName = "credential-binding-repair";
 
@@ -58,6 +58,8 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
     public async Task<int> RepairStrandedAsync(int batchSize, CancellationToken cancellationToken) =>
         await new SweepPass<StrandedCredential>(SweepName, _backoff, _logger).RunAsync(batchSize, LoadStrandedAsync, RepairAsync, cancellationToken).ConfigureAwait(false);
 
+    public async Task<int> CountAsync(CancellationToken cancellationToken) => await StrandedWithSuccessor().CountAsync(cancellationToken).ConfigureAwait(false);
+
     /// <summary>
     /// The owner's revoked credentials on the successor's instance and team. Filtered on the tracked entities, not in
     /// SQL: a token link revokes the credential it replaces in the same unit of work, so that row is Revoked in memory
@@ -83,14 +85,28 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
     /// </summary>
     private async Task<List<StrandedCredential>> LoadStrandedAsync(Guid? after, int take, CancellationToken cancellationToken)
     {
+        var rows = await StrandedWithSuccessor(after)
+            .OrderBy(candidate => candidate.DeadId)
+            .Take(take)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return rows.Select(row => new StrandedCredential(row.DeadId, row.SuccessorId!.Value)).ToList();
+    }
+
+    /// <summary>
+    /// Every candidate after <paramref name="after"/> (all of them when null), unbounded: what <see cref="LoadStrandedAsync"/>
+    /// pages through and <see cref="CountAsync"/> counts, so the two cannot disagree about what a candidate is.
+    /// </summary>
+    private IQueryable<StrandedRow> StrandedWithSuccessor(Guid? after = null)
+    {
         var revoked = _db.Credential.AsNoTracking().Where(dead => dead.Status == CredentialStatus.Revoked && dead.OwnerUserId != null);
 
         if (after is Guid cursor) revoked = revoked.Where(dead => dead.Id.CompareTo(cursor) > 0);
 
-        var rows = await revoked
+        return revoked
             .Where(dead => _db.Repository.Any(r => r.CredentialId == dead.Id && r.TeamId == dead.TeamId && r.ProviderInstanceId == dead.ProviderInstanceId && r.DeletedDate == null)
                 || _db.ConnectionWebhook.Any(w => w.CredentialId == dead.Id && w.ProviderInstanceId == dead.ProviderInstanceId && WebhookRegistrationLifecycle.InService.Contains(w.RegistrationStatus)))
-            .Select(dead => new
+            .Select(dead => new StrandedRow
             {
                 DeadId = dead.Id,
                 SuccessorId = _db.Credential
@@ -99,12 +115,7 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
                     .Select(c => (Guid?)c.Id)
                     .FirstOrDefault()
             })
-            .Where(candidate => candidate.SuccessorId != null)
-            .OrderBy(candidate => candidate.DeadId)
-            .Take(take)
-            .ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        return rows.Select(row => new StrandedCredential(row.DeadId, row.SuccessorId!.Value)).ToList();
+            .Where(candidate => candidate.SuccessorId != null);
     }
 
     /// <summary>Move one disconnected credential's bindings and save them on their own, then hand its revived hooks to the registrar.</summary>
@@ -193,4 +204,11 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
     }
 
     private sealed record Adopted(int RepositoryCount, int ConnectionWebhookCount, List<Guid> RevivedHookIds);
+
+    /// <summary>The query's row: a member-initialised class because an anonymous type cannot be returned from <see cref="StrandedWithSuccessor"/>.</summary>
+    private sealed class StrandedRow
+    {
+        public Guid DeadId { get; init; }
+        public Guid? SuccessorId { get; init; }
+    }
 }

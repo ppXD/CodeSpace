@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Health;
 
 namespace CodeSpace.Core.Services.Agents.Workspace;
 
@@ -63,6 +64,32 @@ internal static class TokenedGitCommand
 
     /// <summary>The username a token is sent under when its provider names none: GitHub's.</summary>
     internal const string DefaultTokenUsername = "x-access-token";
+
+    /// <summary>The first git that reads <c>GIT_CONFIG_COUNT</c>, which the whole credential helper is configured through. An older git ignores the variable, so a tokened command finds no credential.</summary>
+    internal static readonly GitVersion MinimumGit = new(2, 31, 0);
+
+    /// <summary>
+    /// What a tokened command that git refused for want of a credential becomes on a host whose git is older than
+    /// <see cref="MinimumGit"/>: a <see cref="GitCredentialHelperUnsupportedException"/> naming that cause, in place of git's own
+    /// "could not read Username". Null whenever the old git is not the explanation — the command was not tokened (no helper was
+    /// ever going to be configured), git's complaint is some other one (an old git clones a public repository fine), or the
+    /// host's release is unknown or new enough, in which case the credential really was missing or refused and git's words stand.
+    /// The caller throws it in place of its own failure, with the result's redacted detail unchanged when this is null.
+    /// </summary>
+    internal static WorkspaceException? OldGitFailure(bool tokened, string stderr) =>
+        tokened && AskedForACredential(stderr) ? OldGitFailure(tokened, stderr, HostGit.Current) : null;
+
+    /// <summary><see cref="OldGitFailure(bool, string)"/> against a given reading of the host's git.</summary>
+    internal static WorkspaceException? OldGitFailure(bool tokened, string stderr, GitReading git)
+    {
+        if (!tokened || !AskedForACredential(stderr)) return null;
+
+        return git.Version is { } version && !version.IsAtLeast(MinimumGit) ? new GitCredentialHelperUnsupportedException(version) : null;
+    }
+
+    /// <summary>git's non-interactive words for a remote that wanted a credential nothing supplied.</summary>
+    private static bool AskedForACredential(string stderr) =>
+        stderr.Contains("could not read Username", StringComparison.Ordinal) || stderr.Contains("could not read Password", StringComparison.Ordinal);
 
     /// <summary>
     /// The credential helper a tokened command names: a shell function that answers <c>get</c> from the two variables until

@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Services.Agents.Workspace;
 using CodeSpace.Core.Services.Agents.Workspace.Providers;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Health;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
@@ -201,6 +202,44 @@ public sealed class LocalGitWorkspaceProviderTests
             RepositoryUrl = url, LocalSource = new WorkspaceLocalSource { Directory = path },
         }), CancellationToken.None));
         runner.Invocations.ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData(true, "git version 2.30.2", true)]
+    [InlineData(true, "git version 2.39.5", false)]
+    [InlineData(false, "git version 2.30.2", false)]
+    public async Task A_clone_the_remote_asked_a_credential_for_names_an_old_git_only_when_a_token_was_sent_and_git_is_old(bool tokened, string gitOutput, bool oldGitIsTheCause)
+    {
+        // The run's own clone — the failure every run on a git before 2.31 died of, reported as "could not read Username".
+        var runner = new RefusedCloneRunner("fatal: could not read Username for 'https://gitlab.example.test': terminal prompts disabled");
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new ISandboxRunner[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+        using var _ = HostGit.Use(new GitReading(GitVersion.Parse(gitOutput), gitOutput));
+
+        var failure = await Should.ThrowAsync<WorkspaceException>(() => provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest
+        {
+            RepositoryUrl = "https://gitlab.example.test/a/b.git", Token = tokened ? "test-token" : null,
+        }), CancellationToken.None));
+
+        runner.CloneAttempts.ShouldBe(1, "fixture check: the refusal came from the clone");
+        (failure is GitCredentialHelperUnsupportedException).ShouldBe(oldGitIsTheCause, failure.Message);
+        failure.Message.ShouldNotContain("test-token");
+        if (!oldGitIsTheCause) failure.Message.ShouldContain("git clone failed", customMessage: "otherwise the message is exactly what it always was");
+    }
+
+    /// <summary>Refuses the clone the way git does for a remote that wanted a credential and got none; answers every other command as a clean success.</summary>
+    private sealed class RefusedCloneRunner(string cloneStderr) : ISandboxRunner
+    {
+        public string Kind => "local";
+        public int CloneAttempts { get; private set; }
+
+        public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
+        {
+            if (!spec.Args.Contains("clone")) return Task.FromResult(new SandboxResult { Status = SandboxStatus.Success, ExitCode = 0, Stdout = new string('a', 40), Stderr = "" });
+
+            CloneAttempts++;
+
+            return Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = cloneStderr });
+        }
     }
 
     private sealed class WorkspacePathRunner : ISandboxRunner
@@ -589,9 +628,16 @@ public sealed class LocalGitWorkspaceProviderTests
     {
         public string Kind => "local";
         public List<SandboxSpec> Specs { get; } = new();
+
+        /// <summary>When set, the push is refused with this stderr — the way git refuses one the remote wanted a credential for.</summary>
+        public string? RefusePushWith { get; init; }
+
         public Task<SandboxResult> RunAsync(SandboxSpec spec, CancellationToken cancellationToken)
         {
             Specs.Add(spec);
+
+            if (RefusePushWith is not null && spec.Args.Contains("push"))
+                return Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 128, Stdout = "", Stderr = RefusePushWith });
 
             if (agentCommittedItself && spec.Args.Contains("commit"))
                 return Task.FromResult(new SandboxResult { Status = SandboxStatus.Failed, ExitCode = 1, Stdout = "nothing to commit, working tree clean", Stderr = "" });
@@ -640,6 +686,41 @@ public sealed class LocalGitWorkspaceProviderTests
 
         runner.Specs.Where(s => TokenedGitSpecs.ArgvCarriesACredential(s, "test-token")).Select(s => string.Join(' ', s.Args)).ShouldBeEmpty("the probe and the clone name the remote without its credential");
         runner.Specs.Where(s => TokenedGitSpecs.RunsTokened(s, "https://example.test/repo.git")).ShouldAllBe(s => TokenedGitSpecs.CarriesTheCredential(s, "x-access-token", "test-token"));
+    }
+
+    [Fact]
+    public async Task A_push_the_remote_asked_a_credential_for_names_an_old_git_when_the_host_git_is_before_2_31()
+    {
+        // The publish is the last thing a run does, and the one failure that leaves a Succeeded run with no branch.
+        var runner = new PostTurnRunner(agentCommittedItself: false) { RefusePushWith = "fatal: could not read Username for 'https://example.test': terminal prompts disabled" };
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+
+        await using var handle = await provider.PrepareAsync(PostTurnProvision("fixture-token", multiRepo: false), CancellationToken.None);
+        using var _ = HostGit.Use(new GitReading(new GitVersion(2, 30, 2), "git version 2.30.2"));
+
+        var failure = await Should.ThrowAsync<GitCredentialHelperUnsupportedException>(() => ((IWorkspacePushHandle)handle).PushChangesAsync("codespace/run", CancellationToken.None));
+
+        runner.Specs.ShouldContain(spec => spec.Args.Contains("push"), "fixture check: the refusal came from the push");
+        failure.Message.ShouldNotContain("fixture-token");
+    }
+
+    [Theory]
+    [InlineData("https://x-access-token:stored-credential@example.test/repo.git")]   // the credential rides in the repository URL
+    [InlineData("https://example.test/repo.git")]
+    public async Task A_run_with_no_clone_token_never_pushes_whatever_its_url_carries_so_the_publish_has_no_credential_of_its_own(string repositoryUrl)
+    {
+        // The premise the publish's old-git decision rests on: a command that reaches the remote there is tokened exactly when the
+        // run has a clone token. RemoteFor also reads a URL's userinfo as a credential, but without a token the publish returns
+        // before any git runs — so the remote the push runs against and the token the run holds cannot disagree.
+        var runner = new PostTurnRunner(agentCommittedItself: false) { RefusePushWith = "fatal: could not read Username for 'https://example.test': terminal prompts disabled" };
+        var provider = new LocalGitWorkspaceProvider(new SandboxRunnerRegistry(new[] { runner }), NullLogger<LocalGitWorkspaceProvider>.Instance);
+
+        await using var handle = await provider.PrepareAsync(WorkspaceProvisionRequest.FromSingle(new WorkspaceRequest { RepositoryUrl = repositoryUrl }), CancellationToken.None);
+        var prepared = runner.Specs.Count;
+
+        (await ((IWorkspacePushHandle)handle).PushChangesAsync("codespace/run", CancellationToken.None)).ShouldBeNull();
+
+        runner.Specs.Skip(prepared).ShouldBeEmpty("no git runs for a run that holds no push credential");
     }
 
     [Fact]

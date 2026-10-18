@@ -91,8 +91,17 @@ public sealed partial class PackCloneFetcher : IPackSourceFetcher, IWorkspaceJan
         var result = await _runners.Resolve(SandboxKinds.Local).RunAsync(BuildCloneSpec(url, reference, dir), cancellationToken).ConfigureAwait(false);
 
         if (result.Status != SandboxStatus.Success)
-            throw new PackImportException(CloneFailedMessage(url, result));
+            throw OldGitFailure(url, result) ?? new PackImportException(CloneFailedMessage(url, result));
     }
+
+    /// <summary>
+    /// The clone failure when the cause is a host git older than <see cref="TokenedGitCommand.MinimumGit"/>: a pasted credential
+    /// travels through <c>GIT_CONFIG_COUNT</c>, which that git ignores, so the remote's request for it went unanswered. The
+    /// message names the URL without its credential and the actionable cause, in place of git's "could not read Username"; the
+    /// typed exception is kept as the inner one. Null whenever an old git is not the explanation.
+    /// </summary>
+    private static PackImportException? OldGitFailure(string url, SandboxResult result) =>
+        TokenedGitCommand.OldGitFailure(PastedSecret(url) is not null, result.Stderr) is { } oldGit ? new PackImportException($"git clone of '{WithoutPastedCredential(url)}' failed: {oldGit.Message}", oldGit) : null;
 
     /// <summary>
     /// The import walks this checkout (a worker that dies mid-import leaves it on disk for the janitor), so its origin must

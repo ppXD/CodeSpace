@@ -6,6 +6,8 @@ using CodeSpace.Core.Services.Workflows.Llm;
 using CodeSpace.Api.Filters;
 using CodeSpace.Api.Logging;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Health;
+using CodeSpace.Core.Services.Health.Checks;
 using CodeSpace.Core.Services.OutboundHttp;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Settings;
@@ -49,7 +51,17 @@ public class Startup
         // the pipeline responds, so a transient DB blip doesn't trigger a pod RESTART. /health/ready (readiness)
         // runs the "ready"-tagged checks — here a DbContext ping — so a pod is pulled from the Service's endpoints
         // (stops receiving traffic) while its DB is unreachable, without being killed. Mapped anonymous below.
-        services.AddHealthChecks().AddDbContextCheck<CodeSpaceDbContext>("db", tags: new[] { "ready" });
+        //
+        // /health is the report for a person or a script, not a probe: this process's build and role plus every check. The
+        // three checks after the database are deployment facts that otherwise take a query or a shell on the pod to learn —
+        // whether the credential refresh lock is exclusive across connections, whether git can carry a clone token, whether the
+        // credential repair sweep is scheduled. They carry NO "ready" tag, so /health/ready is exactly what it was and none
+        // of them can pull a pod from rotation or restart it: they degrade the report and say why.
+        services.AddHealthChecks()
+            .AddDbContextCheck<CodeSpaceDbContext>("db", tags: new[] { "ready" })
+            .AddCheck<RefreshLockHealthCheck>(RefreshLockHealthCheck.Name)
+            .AddCheck<GitVersionHealthCheck>(GitVersionHealthCheck.Name)
+            .AddCheck<CredentialRepairSweepHealthCheck>(CredentialRepairSweepHealthCheck.Name);
 
         // CORS — only matters when the SPA calls the backend directly (VITE_API_URL=http://localhost:5099) rather
         // than through Vite's same-origin /api proxy. The policy, its origins setting and the Development-only
@@ -134,12 +146,21 @@ public class Startup
         // so the filter can read HttpContext.User.
         app.UseCodeSpaceHangfire(Configuration);
 
+        // Once the host is serving: one line naming the build, role and git, and the refresh-lock self-test. Describes the pod; never
+        // refuses it.
+        app.ApplicationServices.GetRequiredService<BootPostureReporter>().ReportWhenStarted();
+
         app.UseEndpoints(endpoints =>
         {
             // k8s liveness/readiness probes — AllowAnonymous because the global FallbackPolicy requires auth and a
             // probe is unauthenticated. Live = process up (no checks); Ready = the "ready"-tagged checks (DB ping).
             endpoints.MapHealthChecks("/health/live", new HealthCheckOptions { Predicate = _ => false }).AllowAnonymous();
             endpoints.MapHealthChecks("/health/ready", new HealthCheckOptions { Predicate = check => check.Tags.Contains("ready") }).AllowAnonymous();
+
+            // The report, as JSON. Anonymous like the probes, so what anyone reads is the build, the role and each check's status; a
+            // signed-in global Admin also reads each check's description and data (see HealthResponseWriter). Nothing an exception
+            // message could carry is printed to either.
+            endpoints.MapHealthChecks("/health", new HealthCheckOptions { ResponseWriter = HealthResponseWriter.WriteAsync }).AllowAnonymous();
 
             endpoints.MapControllers();
             if (env.IsDevelopment()) endpoints.MapOpenApi();
