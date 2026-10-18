@@ -14,9 +14,21 @@ namespace CodeSpace.Core.Services.Credentials;
 public interface ICredentialService
 {
     Task<IReadOnlyList<CredentialSummary>> ListAsync(Guid? providerInstanceId, CancellationToken cancellationToken);
+
+    /// <summary>What a Disconnect of this credential, asked by the caller right now, would do: how many working repositories it would break, or how many it would carry to which connection instead.</summary>
     Task<CredentialUsage> GetUsageAsync(Guid credentialId, CancellationToken cancellationToken);
+
     Task<CredentialCapabilitiesResponse> GetCapabilitiesAsync(Guid credentialId, CancellationToken cancellationToken);
     Task<Guid> AddAsync(AddCredentialInput input, CancellationToken cancellationToken);
-    Task<RevokeCredentialResult> RevokeAsync(Guid credentialId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Revoke the credential and break (or move) what leans on it. <paramref name="moveBindingsToCredentialId"/> names the
+    /// credential its repositories and group hooks follow in the same unit of work; left null, they follow the owner's
+    /// only other live connection when the owner is the one disconnecting a connection that is still live and there is
+    /// exactly one, and otherwise turn Error — see
+    /// <see cref="RevokeCredentialCommand.MoveBindingsToCredentialId"/>. A target that may not take them is refused before
+    /// the provider is asked to revoke anything.
+    /// </summary>
+    Task<RevokeCredentialResult> RevokeAsync(Guid credentialId, Guid? moveBindingsToCredentialId, CancellationToken cancellationToken);
     Task<RemoteRepositoryPage> ListAccessibleRepositoriesAsync(Guid credentialId, string? search, int page, int perPage, CancellationToken cancellationToken);
 }

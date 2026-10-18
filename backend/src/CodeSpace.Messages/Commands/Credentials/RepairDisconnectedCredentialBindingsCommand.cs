@@ -16,6 +16,6 @@ namespace CodeSpace.Messages.Commands.Credentials;
 /// </summary>
 public sealed record RepairDisconnectedCredentialBindingsCommand : ICommand<int>, INonTransactionalCommand
 {
-    /// <summary>Disconnected credentials repaired per tick — bounds each pass.</summary>
+    /// <summary>Disconnected credentials repaired per tick — bounds each pass, which also attempts a bounded multiple of it: credentials that fail do not count as repaired, are not retried again by the same pass, and after several passes in a row are set aside for a while.</summary>
     public int BatchSize { get; init; } = 50;
 }

@@ -161,7 +161,11 @@ export function ConnectRemoteModal({ onClose }: ConnectRemoteModalProps) {
     let usageMsg = "This credential will be revoked. You can reconnect at any time.";
     try {
       const usage = await oauthApi.getCredentialUsage(credential.id);
-      if (usage.activeRepositoryCount > 0) {
+      const moved = usage.willMoveRepositoryCount ?? 0;
+      if (moved > 0 && usage.willMoveToDisplayName) {
+        // Your only other connection on this provider: the repositories carry on through it, never stop working.
+        usageMsg = `This credential will be revoked. ${moved} repositor${moved === 1 ? "y" : "ies"} bound through it will move to your other connection, ${usage.willMoveToDisplayName}, and keep working.`;
+      } else if (usage.activeRepositoryCount > 0) {
         const n = usage.activeRepositoryCount;
         usageMsg = `This credential will be revoked. ${n} repositor${n === 1 ? "y" : "ies"} bound through this credential will be marked as needing a new credential (event webhooks keep working — you can re-link or unbind later).`;
       }

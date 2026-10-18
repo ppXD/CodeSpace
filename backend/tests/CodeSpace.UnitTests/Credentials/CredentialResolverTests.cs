@@ -43,6 +43,35 @@ public class CredentialResolverTests
         failure.Message.ShouldContain("'alice's GitLab' was disconnected");
     }
 
+    [Fact]
+    public void The_disconnect_names_the_remedies_a_person_can_perform_today_and_who_may_apply_them()
+    {
+        // A run's failure is the one place most people meet a disconnect, so it must name what actually fixes it: a team
+        // Admin re-linking the repository, or the owner of a personal connection reconnecting. Not a step that has no screen
+        // yet — re-linking every repository on the credential at once is an API only — and not "re-link" said to someone who
+        // is not allowed to.
+        var credential = BuildCredential(CredentialStatus.Revoked, string.Empty);
+
+        var message = Should.Throw<CredentialDisconnectedException>(() => new CredentialResolver(_encryptor, _serializer).Resolve(credential)).Message;
+
+        message.ShouldContain("team Admin");
+        message.ShouldContain("re-link the repository");
+        message.ShouldContain("its owner reconnecting the provider");
+        message.ShouldNotContain("at once", Case.Insensitive, "the all-at-once relink has no screen, so no message sends anyone looking for it");
+    }
+
+    [Fact]
+    public void A_repository_left_on_a_disconnected_credential_carries_the_same_remedies_in_its_own_error()
+    {
+        var error = CredentialRevocationService.DisconnectedRepositoryError;
+
+        error.ShouldContain("Re-link this repository");
+        error.ShouldContain("a team Admin can");
+        error.ShouldContain("its owner reconnecting the provider");
+        error.ShouldContain("unbind");
+        error.ShouldNotContain("at once", Case.Insensitive, "the all-at-once relink has no screen, so no message sends anyone looking for it");
+    }
+
     private static Credential BuildCredential(CredentialStatus status, string encryptedPayload) =>
         new() { Id = Guid.NewGuid(), AuthType = AuthType.Pat, DisplayName = "alice's GitLab", Status = status, EncryptedPayload = encryptedPayload };
 }

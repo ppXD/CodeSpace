@@ -14,23 +14,31 @@ namespace CodeSpace.Core.Services.Credentials;
 /// repositories and the group hooks it registered — follows that credential's owner to the credential they connected
 /// after it on the same provider instance in the same team. Ownership is the whole key — a teammate connecting the same
 /// provider is a different identity, and moving the owner's bindings onto it would change who they act as. A live
-/// credential has no successor, whatever its owner connects beside it.
+/// credential has no successor, whatever its owner connects beside it — its bindings move only when it is disconnected
+/// (<see cref="MoveBindingsAsync"/>, with the destination a person named, or — when the owner disconnects their own — the
+/// one other connection <see cref="FindOnlyOtherConnectionAsync"/> implies) or a person relinks them
+/// (<see cref="ICredentialRelinkService"/>), each a deliberate act rather than a side effect of connecting. The repair sweep
+/// stays the fallback for what none of those doors reached, and walks its backlog in bounded pages (<see cref="SweepPass{TCandidate}"/>).
 /// </summary>
-public sealed class CredentialSuccessionService : ICredentialSuccessionService, IScopedDependency
+public sealed partial class CredentialSuccessionService : ICredentialSuccessionService, IScopedDependency
 {
+    private const string SweepName = "credential-binding-repair";
+
     /// <summary>The hook states a reconnect revives, as a bind revives them: the ones the dead credential's failures put there.</summary>
     private static readonly RepositoryWebhookRegistrationStatus[] Revivable = { RepositoryWebhookRegistrationStatus.Failed, RepositoryWebhookRegistrationStatus.DeadLettered };
 
     private readonly CodeSpaceDbContext _db;
     private readonly IConnectionWebhookRegistrationDispatcher _hookDispatcher;
     private readonly IPostCommitActions _postCommit;
+    private readonly ISweepFailureBackoff _backoff;
     private readonly ILogger<CredentialSuccessionService> _logger;
 
-    public CredentialSuccessionService(CodeSpaceDbContext db, IConnectionWebhookRegistrationDispatcher hookDispatcher, IPostCommitActions postCommit, ILogger<CredentialSuccessionService> logger)
+    public CredentialSuccessionService(CodeSpaceDbContext db, IConnectionWebhookRegistrationDispatcher hookDispatcher, IPostCommitActions postCommit, ISweepFailureBackoff backoff, ILogger<CredentialSuccessionService> logger)
     {
         _db = db;
         _hookDispatcher = hookDispatcher;
         _postCommit = postCommit;
+        _backoff = backoff;
         _logger = logger;
     }
 
@@ -42,32 +50,13 @@ public sealed class CredentialSuccessionService : ICredentialSuccessionService, 
 
         if (predecessorIds.Count == 0) return;
 
-        var revivedHookIds = await AdoptBindingsAsync(successor, predecessorIds, cancellationToken).ConfigureAwait(false);
+        var adopted = await AdoptBindingsAsync(successor, predecessorIds, cancellationToken).ConfigureAwait(false);
 
-        await DispatchAfterCommitAsync(revivedHookIds, cancellationToken).ConfigureAwait(false);
+        await DispatchAfterCommitAsync(adopted.RevivedHookIds, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<int> RepairStrandedAsync(int batchSize, CancellationToken cancellationToken)
-    {
-        var stranded = await LoadStrandedAsync(batchSize, cancellationToken).ConfigureAwait(false);
-
-        var repaired = 0;
-
-        foreach (var candidate in stranded)
-        {
-            try
-            {
-                await RepairAsync(candidate, cancellationToken).ConfigureAwait(false);
-                repaired++;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(ex, "Moving the bindings of disconnected credential {CredentialId} to {SuccessorCredentialId} failed; the pass continues — the credential stays a candidate", candidate.DeadId, candidate.SuccessorId);
-            }
-        }
-
-        return repaired;
-    }
+    public async Task<int> RepairStrandedAsync(int batchSize, CancellationToken cancellationToken) =>
+        await new SweepPass<StrandedCredential>(SweepName, _backoff, _logger).RunAsync(batchSize, LoadStrandedAsync, RepairAsync, cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// The owner's revoked credentials on the successor's instance and team. Filtered on the tracked entities, not in
@@ -88,12 +77,17 @@ public sealed class CredentialSuccessionService : ICredentialSuccessionService, 
     /// newest Active credential on the same instance and team connected at or after the revocation (a revoked row is not
     /// modified again, so its last-modified date is when it was revoked; a token link revokes the credential it replaces
     /// in the same save that creates the new one, hence at-or-after). A credential with no successor — a disconnect
-    /// nobody reconnected — is not a candidate, so it never crowds a repairable one out of the batch.
+    /// nobody reconnected — is not a candidate, so it never crowds a repairable one out of the batch. Ordered by id and
+    /// read in pages: <paramref name="after"/> is the last id of the previous page, so the pass walks the whole backlog
+    /// instead of re-reading its first <paramref name="take"/> rows every time.
     /// </summary>
-    private async Task<List<StrandedCredential>> LoadStrandedAsync(int batchSize, CancellationToken cancellationToken)
+    private async Task<List<StrandedCredential>> LoadStrandedAsync(Guid? after, int take, CancellationToken cancellationToken)
     {
-        var rows = await _db.Credential.AsNoTracking()
-            .Where(dead => dead.Status == CredentialStatus.Revoked && dead.OwnerUserId != null)
+        var revoked = _db.Credential.AsNoTracking().Where(dead => dead.Status == CredentialStatus.Revoked && dead.OwnerUserId != null);
+
+        if (after is Guid cursor) revoked = revoked.Where(dead => dead.Id.CompareTo(cursor) > 0);
+
+        var rows = await revoked
             .Where(dead => _db.Repository.Any(r => r.CredentialId == dead.Id && r.TeamId == dead.TeamId && r.ProviderInstanceId == dead.ProviderInstanceId && r.DeletedDate == null)
                 || _db.ConnectionWebhook.Any(w => w.CredentialId == dead.Id && w.ProviderInstanceId == dead.ProviderInstanceId && WebhookRegistrationLifecycle.InService.Contains(w.RegistrationStatus)))
             .Select(dead => new
@@ -107,23 +101,25 @@ public sealed class CredentialSuccessionService : ICredentialSuccessionService, 
             })
             .Where(candidate => candidate.SuccessorId != null)
             .OrderBy(candidate => candidate.DeadId)
-            .Take(batchSize)
+            .Take(take)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
         return rows.Select(row => new StrandedCredential(row.DeadId, row.SuccessorId!.Value)).ToList();
     }
 
     /// <summary>Move one disconnected credential's bindings and save them on their own, then hand its revived hooks to the registrar.</summary>
-    private async Task RepairAsync(StrandedCredential candidate, CancellationToken cancellationToken)
+    private async Task<bool> RepairAsync(StrandedCredential candidate, CancellationToken cancellationToken)
     {
         try
         {
             var successor = await _db.Credential.SingleAsync(c => c.Id == candidate.SuccessorId, cancellationToken).ConfigureAwait(false);
 
-            var revivedHookIds = await AdoptBindingsAsync(successor, new List<Guid> { candidate.DeadId }, cancellationToken).ConfigureAwait(false);
+            var adopted = await AdoptBindingsAsync(successor, new List<Guid> { candidate.DeadId }, cancellationToken).ConfigureAwait(false);
 
             await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-            await DispatchAfterCommitAsync(revivedHookIds, cancellationToken).ConfigureAwait(false);
+            await DispatchAfterCommitAsync(adopted.RevivedHookIds, cancellationToken).ConfigureAwait(false);
+
+            return true;
         }
         finally
         {
@@ -131,8 +127,8 @@ public sealed class CredentialSuccessionService : ICredentialSuccessionService, 
         }
     }
 
-    /// <summary>Re-point every live binding of <paramref name="predecessorIds"/> at <paramref name="successor"/> as tracked changes. Returns the group hooks now waiting for a registrar.</summary>
-    private async Task<List<Guid>> AdoptBindingsAsync(Credential successor, List<Guid> predecessorIds, CancellationToken cancellationToken)
+    /// <summary>Re-point every live binding of <paramref name="predecessorIds"/> at <paramref name="successor"/> as tracked changes. Returns what moved, and the group hooks now waiting for a registrar.</summary>
+    private async Task<Adopted> AdoptBindingsAsync(Credential successor, List<Guid> predecessorIds, CancellationToken cancellationToken)
     {
         var repositories = await LoadBoundRepositoriesAsync(successor, predecessorIds, cancellationToken).ConfigureAwait(false);
         var hooks = await LoadBoundConnectionWebhooksAsync(successor, predecessorIds, cancellationToken).ConfigureAwait(false);
@@ -143,7 +139,7 @@ public sealed class CredentialSuccessionService : ICredentialSuccessionService, 
         if (repositories.Count + hooks.Count > 0)
             _logger.LogInformation("Moved {RepositoryCount} repositories and {ConnectionWebhookCount} group hooks from {OwnerUserId}'s disconnected credentials on provider instance {ProviderInstanceId} to credential {CredentialId}", repositories.Count, hooks.Count, successor.OwnerUserId, successor.ProviderInstanceId, successor.Id);
 
-        return hooks.Where(h => h.RegistrationStatus == RepositoryWebhookRegistrationStatus.Pending).Select(h => h.Id).ToList();
+        return new Adopted(repositories.Count, hooks.Count, hooks.Where(h => h.RegistrationStatus == RepositoryWebhookRegistrationStatus.Pending).Select(h => h.Id).ToList());
     }
 
     private async Task<List<Repository>> LoadBoundRepositoriesAsync(Credential successor, List<Guid> predecessorIds, CancellationToken cancellationToken) =>
@@ -191,5 +187,10 @@ public sealed class CredentialSuccessionService : ICredentialSuccessionService, 
             await _postCommit.RunAfterCommitAsync(ct => _hookDispatcher.DispatchAsync(hookId, ct), cancellationToken).ConfigureAwait(false);
     }
 
-    private sealed record StrandedCredential(Guid DeadId, Guid SuccessorId);
+    private sealed record StrandedCredential(Guid DeadId, Guid SuccessorId) : ISweepCandidate
+    {
+        public Guid Id => DeadId;
+    }
+
+    private sealed record Adopted(int RepositoryCount, int ConnectionWebhookCount, List<Guid> RevivedHookIds);
 }

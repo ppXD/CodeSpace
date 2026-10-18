@@ -5,6 +5,7 @@ using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.Credentials;
 using MediatR;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.Mvc.ModelBinding;
 
 namespace CodeSpace.Api.Controllers;
 
@@ -89,17 +90,49 @@ public class CredentialsController : ControllerBase
         return Ok(new { id });
     }
 
+    /// <summary>
+    /// Disconnect. The body is optional — a client that sends none behaves as it always has — and may name where the
+    /// credential's repositories and group hooks go (<c>moveBindingsToCredentialId</c>). Route's credentialId is
+    /// authoritative: merged into the command with <c>with</c> so a body that disagrees cannot redirect the revoke.
+    /// </summary>
     [HttpPost("{credentialId:guid}/revoke")]
-    public async Task<IActionResult> Revoke([FromRoute] Guid credentialId, CancellationToken cancellationToken)
+    public async Task<IActionResult> Revoke([FromRoute] Guid credentialId, [FromBody(EmptyBodyBehavior = EmptyBodyBehavior.Allow)] RevokeCredentialCommand? command, CancellationToken cancellationToken)
     {
-        var result = await _mediator.Send(new RevokeCredentialCommand { CredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
+        var result = await _mediator.Send((command ?? new RevokeCredentialCommand()) with { CredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
 
     /// <summary>
-    /// Pre-revoke preview: how many repositories will be marked Error if this credential
-    /// gets disconnected. UI uses this to put the right number in the confirm dialog so
-    /// the user isn't surprised by a silent cascade.
+    /// Move every repository and group hook still bound through a dead credential onto another credential in one action.
+    /// Route's fromCredentialId is authoritative; the body carries <c>toCredentialId</c>.
+    /// </summary>
+    [HttpPost("{fromCredentialId:guid}/relink-bindings")]
+    public async Task<IActionResult> RelinkBindings([FromRoute] Guid fromCredentialId, [FromBody] RelinkCredentialBindingsCommand command, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(command with { FromCredentialId = fromCredentialId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>What leans on the credential — repositories with their projects, group hooks, act-as identities, and the workflow triggers naming those repositories. Live or dead.</summary>
+    [HttpGet("{credentialId:guid}/dependents")]
+    public async Task<IActionResult> Dependents([FromRoute] Guid credentialId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetCredentialDependentsQuery { CredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>The credentials the caller could move this one's bindings onto, best first: their own live connections, then the team's service tokens.</summary>
+    [HttpGet("{credentialId:guid}/relink-suggestions")]
+    public async Task<IActionResult> RelinkSuggestions([FromRoute] Guid credentialId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new GetRelinkSuggestionsQuery { CredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Pre-revoke preview: what a Disconnect of this credential, asked by the caller right now, will do — how many
+    /// repositories will be marked Error, or how many will instead move to the person's one other live connection.
+    /// UI uses this to put the right number in the confirm dialog so the user isn't surprised by a silent cascade.
     /// </summary>
     [HttpGet("{credentialId:guid}/usage")]
     public async Task<IActionResult> Usage([FromRoute] Guid credentialId, CancellationToken cancellationToken)

@@ -11,12 +11,25 @@ namespace CodeSpace.Core.Services.Credentials;
 
 public sealed class CredentialRevocationService : ICredentialRevocationService, IScopedDependency
 {
+    /// <summary>
+    /// What a repository left on a disconnected credential says, here and in every run that reads it: only the remedies a
+    /// person can perform today — a team Admin re-linking the repository to an active credential of the same provider; the
+    /// owner reconnecting, for a personal connection, which carries the repository to the new connection; and the way out when
+    /// neither is wanted. Re-linking everything on the credential at once is an API (<c>RelinkCredentialBindingsCommand</c>)
+    /// with no screen yet, so it is not offered here: a message that names a step nobody can find sends them hunting.
+    /// </summary>
+    public const string DisconnectedRepositoryError = "Credential disconnected. Re-link this repository to an active credential of the same provider (a team Admin can), or unbind it; if it was a personal connection, its owner reconnecting the provider moves it too.";
+
+    private const string SweepName = "departed-credential-retirement";
+
     private readonly CodeSpaceDbContext _db;
+    private readonly ISweepFailureBackoff _backoff;
     private readonly ILogger<CredentialRevocationService> _logger;
 
-    public CredentialRevocationService(CodeSpaceDbContext db, ILogger<CredentialRevocationService> logger)
+    public CredentialRevocationService(CodeSpaceDbContext db, ISweepFailureBackoff backoff, ILogger<CredentialRevocationService> logger)
     {
         _db = db;
+        _backoff = backoff;
         _logger = logger;
     }
 
@@ -53,39 +66,30 @@ public sealed class CredentialRevocationService : ICredentialRevocationService, 
         foreach (var credential in departed) await RetireAsync(credential, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task<int> RetireDepartedAsync(int batchSize, CancellationToken cancellationToken)
+    public async Task<int> RetireDepartedAsync(int batchSize, CancellationToken cancellationToken) =>
+        await new SweepPass<DepartedCredential>(SweepName, _backoff, _logger).RunAsync(batchSize, LoadDepartedAsync, RetireDepartedOneAsync, cancellationToken).ConfigureAwait(false);
+
+    /// <summary>The next page of departed credentials in id order, read behind a cursor so a pass walks the whole backlog instead of re-reading the front of it, which is where a credential that can never be retired stays.</summary>
+    private async Task<List<DepartedCredential>> LoadDepartedAsync(Guid? after, int take, CancellationToken cancellationToken)
     {
-        var departedIds = await LoadDepartedIdsAsync(batchSize, cancellationToken).ConfigureAwait(false);
+        var departed = Departed().AsNoTracking();
 
-        var retired = 0;
+        if (after is Guid cursor) departed = departed.Where(c => c.Id.CompareTo(cursor) > 0);
 
-        foreach (var credentialId in departedIds)
-        {
-            try
-            {
-                if (await RetireDepartedOneAsync(credentialId, cancellationToken).ConfigureAwait(false)) retired++;
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                _logger.LogWarning(ex, "Retiring credential {CredentialId}, whose person is no longer in its team, failed; the pass continues — the credential stays a candidate", credentialId);
-            }
-        }
+        var ids = await departed.OrderBy(c => c.Id).Select(c => c.Id).Take(take).ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return retired;
+        return ids.Select(id => new DepartedCredential(id)).ToList();
     }
-
-    private async Task<List<Guid>> LoadDepartedIdsAsync(int batchSize, CancellationToken cancellationToken) =>
-        await Departed().AsNoTracking().OrderBy(c => c.Id).Select(c => c.Id).Take(batchSize).ToListAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>
     /// Re-read under the candidate rule and retired on its own save, so one failure undoes no other. A person who rejoined
     /// since the candidate list was read keeps the token.
     /// </summary>
-    private async Task<bool> RetireDepartedOneAsync(Guid credentialId, CancellationToken cancellationToken)
+    private async Task<bool> RetireDepartedOneAsync(DepartedCredential candidate, CancellationToken cancellationToken)
     {
         try
         {
-            var credential = await Departed().SingleOrDefaultAsync(c => c.Id == credentialId, cancellationToken).ConfigureAwait(false);
+            var credential = await Departed().SingleOrDefaultAsync(c => c.Id == candidate.Id, cancellationToken).ConfigureAwait(false);
 
             if (credential == null) return false;
 
@@ -144,14 +148,19 @@ public sealed class CredentialRevocationService : ICredentialRevocationService, 
     /// </summary>
     private async Task<int> MarkDependentRepositoriesUnauthorisedAsync(Guid credentialId, CancellationToken cancellationToken)
     {
-        var affected = await _db.Repository
+        var candidates = await _db.Repository
             .Where(r => r.CredentialId == credentialId && r.DeletedDate == null && r.Status != RepositoryStatus.Error)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        // Filtered again on the tracked rows, not only in SQL: a Disconnect that moved this credential's repositories in the
+        // same unit of work has re-pointed them in memory while the database still names the dead credential, and they
+        // are no longer this credential's to break.
+        var affected = candidates.Where(r => r.CredentialId == credentialId).ToList();
 
         foreach (var repo in affected)
         {
             repo.Status = RepositoryStatus.Error;
-            repo.LastError = "Credential disconnected. Re-link this repository to an active credential of the same provider, or unbind it.";
+            repo.LastError = DisconnectedRepositoryError;
         }
 
         return affected.Count;
@@ -173,4 +182,6 @@ public sealed class CredentialRevocationService : ICredentialRevocationService, 
         var now = DateTimeOffset.UtcNow;
         foreach (var identity in identities) identity.DeletedDate = now;
     }
+
+    private sealed record DepartedCredential(Guid Id) : ISweepCandidate;
 }

@@ -32,11 +32,12 @@ describe("connect remote modal credential controls", () => {
     { id: "team", teamId: "t1", providerInstanceId: "pi1", ownerUserId: null, ownerUserName: null, ownership: "TeamService", authType: "GroupAccessToken", displayName: "Acme group token", status: "Active", createdDate: "2026-01-01T00:00:00Z" },
   ];
 
-  function renderAs(t: MeTeam, held = credentials) {
+  function renderAs(t: MeTeam, held = credentials, specific: Record<string, unknown> = {}) {
     localStorage.setItem("codespace.jwt", "test-jwt");
     localStorage.setItem("codespace.activeTeamId", t.id);
 
-    const routes: Record<string, unknown> = { "/api/users/me": me(t), "/capabilities": { warnings: [] }, "/api/provider-instances": [instance], "/api/credentials": held };
+    // `specific` routes come first: a route is matched by substring, in order, and "/api/credentials" is a prefix of every credential URL.
+    const routes: Record<string, unknown> = { ...specific, "/api/users/me": me(t), "/capabilities": { warnings: [] }, "/api/provider-instances": [instance], "/api/credentials": held };
 
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -98,6 +99,29 @@ describe("connect remote modal credential controls", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Team" }));
 
     await waitFor(() => expect(screen.getByRole("button", { name: /Add team token/ })).toBeTruthy());
+  });
+
+  /**
+   * The confirm dialog quotes the usage preview. With a Disconnect that carries the repositories to the person's one other
+   * connection, a warning that they "will be marked as needing a new credential" is about something that will not happen;
+   * and an API that predates the move sends no such fields, so the old wording stays for it.
+   */
+  it.each([
+    ["moves them", { credentialId: "own", activeRepositoryCount: 0, willMoveRepositoryCount: 2, willMoveToDisplayName: "Maya's OAuth" }, ["2 repositories bound through it will move to your other connection, Maya's OAuth, and keep working."], ["needing a new credential"]],
+    ["moves the only one", { credentialId: "own", activeRepositoryCount: 0, willMoveRepositoryCount: 1, willMoveToDisplayName: "Maya's OAuth" }, ["1 repository bound through it will move to your other connection"], ["needing a new credential"]],
+    ["would break them", { credentialId: "own", activeRepositoryCount: 3, willMoveRepositoryCount: 0, willMoveToDisplayName: null }, ["3 repositories bound through this credential will be marked as needing a new credential"], ["will move to"]],
+    ["comes from an API that predates the move", { credentialId: "own", activeRepositoryCount: 1 }, ["1 repository bound through this credential will be marked as needing a new credential"], ["will move to"]],
+    ["has nothing bound", { credentialId: "own", activeRepositoryCount: 0, willMoveRepositoryCount: 0, willMoveToDisplayName: null }, ["This credential will be revoked. You can reconnect at any time."], ["needing a new credential", "will move to"]],
+  ] as const)("tells the disconnect confirm what the disconnect will do when it %s", async (_case, usage, expected, absent) => {
+    renderAs(team("Member", ["workflows.write"]), credentials, { "/api/credentials/own/usage": usage, "/api/credentials/own/capabilities": { credentialId: "own", grantedScopes: [], capabilities: [] } });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy());
+
+    fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+
+    const dialog = await screen.findByRole("alertdialog");
+    for (const text of expected) expect(dialog.textContent).toContain(text);
+    for (const text of absent) expect(dialog.textContent).not.toContain(text);
   });
 
   it("gives an admin revoke on a team token", async () => {

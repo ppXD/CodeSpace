@@ -20,6 +20,6 @@ namespace CodeSpace.Messages.Commands.Credentials;
 /// </summary>
 public sealed record RetireDepartedMembersCredentialsCommand : ICommand<int>, INonTransactionalCommand
 {
-    /// <summary>Tokens retired per tick — bounds each pass.</summary>
+    /// <summary>Tokens retired per tick — bounds each pass, which also attempts a bounded multiple of it: tokens that fail do not count as retired, are not retried again by the same pass, and after several passes in a row are set aside for a while, so tokens that can never be retired cannot keep a healthy departed member's from being reached.</summary>
     public int BatchSize { get; init; } = 50;
 }

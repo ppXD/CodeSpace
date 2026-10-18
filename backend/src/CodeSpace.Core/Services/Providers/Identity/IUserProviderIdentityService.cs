@@ -22,7 +22,7 @@ public interface IUserProviderIdentityService
     /// <summary>The caller's live linked identities (one per provider instance), newest first.</summary>
     Task<IReadOnlyList<UserProviderIdentitySummary>> ListMineAsync(CancellationToken cancellationToken);
 
-    /// <summary>Unlink one of the caller's identities: soft-delete it and retire its credential, cascading to the repositories bound through it. No-op if already gone.</summary>
+    /// <summary>Unlink one of the caller's identities: soft-delete it and retire its credential — carrying what is bound through it to the caller's one other live connection when they hold exactly one, as a Disconnect does, and cascading to what is left. No-op if already gone.</summary>
     Task UnlinkAsync(Guid identityId, CancellationToken cancellationToken);
 
     /// <summary>

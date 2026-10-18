@@ -12,5 +12,5 @@ public sealed class RevokeCredentialCommandHandler : IRequestHandler<RevokeCrede
     public RevokeCredentialCommandHandler(ICredentialService service) { _service = service; }
 
     public async Task<RevokeCredentialResult> Handle(RevokeCredentialCommand request, CancellationToken cancellationToken) =>
-        await _service.RevokeAsync(request.CredentialId, cancellationToken).ConfigureAwait(false);
+        await _service.RevokeAsync(request.CredentialId, request.MoveBindingsToCredentialId, cancellationToken).ConfigureAwait(false);
 }

@@ -3,6 +3,7 @@ using CodeSpace.Core.Jobs.RecurringJobs;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Messages.Commands.Credentials;
+using CodeSpace.Messages.Dtos.Credentials;
 using CodeSpace.Messages.Mediation;
 using MediatR;
 using Shouldly;
@@ -87,6 +88,12 @@ public class DisconnectedCredentialBindingRepairDispatchTests
         public int ToReturn;
 
         public Task CarryForwardAsync(Credential successor, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<string?> RefusalAsync(Credential from, Credential to, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<BindingsMoved> MoveBindingsAsync(Credential from, Credential to, CancellationToken cancellationToken) => throw new NotSupportedException();
+
+        public Task<Credential?> FindOnlyOtherConnectionAsync(Credential from, Guid callerId, CancellationToken cancellationToken) => throw new NotSupportedException();
 
         public Task<int> RepairStrandedAsync(int batchSize, CancellationToken cancellationToken)
         {

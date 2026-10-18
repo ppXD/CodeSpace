@@ -19,7 +19,7 @@ using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Credentials;
 
-public sealed class CredentialService : ICredentialService, IScopedDependency
+public sealed partial class CredentialService : ICredentialService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
@@ -86,13 +86,21 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
 
     public async Task<CredentialUsage> GetUsageAsync(Guid credentialId, CancellationToken cancellationToken)
     {
+        var credential = await LoadCredentialAsync(credentialId, cancellationToken).ConfigureAwait(false);
+
+        // What a Disconnect asked right now would do — so what the confirm dialog warns about is what then happens: the same
+        // resolution of the implied successor, by the same person.
+        var successor = await ResolveSuccessorAsync(credential, requestedId: null, cancellationToken).ConfigureAwait(false);
+
+        var bound = _db.Repository.AsNoTracking().Where(r => r.CredentialId == credentialId && r.DeletedDate == null);
+
+        if (successor != null)
+            return new CredentialUsage { CredentialId = credentialId, ActiveRepositoryCount = 0, WillMoveRepositoryCount = await bound.CountAsync(cancellationToken).ConfigureAwait(false), WillMoveToDisplayName = successor.DisplayName };
+
         // Active = not soft-deleted AND not already flipped to Error by a prior revoke.
         // Counting only Status=Active gives the right "you're about to break N working
         // repositories" number; previously-broken ones don't need to be in the warning.
-        var activeCount = await _db.Repository
-            .AsNoTracking()
-            .Where(r => r.CredentialId == credentialId && r.DeletedDate == null && r.Status == RepositoryStatus.Active)
-            .CountAsync(cancellationToken).ConfigureAwait(false);
+        var activeCount = await bound.CountAsync(r => r.Status == RepositoryStatus.Active, cancellationToken).ConfigureAwait(false);
 
         return new CredentialUsage { CredentialId = credentialId, ActiveRepositoryCount = activeCount };
     }
@@ -182,27 +190,18 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
         return credential.Id;
     }
 
-    public async Task<RevokeCredentialResult> RevokeAsync(Guid credentialId, CancellationToken cancellationToken)
+    public async Task<RevokeCredentialResult> RevokeAsync(Guid credentialId, Guid? moveBindingsToCredentialId, CancellationToken cancellationToken)
     {
         var credential = await LoadCredentialAsync(credentialId, cancellationToken).ConfigureAwait(false);
 
-        var alreadyRevoked = credential.Status == CredentialStatus.Revoked;
+        // Before the provider is asked to revoke anything: a refused target must leave the credential exactly as it was.
+        var successor = await ResolveSuccessorAsync(credential, moveBindingsToCredentialId, cancellationToken).ConfigureAwait(false);
 
-        // Skip provider revoke + local-state update when already Revoked — the token is gone,
-        // nothing to revoke. ALWAYS run the cascade below: it's the only path that heals an
-        // out-of-sync Repository row (Active pointing at a Revoked credential), which can
-        // happen if the cascade didn't exist when the credential was first revoked. The
-        // Status != Error filter inside MarkDependentRepositoriesUnauthorisedAsync makes the
-        // call idempotent.
-        bool providerOk = true;
-        string? providerError = null;
+        var (providerOk, providerError) = await EndAsync(credential, cancellationToken).ConfigureAwait(false);
 
-        if (!alreadyRevoked)
-        {
-            (providerOk, providerError) = await TryRevokeAtProviderAsync(credential, cancellationToken).ConfigureAwait(false);
-            MarkRevokedLocally(credential, providerError);
-        }
-
+        // Moved BEFORE the cascade, which then finds nothing left bound to the credential: the other order would turn
+        // every repository Error and lift it again, and a Paused or Unreachable one would come back Active.
+        var moved = await MoveBindingsAsync(credential, successor, cancellationToken).ConfigureAwait(false);
         var affectedRepoCount = await _revocation.CascadeAsync(credential.Id, cancellationToken).ConfigureAwait(false);
 
         return new RevokeCredentialResult
@@ -210,8 +209,27 @@ public sealed class CredentialService : ICredentialService, IScopedDependency
             CredentialId = credential.Id,
             ProviderAcknowledged = providerOk,
             ProviderError = providerError,
-            AffectedRepositoryCount = affectedRepoCount
+            AffectedRepositoryCount = affectedRepoCount,
+            MovedRepositoryCount = moved.RepositoryCount,
+            MovedConnectionWebhookCount = moved.ConnectionWebhookCount,
+            MovedToCredentialId = moved.Any ? successor!.Id : null
         };
+    }
+
+    /// <summary>
+    /// Skip provider revoke + local-state update when already Revoked — the token is gone, nothing to revoke. The cascade
+    /// that follows ALWAYS runs: it is the only path that heals an out-of-sync Repository row (Active pointing at a Revoked
+    /// credential), which can happen if the cascade didn't exist when the credential was first revoked. Its
+    /// Status != Error filter makes the call idempotent.
+    /// </summary>
+    private async Task<(bool Ok, string? Error)> EndAsync(Credential credential, CancellationToken cancellationToken)
+    {
+        if (credential.Status == CredentialStatus.Revoked) return (Ok: true, Error: null);
+
+        var (providerOk, providerError) = await TryRevokeAtProviderAsync(credential, cancellationToken).ConfigureAwait(false);
+        MarkRevokedLocally(credential, providerError);
+
+        return (providerOk, providerError);
     }
 
     public async Task<RemoteRepositoryPage> ListAccessibleRepositoriesAsync(Guid credentialId, string? search, int page, int perPage, CancellationToken cancellationToken)
