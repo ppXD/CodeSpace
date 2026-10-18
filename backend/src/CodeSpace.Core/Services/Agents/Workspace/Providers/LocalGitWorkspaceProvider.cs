@@ -3,6 +3,7 @@ using CodeSpace.Core.Services.Agents.Sandbox;
 using CodeSpace.Core.Services.Agents.Sandbox.Isolation;
 using CodeSpace.Core.Services.Agents.Sandbox.Exceptions;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Exceptions;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.Workspace.Providers;
@@ -20,6 +21,15 @@ namespace CodeSpace.Core.Services.Agents.Workspace.Providers;
 /// same URL after the clone stays as a belt), an operator's <c>store</c> or <c>cache</c> helper never keeps it, no trace2
 /// target records it, and a redirect to another authority is never sent it. Any token text is still redacted from
 /// surfaced error output.</para>
+///
+/// <para><b>Credential freshness:</b> the token a clone was provisioned with is only a snapshot. When a request names its
+/// repository (<see cref="WorkspaceRequest.RepositoryId"/>) and an <see cref="IWorkspaceTokenSource"/> is present, every
+/// command of the publish that reaches the remote — the LFS upload, the push, the readback — asks the source for the
+/// credential immediately beforehand, so a run that outlived its access token (or whose token a sibling run rotated away)
+/// still pushes with a live one. A push the remote refuses is tried once more with a freshly resolved credential when that
+/// differs from the refused one; refused again — or resolved to the same one — it ends as a
+/// <see cref="GitCredentialRejectedException"/> instead of presenting the same refusal again. Without a repository id (a
+/// hand-built request) or a source, the captured token is used exactly as before.</para>
 /// </summary>
 public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJanitor, IWorkspacePathCapture, ISingletonDependency
 {
@@ -49,15 +59,24 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
     private static readonly TimeSpan DefaultStaleThreshold = TimeSpan.FromHours(2);
 
     private readonly ISandboxRunnerRegistry _runners;
+    private readonly IWorkspaceTokenSource? _tokenSource;
     private readonly ILogger<LocalGitWorkspaceProvider> _logger;
     private readonly string _workspacesRoot;
 
-    public LocalGitWorkspaceProvider(ISandboxRunnerRegistry runners, ILogger<LocalGitWorkspaceProvider> logger) : this(runners, logger, WorkspacesRoot) { }
+    /// <summary>Without a token source: every push carries the token its clone was provisioned with — the behaviour before the credential was re-resolved at the push, kept for a host that has no credential store to ask.</summary>
+    public LocalGitWorkspaceProvider(ISandboxRunnerRegistry runners, ILogger<LocalGitWorkspaceProvider> logger) : this(runners, null, logger, WorkspacesRoot) { }
+
+    /// <summary>The composition the container builds: pushes re-resolve their credential through <paramref name="tokenSource"/> whenever the request names its repository.</summary>
+    public LocalGitWorkspaceProvider(ISandboxRunnerRegistry runners, IWorkspaceTokenSource tokenSource, ILogger<LocalGitWorkspaceProvider> logger) : this(runners, tokenSource, logger, WorkspacesRoot) { }
 
     /// <summary>Provisions (and sweeps) under <paramref name="workspacesRoot"/> instead of the worker-wide <see cref="WorkspacesRoot"/>, which every process on the host writes — so a test can own every directory it counts.</summary>
-    internal LocalGitWorkspaceProvider(ISandboxRunnerRegistry runners, ILogger<LocalGitWorkspaceProvider> logger, string workspacesRoot)
+    internal LocalGitWorkspaceProvider(ISandboxRunnerRegistry runners, ILogger<LocalGitWorkspaceProvider> logger, string workspacesRoot) : this(runners, null, logger, workspacesRoot) { }
+
+    /// <summary>A test-owned workspaces root with a credential source of the test's own.</summary>
+    internal LocalGitWorkspaceProvider(ISandboxRunnerRegistry runners, IWorkspaceTokenSource? tokenSource, ILogger<LocalGitWorkspaceProvider> logger, string workspacesRoot)
     {
         _runners = runners;
+        _tokenSource = tokenSource;
         _logger = logger;
         _workspacesRoot = workspacesRoot;
     }
@@ -99,7 +118,7 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
             var primaryAlias = (request.Primary ?? throw new WorkspaceException("Workspace provision has no resolvable primary repository.")).Alias;
             var cwd = ResolveCwd(request.CwdMode, workspaceRoot, materialized, primaryAlias, single);
 
-            return new LocalWorkspaceHandle(workspaceRoot, cwd, materialized, primaryAlias, _runners.Resolve(Kind), _logger, _workspacesRoot);
+            return new LocalWorkspaceHandle(workspaceRoot, cwd, materialized, primaryAlias, new HandleDependencies(_runners.Resolve(Kind), _tokenSource, _logger, _workspacesRoot));
         }
         catch
         {
@@ -164,9 +183,10 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
         var baseSha = await ReadBaseShaAsync(context, cancellationToken).ConfigureAwait(false);
 
-        // Carry the SAME short-lived clone credential forward (in-memory only, never persisted / never in .git/config) so a
-        // later push carries it in the push's environment without a second auth round-trip.
-        return new MaterializedRepo(repo.Alias, directory, repo.Access, repo.CloneRequest.RepositoryUrl, repo.CloneRequest.TokenUsername, repo.CloneRequest.Token, baseSha, repo.CloneRequest.Ref) { ReadOnlyPaths = context.ReadOnlyPaths };
+        // Carry the clone credential forward (in-memory only, never persisted / never in .git/config) as the one a later push
+        // starts from, with the repository it was resolved for: the handle re-resolves it right before each remote command
+        // when a token source is present, because a workspace outlives its token.
+        return new MaterializedRepo(repo.Alias, directory, repo.Access, repo.CloneRequest.RepositoryUrl, repo.CloneRequest.TokenUsername, repo.CloneRequest.Token, baseSha, repo.CloneRequest.Ref) { ReadOnlyPaths = context.ReadOnlyPaths, RepositoryId = repo.CloneRequest.RepositoryId, TeamId = repo.CloneRequest.TeamId };
     }
 
     /// <summary>Where the harness runs: Auto → the primary repo's dir for one repo (the invariant), the workspace root for many; or the explicit mode.</summary>
@@ -210,6 +230,13 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         /// <summary>P3b-2: the remote-CONFIRMED tip of the last successful push (readback matched the local tip); null = unconfirmed/no push.</summary>
         public string? PushedCommitSha { get; set; }
         public IReadOnlyList<string> ReadOnlyPaths { get; init; } = Array.Empty<string>();
+
+        /// <summary>The repository (and its team) the clone credential was resolved for — what the token source is asked about before each remote command. Null → the captured token is the only one there is.</summary>
+        public Guid? RepositoryId { get; init; }
+        public Guid? TeamId { get; init; }
+
+        /// <summary>The credential the next command that reaches the remote carries: the one the clone was provisioned with until a push resolves a fresher one. Replaced, never accumulated — a command only ever carries this one, so it is the only one an error can echo.</summary>
+        public string? Token { get; set; } = Token;
     }
 
     /// <summary>Record the cloned HEAD revision so <see cref="LocalWorkspaceHandle.CaptureChangesAsync"/> can diff the agent's work against it — robust whether the agent commits or leaves changes uncommitted.</summary>
@@ -629,6 +656,25 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         return encoded == token ? redacted : redacted.Replace(encoded, "***");
     }
 
+    /// <summary>
+    /// What git, GitLab and our own credential helper write to stderr when the remote refuses the credential a command
+    /// carried: git's <c>Authentication failed for</c> (its answer to an HTTP 401 after it offered a credential), the body
+    /// GitLab sends with the 401 (<c>HTTP Basic: Access denied</c>), curl's <c>returned error: 401</c>, and the helper's own
+    /// <c>refused this credential</c> (what git-lfs is told after the remote's 401, where git itself says nothing). git exits
+    /// 128 for every fatal error and has no structured signal for this one, so stderr is all there is. Used only to decide
+    /// whether trying the same credential again can help; a miss falls back to the plain failure, a hit to the typed one.
+    /// A 403 is deliberately absent: the remote accepted the credential and refused the ACTION, which no new token fixes.
+    /// Pinned by a test against the helper's own text and against what real git printed (Rule 8 spirit).
+    /// </summary>
+    internal static readonly IReadOnlyList<string> CredentialRefusalMarkers = new[] { "Authentication failed for", "HTTP Basic: Access denied", "returned error: 401", "refused this credential" };
+
+    /// <summary>Whether <paramref name="stderr"/> says the remote refused the credential (see <see cref="CredentialRefusalMarkers"/>). Pure + internal so it is unit-pinned.</summary>
+    internal static bool IsCredentialRefusal(string? stderr) =>
+        !string.IsNullOrEmpty(stderr) && CredentialRefusalMarkers.Any(marker => stderr.Contains(marker, StringComparison.OrdinalIgnoreCase));
+
+    /// <summary>What a workspace handle needs from the provider that built it, in one object so the handle's constructor stays within the five-parameter cap.</summary>
+    private sealed record HandleDependencies(ISandboxRunner Runner, IWorkspaceTokenSource? TokenSource, ILogger Logger, string PublishRoot);
+
     private sealed class LocalWorkspaceHandle : IWorkspaceHandle, IWorkspacePushHandle
     {
         private readonly string _workspaceRoot;
@@ -636,17 +682,19 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         private readonly IReadOnlyList<MaterializedRepo> _repos;
         private readonly MaterializedRepo _primary;
         private readonly ISandboxRunner _runner;
+        private readonly IWorkspaceTokenSource? _tokenSource;
         private readonly ILogger _logger;
 
-        public LocalWorkspaceHandle(string workspaceRoot, string cwd, IReadOnlyList<MaterializedRepo> repos, string primaryAlias, ISandboxRunner runner, ILogger logger, string publishRoot)
+        public LocalWorkspaceHandle(string workspaceRoot, string cwd, IReadOnlyList<MaterializedRepo> repos, string primaryAlias, HandleDependencies dependencies)
         {
             _workspaceRoot = workspaceRoot;
-            _publishRoot = publishRoot;
+            _publishRoot = dependencies.PublishRoot;
             Directory = cwd;
             _repos = repos;
             _primary = repos.First(r => r.Alias == primaryAlias);
-            _runner = runner;
-            _logger = logger;
+            _runner = dependencies.Runner;
+            _tokenSource = dependencies.TokenSource;
+            _logger = dependencies.Logger;
         }
 
         public string Directory { get; }
@@ -764,25 +812,25 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
 
                 await ImportBundlesAsync(repo, publishDir, branchName, addsObjects, cancellationToken).ConfigureAwait(false);
 
-                // Carry the SAME clone credential in the environment of the commands that reach the remote (never an argv,
-                // never a remote, never .git/config). Plain --force, not --force-with-lease: an observe-then-lease would still
-                // admit a zombie whose observation is fresh at push time, so the zombie fence lives in the REF NAME instead
-                // (AgentRunExecutor.BuildBranchName is generation-specific — a superseded attempt cannot name the current
-                // attempt's ref), and a lease's no-remote-tracking-ref semantics vary by git version. Bounded timeout so a
-                // hung push can't delay completion.
-                var remote = TokenedGitCommand.RemoteFor(repo.RepositoryUrl, repo.TokenUsername, repo.Token);
-
+                // Each command that reaches the remote carries the credential in its environment (never an argv, never a remote,
+                // never .git/config), resolved immediately beforehand when the repository names a token source — a run can
+                // outlive the access token it was provisioned with. Plain --force, not --force-with-lease: an
+                // observe-then-lease would still admit a zombie whose observation is fresh at push time, so the zombie fence
+                // lives in the REF NAME instead (AgentRunExecutor.BuildBranchName is generation-specific — a superseded
+                // attempt cannot name the current attempt's ref), and a lease's no-remote-tracking-ref semantics vary by git
+                // version. Bounded timeout so a hung push can't delay completion.
+                //
                 // LFS blobs BEFORE the refs (git's own pre-push order), so the remote never holds a pointer whose object is
                 // missing. The clean repo has no working-tree .lfsconfig (nothing is checked out), and the endpoint comes
                 // from the explicit remote URL — a hostile committed .lfsconfig cannot redirect the upload. Lock verification
                 // is off: against a remote without the locks API git-lfs would otherwise record lfs.<url>.locksverify in the
                 // publish repo's .git/config.
                 if (hasLfs)
-                    await RunTokenedPublishGitOrThrowAsync(repo, publishDir, remote, new[] { "-c", "lfs.locksverify=false", "lfs", "push", remote.Url, branchName }, cancellationToken).ConfigureAwait(false);
+                    await PushToRemoteOrThrowAsync(repo, publishDir, url => new[] { "-c", "lfs.locksverify=false", "lfs", "push", url, branchName }, cancellationToken).ConfigureAwait(false);
 
-                await RunTokenedPublishGitOrThrowAsync(repo, publishDir, remote, new[] { "push", "--force", remote.Url, $"{branchName}:{branchName}" }, cancellationToken).ConfigureAwait(false);
+                await PushToRemoteOrThrowAsync(repo, publishDir, url => new[] { "push", "--force", url, $"{branchName}:{branchName}" }, cancellationToken).ConfigureAwait(false);
 
-                repo.PushedCommitSha = await ReadBackPushedShaAsync(repo, publishDir, remote, branchName, cancellationToken).ConfigureAwait(false);
+                repo.PushedCommitSha = await ReadBackPushedShaAsync(repo, publishDir, branchName, cancellationToken).ConfigureAwait(false);
 
                 return branchName;
             }
@@ -842,14 +890,19 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         /// <summary>
         /// P3b-2 provider readback: re-read the just-pushed branch FROM THE REMOTE (<c>ls-remote</c>) and confirm it
         /// equals the local tip — "arrival" becomes an observed remote fact instead of a push self-report. Best-effort
-        /// by design: an unreadable remote or a mismatched tip (raced) returns null with a warning — the push itself
-        /// already succeeded, so the branch stands; only the CONFIRMATION is withheld, never fabricated.
+        /// by design: an unreadable remote, a credential that could not be resolved for the read, or a mismatched tip
+        /// (raced) returns null with a warning — the push itself already succeeded, so the branch stands; only the
+        /// CONFIRMATION is withheld, never fabricated.
         /// </summary>
-        private async Task<string?> ReadBackPushedShaAsync(MaterializedRepo repo, string publishDir, TokenedGitCommand.Remote remote, string branchName, CancellationToken cancellationToken)
+        private async Task<string?> ReadBackPushedShaAsync(MaterializedRepo repo, string publishDir, string branchName, CancellationToken cancellationToken)
         {
             try
             {
                 var localTip = (await RunPublishGitOrThrowAsync(repo, publishDir, new[] { "rev-parse", $"refs/heads/{branchName}" }, cancellationToken, network: false).ConfigureAwait(false)).Trim();
+
+                var remote = await CurrentRemoteForReadbackAsync(repo, branchName, cancellationToken).ConfigureAwait(false);
+
+                if (remote is null) return null;
 
                 var readback = await RunTokenedPublishGitAsync(repo, publishDir, remote, new[] { "ls-remote", remote.Url, $"refs/heads/{branchName}" }, cancellationToken).ConfigureAwait(false);
 
@@ -873,6 +926,113 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
                 return null;
             }
         }
+
+        /// <summary>The remote the readback reads, with the credential resolved for it now — or null, with the confirmation withheld, when none can be: the push already landed, so a credential that cannot be resolved a moment later costs only the confirmation.</summary>
+        private async Task<TokenedGitCommand.Remote?> CurrentRemoteForReadbackAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)
+        {
+            try
+            {
+                return await CurrentRemoteAsync(repo, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex) when (ex is WorkspaceException or GitCredentialRejectedException)
+            {
+                _logger.LogWarning(ex, "Push readback for '{Branch}' could not resolve a credential to read the remote with; the successful push is preserved and arrival stays unconfirmed", branchName);
+                return null;
+            }
+        }
+
+        // ── The credential a remote command carries, resolved when the command runs ──
+
+        /// <summary>True when this repo's credential is resolved afresh before each remote command: its request named the repository, and a token source is there to ask.</summary>
+        private bool ResolvesItsCredential(MaterializedRepo repo) => _tokenSource is not null && repo.RepositoryId.HasValue && repo.TeamId.HasValue;
+
+        /// <summary>The remote the next command names, carrying the credential as it is right now (<see cref="UseCurrentCredentialAsync"/>).</summary>
+        private async Task<TokenedGitCommand.Remote> CurrentRemoteAsync(MaterializedRepo repo, CancellationToken cancellationToken)
+        {
+            await UseCurrentCredentialAsync(repo, cancellationToken).ConfigureAwait(false);
+
+            return TokenedGitCommand.RemoteFor(repo.RepositoryUrl, repo.TokenUsername, repo.Token);
+        }
+
+        /// <summary>
+        /// Ask the token source for the repository's credential and carry what it answers. A no-op for a repo that does not
+        /// resolve its credential, so a hand-built request keeps its captured token. A credential that was disconnected
+        /// while the run worked is a <see cref="GitCredentialRejectedException"/> — resolving it again cannot help; any other
+        /// failure of the resolve (a store hiccup, a provider that did not answer) is a <see cref="WorkspaceException"/>,
+        /// which the push retry rightly retries; and a repository that no longer has a credential has nothing to push with.
+        /// </summary>
+        private async Task UseCurrentCredentialAsync(MaterializedRepo repo, CancellationToken cancellationToken)
+        {
+            if (!ResolvesItsCredential(repo)) return;
+
+            string? current;
+
+            try
+            {
+                current = await _tokenSource!.ResolveAsync(repo.RepositoryId!.Value, repo.TeamId!.Value, cancellationToken).ConfigureAwait(false);
+            }
+            catch (CredentialDisconnectedException ex)
+            {
+                throw new GitCredentialRejectedException($"The credential this repository pushes with was disconnected while the run worked, so its branch could not be published. {ReconnectRemedy} ({Redact(ex.Message, repo.Token)})", ex);
+            }
+            catch (Exception ex) when (!cancellationToken.IsCancellationRequested)
+            {
+                // The run's own cancellation is the only thing allowed through unwrapped: a provider call that timed out
+                // surfaces as a TaskCanceledException too, and a timeout is a failure to resolve — retryable — not a cancelled run.
+                throw new WorkspaceException($"Could not resolve the git credential to push with: {Redact(ex.Message, repo.Token)}", ex);
+            }
+
+            if (string.IsNullOrEmpty(current))
+                throw new WorkspaceException("The repository has no credential bound any more, so there is nothing to push its branch with.");
+
+            repo.Token = current;
+        }
+
+        /// <summary>What an operator does about a credential the remote will not accept — stated once so every message carrying it says the same thing.</summary>
+        private const string ReconnectRemedy = "Reconnect the provider, or re-link the repository to an active credential, then re-run.";
+
+        /// <summary>
+        /// Run one publish command that reaches the remote — the LFS upload, the push — with the credential resolved
+        /// immediately before it. <paramref name="args"/> builds the argv from the remote's URL. A repo that resolves its
+        /// credential gets one more try when the remote refuses it: the credential is resolved again, and only a DIFFERENT one
+        /// is worth presenting (a stale token is replaced by it; the same one would be refused the same way, and each
+        /// refused login counts against the account). Refused again, or resolved to the same one, it is a
+        /// <see cref="GitCredentialRejectedException"/>. A repo that does not resolve its credential, or any other failure,
+        /// throws the plain <see cref="WorkspaceException"/> it always did.
+        /// </summary>
+        private async Task PushToRemoteOrThrowAsync(MaterializedRepo repo, string publishDir, Func<string, IReadOnlyList<string>> args, CancellationToken cancellationToken)
+        {
+            var remote = await CurrentRemoteAsync(repo, cancellationToken).ConfigureAwait(false);
+            var first = await RunTokenedPublishGitAsync(repo, publishDir, remote, args(remote.Url), cancellationToken).ConfigureAwait(false);
+
+            if (first.Status != SandboxStatus.Success && TokenedGitCommand.OldGitFailure(remote.IsTokened, first.Stderr) is { } oldGit) throw oldGit;
+
+            if (first.Status == SandboxStatus.Success || !ResolvesItsCredential(repo) || !IsCredentialRefusal(first.Stderr))
+            {
+                EnsureSuccess(repo, args(remote.Url), first, remote.IsTokened);
+                return;
+            }
+
+            var again = await CurrentRemoteAsync(repo, cancellationToken).ConfigureAwait(false);
+
+            if (again.Password == remote.Password)
+            {
+                _logger.LogWarning("The remote refused the git credential for repository {RepositoryId} and resolving it again returned the same one; not presenting it a second time", repo.RepositoryId);
+                throw Rejected(repo, remote.Url, "and resolving it again returned the same one", first);
+            }
+
+            _logger.LogInformation("The remote refused the git credential for repository {RepositoryId}; retrying once with a freshly resolved one", repo.RepositoryId);
+
+            var second = await RunTokenedPublishGitAsync(repo, publishDir, again, args(again.Url), cancellationToken).ConfigureAwait(false);
+
+            if (second.Status != SandboxStatus.Success && IsCredentialRefusal(second.Stderr))
+                throw Rejected(repo, again.Url, "and again after resolving a fresh one", second);
+
+            EnsureSuccess(repo, args(again.Url), second, again.IsTokened);
+        }
+
+        private static GitCredentialRejectedException Rejected(MaterializedRepo repo, string remoteUrl, string detail, SandboxResult refusal) =>
+            new($"The remote refused the git credential for {remoteUrl}, {detail}, so the branch was not published. {ReconnectRemedy} git said: {Redact(Summarize(refusal.Stderr), repo.Token)}");
 
         /// <summary>Commit everything staged under a fixed CodeSpace identity; returns false (no commit) when there was nothing to commit. The identity AND <c>commit.gpgsign=false</c> are set inline via <c>-c</c> so the clone's git config is never mutated — and the automated capture commit can never inherit a host/global <c>commit.gpgsign=true</c> that would make it block on a signing key the unattended agent does not have (which would fail the branch push → the produced branch is silently lost). An internal automation commit under a synthetic identity has no meaningful signature, so signing is always disabled here.</summary>
         private async Task<bool> CommitOrDetectEmptyAsync(MaterializedRepo repo, string branchName, CancellationToken cancellationToken)
@@ -932,9 +1092,6 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         /// <summary>Run a git command in the publish repo (its directory as cwd). Returns the raw result so a caller can classify it (e.g. an unreadable remote on the readback) rather than always throw.</summary>
         private Task<SandboxResult> RunPublishGitAsync(MaterializedRepo repo, string publishDir, IReadOnlyList<string> args, CancellationToken cancellationToken, bool network, int timeoutSeconds) =>
             ExecuteGitAsync(repo, args, PublishGitSpec(publishDir, args, network, timeoutSeconds), cancellationToken);
-
-        private Task<string> RunTokenedPublishGitOrThrowAsync(MaterializedRepo repo, string publishDir, TokenedGitCommand.Remote remote, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
-            EnsureSuccessAsync(repo, args, RunTokenedPublishGitAsync(repo, publishDir, remote, args, cancellationToken), remote.IsTokened);
 
         /// <summary>Run a publish-repo command that reaches <paramref name="remote"/> — the LFS upload, the push, the readback — as a <see cref="TokenedGitCommand"/>, with the network and the push budget.</summary>
         private Task<SandboxResult> RunTokenedPublishGitAsync(MaterializedRepo repo, string publishDir, TokenedGitCommand.Remote remote, IReadOnlyList<string> args, CancellationToken cancellationToken) =>
@@ -1034,10 +1191,12 @@ public sealed class LocalGitWorkspaceProvider : IWorkspaceProvider, IWorkspaceJa
         /// <paramref name="tokened"/> is whether the command ran against a remote that carried a credential (<see cref="TokenedGitCommand.Remote.IsTokened"/>),
         /// the only commands an old git can fail for want of one: it is the remote's own answer, not the run's clone token, so the two cannot disagree.
         /// </summary>
-        private static async Task<string> EnsureSuccessAsync(MaterializedRepo repo, IReadOnlyList<string> args, Task<SandboxResult> run, bool tokened = false)
-        {
-            var result = await run.ConfigureAwait(false);
+        private static async Task<string> EnsureSuccessAsync(MaterializedRepo repo, IReadOnlyList<string> args, Task<SandboxResult> run, bool tokened = false) =>
+            EnsureSuccess(repo, args, await run.ConfigureAwait(false), tokened);
 
+        /// <summary>The result of a git command already run: its stdout, or a redacted <see cref="WorkspaceException"/> on a non-success status.</summary>
+        private static string EnsureSuccess(MaterializedRepo repo, IReadOnlyList<string> args, SandboxResult result, bool tokened = false)
+        {
             if (result.Status != SandboxStatus.Success)
                 throw TokenedGitCommand.OldGitFailure(tokened, result.Stderr) ?? new WorkspaceException($"git {string.Join(' ', RedactArgs(args, repo.Token))} failed (exit {result.ExitCode}): {Redact(result.Stderr.Trim(), repo.Token)}");
 

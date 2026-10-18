@@ -92,6 +92,11 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
             DefaultRef = softFallback && requestedRef is not null && !string.Equals(requestedRef, repo.DefaultBranch, StringComparison.Ordinal) ? repo.DefaultBranch : null,
             Token = token,
             TokenUsername = token is null ? null : TokenUsernameFor(repo.ProviderInstance.Provider),
+            // The token is a snapshot of a credential that expires and is revoked when anyone refreshes it, and a
+            // workspace's last act (the push) can run hours after this resolve — so the request names the repository
+            // it was resolved for, and the provider asks the token source again right before each remote command.
+            RepositoryId = repositoryId,
+            TeamId = teamId,
             // S1: the immutable base pin — validated to a hex commit id (4-40 chars) so garbage can never reach the
             // git argv as a flag-shaped positional, then forced through a full clone + hard checkout by the provider.
             PinnedSha = ValidatePinnedSha(pinnedSha),

@@ -2222,10 +2222,13 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
     /// branch), and a RECLAIMED attempt pushes its own generation's ref — the pre-check below narrows the zombie
     /// window, the generation ref closes it at the remote.</para>
     ///
-    /// <para>Best-effort like <see cref="EnrichWithWorkspaceChangesAsync"/>: a <see cref="WorkspaceException"/> is
-    /// SWALLOWED (a push hiccup — e.g. a read-only credential 403 — never flips the run's own status) but is
-    /// surfaced as a Warning event on the timeline (token already redacted in the message) so the operator sees
-    /// WHY no branch appeared. Cancellation still propagates (worker torn down).</para>
+    /// <para>Best-effort like <see cref="EnrichWithWorkspaceChangesAsync"/>: a <see cref="WorkspaceException"/> — or a
+    /// <see cref="GitCredentialRejectedException"/>, the typed failure the workspace provider raises when the remote refused
+    /// the credential even after it was resolved again — is SWALLOWED (a push hiccup — e.g. a read-only credential 403 —
+    /// never flips the run's own status) but is surfaced as a Warning event on the timeline (token already redacted in the
+    /// message) so the operator sees WHY no branch appeared. A credential refusal is additionally recorded on the result as
+    /// <see cref="AgentRunResult.PublishFailureCode"/>; it is the only one of the two that is not retried first.
+    /// Cancellation still propagates (worker torn down).</para>
     /// </summary>
     internal async Task<AgentRunResult> PushProducedBranchIfEnabledAsync(AgentRunOwnerToken owner, AgentTask task, AgentRunResult result, IWorkspaceHandle? workspace, CancellationToken cancellationToken)
     {
@@ -2253,23 +2256,29 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             return branch is null ? result : result with { ProducedBranch = branch, PushedCommitSha = pushHandle.LastPushedCommitSha() };
         }
-        catch (WorkspaceException ex)
+        catch (Exception ex) when (ex is WorkspaceException or GitCredentialRejectedException)
         {
             // Best-effort: a push failure must never flip a Succeeded run to Failed. The exception message has the
             // token already redacted (the handle redacts it), so it's safe to persist onto the timeline.
-            _logger.LogWarning(ex, "Agent run {RunId}: failed to push the produced branch after {Attempts} attempt(s); the run stays Succeeded with no branch output", runId, PushMaxAttempts);
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to push the produced branch ({Reason}); the run stays Succeeded with no branch output", runId, DescribePushFailure(ex));
             await AppendPushFailureWarningAsync(owner, ex.Message, cancellationToken).ConfigureAwait(false);
-            return result with { PublishError = ex.Message };
+            return result with { PublishError = ex.Message, PublishFailureCode = PublishFailureCodeOf(ex) };
         }
     }
 
-    /// <summary>Bounded attempts for one branch push before giving up — a contract-bearing task forces the push opt-in (F4), so a single transient git failure (network blip, remote hiccup) would otherwise convert a fully correct run into <c>AcceptanceFailed("no-branch-or-repo")</c> with zero chance to recover. <see cref="WorkspaceException"/> carries no transient/deterministic classification (a flat clone/push wrapper), so this retries EVERY push failure a fixed number of times rather than sniffing error text — the same "retry blind, bounded" posture the P0.3 agent-respawn fix already took for a transient-vs-deterministic distinction git itself doesn't expose. Pinned (Rule 8).</summary>
+    /// <summary>The stable code to record beside a push failure's message: the failure's own code when it is one a retry of the run cannot fix (a credential the remote refused), null for the generic push failure — whose message is all there is to say about it.</summary>
+    internal static string? PublishFailureCodeOf(Exception failure) => failure is GitCredentialRejectedException rejected ? rejected.Code : null;
+
+    /// <summary>What the log line names as the reason a push ended: the typed code, or "after N attempt(s)" for the generic failure that spent the whole retry budget.</summary>
+    private static string DescribePushFailure(Exception failure) => PublishFailureCodeOf(failure) ?? $"after {PushMaxAttempts} attempt(s)";
+
+    /// <summary>Bounded attempts for one branch push before giving up — a contract-bearing task forces the push opt-in (F4), so a single transient git failure (network blip, remote hiccup) would otherwise convert a fully correct run into <c>AcceptanceFailed("no-branch-or-repo")</c> with zero chance to recover. <see cref="WorkspaceException"/> carries no transient/deterministic classification (a flat clone/push wrapper), so this retries EVERY <see cref="WorkspaceException"/> a fixed number of times rather than classifying it — the same "retry blind, bounded" posture the P0.3 agent-respawn fix already took for a transient-vs-deterministic distinction git itself doesn't expose. The one failure that IS classified is a remote refusing the credential: the workspace provider recognises it from git's stderr (<c>LocalGitWorkspaceProvider.IsCredentialRefusal</c>), tries a freshly resolved credential once, and raises a typed <see cref="GitCredentialRejectedException"/> that is not retried here. Pinned (Rule 8).</summary>
     internal const int PushMaxAttempts = 3;
 
-    /// <summary>Fixed backoff between push attempts — short because this runs inside the agent's own bounded wall clock; a network blip clears in well under a second, and a deterministic failure (auth, permission) just burns 3 short waits (~1s total) before falling through to the existing best-effort no-branch-output path unchanged. Pinned (Rule 8).</summary>
+    /// <summary>Fixed backoff between push attempts — short because this runs inside the agent's own bounded wall clock; a network blip clears in well under a second, and a deterministic failure the provider does not classify (a permission 403, or a repository whose credential is not re-resolved) just burns 3 short waits (~1s total) before falling through to the existing best-effort no-branch-output path unchanged. A refused credential is typed and never waits: it is not retried. Pinned (Rule 8).</summary>
     internal static readonly TimeSpan PushRetryBackoff = TimeSpan.FromMilliseconds(500);
 
-    /// <summary>Retry a single push call up to <see cref="PushMaxAttempts"/> times on <see cref="WorkspaceException"/>, with <see cref="PushRetryBackoff"/> between attempts. The FINAL attempt's exception propagates unchanged — callers keep their existing single-catch best-effort fallback (per-repo isolation for multi-repo, run-stays-Succeeded for single-repo). Internal so both push paths share one retry posture and a test can pin the attempt count directly.</summary>
+    /// <summary>Retry a single push call up to <see cref="PushMaxAttempts"/> times on <see cref="WorkspaceException"/>, with <see cref="PushRetryBackoff"/> between attempts. The FINAL attempt's exception propagates unchanged — callers keep their existing single-catch best-effort fallback (per-repo isolation for multi-repo, run-stays-Succeeded for single-repo). A <see cref="GitCredentialRejectedException"/> is not retried here: the workspace provider has already resolved the credential again and tried it, so presenting it a third time could only repeat a refusal (and each refused login counts against the account). Internal so both push paths share one retry posture and a test can pin the attempt count directly.</summary>
     internal async Task<string?> PushWithRetryAsync(Func<CancellationToken, Task<string?>> push, CancellationToken cancellationToken)
     {
         for (var attempt = 1; ; attempt++)
@@ -2318,9 +2327,9 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
                 continue;
             }
 
-            var (pushed, error) = await PushOneRepoOrNullAsync(owner, repo.Alias, branchName, pushHandle, cancellationToken).ConfigureAwait(false);
+            var (pushed, error, failureCode) = await PushOneRepoOrNullAsync(owner, repo.Alias, branchName, pushHandle, cancellationToken).ConfigureAwait(false);
 
-            updated.Add(repo with { ProducedBranch = pushed, PublishError = error, PushedCommitSha = pushed is null ? null : pushHandle.LastPushedCommitSha(repo.Alias) });
+            updated.Add(repo with { ProducedBranch = pushed, PublishError = error, PublishFailureCode = failureCode, PushedCommitSha = pushed is null ? null : pushHandle.LastPushedCommitSha(repo.Alias) });
 
             if (repo.Alias == workspace.PrimaryAlias) primaryBranch = pushed;
         }
@@ -2328,19 +2337,19 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         return result with { RepositoryResults = updated, ProducedBranch = primaryBranch };
     }
 
-    /// <summary>Push one repo by alias, ISOLATING its failure: a <see cref="WorkspaceException"/> — after <see cref="PushMaxAttempts"/> retries — is logged + surfaced as a per-repo Warning on the timeline (token already redacted) and returned as the error half of the tuple, so a sibling repo's already-pushed branch is never discarded. Cancellation propagates.</summary>
-    private async Task<(string? Branch, string? Error)> PushOneRepoOrNullAsync(AgentRunOwnerToken owner, string alias, string branchName, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
+    /// <summary>Push one repo by alias, ISOLATING its failure: a <see cref="WorkspaceException"/> — after <see cref="PushMaxAttempts"/> retries — or a <see cref="GitCredentialRejectedException"/> is logged + surfaced as a per-repo Warning on the timeline (token already redacted) and returned as the error half of the tuple, so a sibling repo's already-pushed branch is never discarded. Cancellation propagates.</summary>
+    private async Task<(string? Branch, string? Error, string? FailureCode)> PushOneRepoOrNullAsync(AgentRunOwnerToken owner, string alias, string branchName, IWorkspacePushHandle pushHandle, CancellationToken cancellationToken)
     {
         var runId = owner.RunId;
         try
         {
-            return (await PushWithRetryAsync(async ct => { await _runs.AssertOwnershipAsync(owner, ct).ConfigureAwait(false); return await pushHandle.PushChangesAsync(alias, branchName, ct).ConfigureAwait(false); }, cancellationToken).ConfigureAwait(false), null);
+            return (await PushWithRetryAsync(async ct => { await _runs.AssertOwnershipAsync(owner, ct).ConfigureAwait(false); return await pushHandle.PushChangesAsync(alias, branchName, ct).ConfigureAwait(false); }, cancellationToken).ConfigureAwait(false), null, null);
         }
-        catch (WorkspaceException ex)
+        catch (Exception ex) when (ex is WorkspaceException or GitCredentialRejectedException)
         {
-            _logger.LogWarning(ex, "Agent run {RunId}: failed to push repo '{Alias}' after {Attempts} attempt(s); keeping the other repos' branches in the change set", runId, alias, PushMaxAttempts);
+            _logger.LogWarning(ex, "Agent run {RunId}: failed to push repo '{Alias}' ({Reason}); keeping the other repos' branches in the change set", runId, alias, DescribePushFailure(ex));
             await AppendPushFailureWarningAsync(owner, $"[{alias}] {ex.Message}", cancellationToken).ConfigureAwait(false);
-            return (null, ex.Message);
+            return (null, ex.Message, PublishFailureCodeOf(ex));
         }
     }
 
@@ -3068,7 +3077,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             }
 
             _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but there is no produced branch or recorded patch to grade — failing closed", run.Id);
-            return AcceptanceFailed(result, "no-branch-or-repo");
+            return AcceptanceFailed(result, NothingToGradeDetail(result));
         }
 
         BenchmarkGrade grade;
@@ -3168,7 +3177,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             }
 
             _logger.LogWarning("Agent run {RunId}: an acceptance contract is present but no repo produced a branch to grade — failing closed", run.Id);
-            return AcceptanceFailed(result, "no-branch-or-repo");
+            return AcceptanceFailed(result, NothingToGradeDetail(result));
         }
 
         using var scope = _scopeFactory.CreateScope();
@@ -3204,6 +3213,17 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
         return FoldGrade(result, new BenchmarkGrade { Passed = true, Detail = "accepted", OracleNote = oracleNotes.Count == 0 ? null : string.Join("; ", oracleNotes) });
     }
+
+    /// <summary>
+    /// Why an acceptance contract found nothing to grade: <see cref="AgentAcceptanceContract.CredentialRejectedDetail"/> when
+    /// a push of the run's own was refused for its credential (on the run or on any of its repos), else the long-standing
+    /// <c>no-branch-or-repo</c>. A verdict that names the credential keeps the run's Failed status — the contract still was
+    /// not met — but stops reading as "the agent produced nothing" for work the remote would not take.
+    /// </summary>
+    private static string NothingToGradeDetail(AgentRunResult result) =>
+        result.PublishFailureCode == FailureCodes.GitCredentialRejected || result.RepositoryResults.Any(repo => repo.PublishFailureCode == FailureCodes.GitCredentialRejected)
+            ? AgentAcceptanceContract.CredentialRejectedDetail
+            : "no-branch-or-repo";
 
     /// <summary>Whether <paramref name="result"/> carries a recorded patch this executor could grade with (S2) — a base to anchor the independent clone on, PLUS either an inline diff or an offloaded artifact reference. Absent any one of these there is genuinely nothing to apply.</summary>
     private static bool HasGradeablePatch(AgentRunResult result) =>

@@ -116,6 +116,16 @@ public static class AgentAcceptanceContract
     public static bool IsVacuousPass(string? detail) => detail is not null && detail.StartsWith("not-applicable", StringComparison.Ordinal);
 
     /// <summary>
+    /// The <see cref="AgentRunResult.AcceptanceDetail"/> of a contract that found nothing to grade because the run's own
+    /// push was refused for its credential (<see cref="AgentRunResult.PublishFailureCode"/> =
+    /// <c>git_credential_rejected</c>) — where it used to read <c>no-branch-or-repo</c>, which sends a reader after the
+    /// agent's work when the work exists and the remote would not take it. Infra-classed (<see cref="IsInfraFailure(string?, bool)"/>):
+    /// the check never ran, and no revise round or retry can change a credential the remote refuses. Pinned by a unit
+    /// test (Rule 8): the executor writes it and the infra classification reads it.
+    /// </summary>
+    public const string CredentialRejectedDetail = "credential-rejected";
+
+    /// <summary>
     /// S2's vacuous pass: the contract's own OWNER declared no diff was expected, and none was produced — so the
     /// missing branch/repo is NOT a failure, it is the correctly-predicted outcome. Unlike <see cref="FailClosed"/>
     /// this touches ONLY the acceptance fields — the run's own terminal Status/ExitReason/Error are untouched (a
@@ -190,6 +200,9 @@ public static class AgentAcceptanceContract
                    // detail string (the no-progress evidence discount, the receipts, the decider's verdict line,
                    // the model-escalation trigger) reach the same answer it does.
                    || effective.StartsWith(Messages.Agents.SupervisorAgentResult.InfraExitDetailPrefix, StringComparison.Ordinal)
+                   // The push the contract needed a branch from was refused for its credential: the check never ran, and
+                   // unlike a bare no-branch-or-repo this says WHY, so it is infra whether or not work is visible.
+                   || effective == CredentialRejectedDetail
                    || (effective == "no-branch-or-repo" && workPresent));
     }
 

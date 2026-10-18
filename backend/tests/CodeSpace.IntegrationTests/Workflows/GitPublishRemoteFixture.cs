@@ -83,7 +83,24 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
     public IReadOnlyList<string> HarvestedAuthorizations { get { lock (_gate) return _harvestedAuthorizations.ToList(); } }
 
     /// <summary>The Authorization header that carries <see cref="FakeToken"/>, as git sends it.</summary>
-    public static string TokenAuthorization => "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"x-access-token:{FakeToken}"));
+    public static string TokenAuthorization => BasicAuthorization("x-access-token", FakeToken);
+
+    /// <summary>The Authorization header git sends for <paramref name="username"/> and <paramref name="password"/>.</summary>
+    public static string BasicAuthorization(string username, string password) => "Basic " + Convert.ToBase64String(Encoding.UTF8.GetBytes($"{username}:{password}"));
+
+    private volatile string _acceptedAuthorization = TokenAuthorization;
+
+    /// <summary>
+    /// Demand this credential from now on instead of <see cref="FakeToken"/> — a remote whose accepted token moves, as an
+    /// OAuth provider's does when it rotates a pair: the access token it issued before is refused the moment the new one
+    /// exists. Credentials presented to a write endpoint and refused are listed in <see cref="RefusedAuthorizations"/>.
+    /// </summary>
+    public void AcceptOnly(string username, string password) => _acceptedAuthorization = BasicAuthorization(username, password);
+
+    /// <summary>The Authorization headers a git or LFS write endpoint refused, in the order they arrived — what the remote saw a stale credential do.</summary>
+    public IReadOnlyList<string> RefusedAuthorizations { get { lock (_gate) return _refusedAuthorizations.ToList(); } }
+
+    private readonly List<string> _refusedAuthorizations = new();
 
     public async Task StartAsync()
     {
@@ -282,7 +299,7 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
             if (IsRefAdvertisement(context, path)) { await ServeGitAsync(context, path, anonymous: true); return; }
 
             await context.Request.InputStream.CopyToAsync(Stream.Null, _stopping.Token);
-            Unauthorized(context);
+            Unauthorized(context, recordRefusal: false);
         }
         finally { context.Response.Close(); }
     }
@@ -296,10 +313,12 @@ internal sealed class GitPublishRemoteFixture : IAsyncDisposable
         context.Response.RedirectLocation = _harvesterAuthority + path + context.Request.Url!.Query;
     }
 
-    private static bool AuthOk(HttpListenerContext context) => string.Equals(context.Request.Headers["Authorization"], TokenAuthorization, StringComparison.Ordinal);
+    private bool AuthOk(HttpListenerContext context) => string.Equals(context.Request.Headers["Authorization"], _acceptedAuthorization, StringComparison.Ordinal);
 
-    private void Unauthorized(HttpListenerContext context)
+    private void Unauthorized(HttpListenerContext context, bool recordRefusal = true)
     {
+        if (recordRefusal && context.Request.Headers["Authorization"] is { } presented) lock (_gate) _refusedAuthorizations.Add(presented);
+
         context.Response.StatusCode = 401;
         context.Response.Headers["WWW-Authenticate"] = "Basic realm=\"fixture\"";
     }

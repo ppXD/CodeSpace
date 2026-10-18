@@ -1,3 +1,4 @@
+using System.Text.Json;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
@@ -508,6 +509,88 @@ public sealed class AgentRunExecutorPushTests
             await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None));
     }
 
+    // ─── A credential the remote rejected: not retried, recorded with its code, the run stays Succeeded ──
+
+    [Fact]
+    public async Task A_credential_the_remote_rejected_is_not_retried_and_is_recorded_with_its_code_on_a_run_that_stays_succeeded()
+    {
+        // The workspace provider has already resolved the credential again and presented the fresh one; presenting it a
+        // third time could only repeat the refusal (and each refused login counts against the account). The failure is
+        // recorded — message AND stable code — and the run keeps the Succeeded it earned: its work was done, the publish was
+        // the side effect that failed, and every caller that reads Succeeded must keep reading it.
+        var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+        var rejection = new GitCredentialRejectedException("The remote refused the git credential for https://example.test/r.git, so the branch was not published. Reconnect the provider.");
+        var handle = new RecordingPushHandle { ThrowOnPush = rejection };
+
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded, "a rejected push never flips a Succeeded run");
+        result.ExitReason.ShouldBe("completed");
+        result.ProducedBranch.ShouldBeNull();
+        result.PublishError.ShouldBe(rejection.Message);
+        result.PublishFailureCode.ShouldBe("git_credential_rejected", "the typed failure is recorded on the run, where a reader can branch on it without reading prose");
+        handle.PushCallCount.ShouldBe(1, "a rejected credential is not retried — the retry budget is for failures a retry can fix");
+        runs.AppendedEvents.Count.ShouldBe(1);
+        runs.AppendedEvents[0].Kind.ShouldBe(AgentEventKind.Warning);
+        runs.AppendedEvents[0].Text.ShouldContain("Reconnect the provider");
+    }
+
+    [Fact]
+    public async Task A_generic_push_failure_records_no_failure_code_and_still_burns_the_retry_budget()
+    {
+        var (runId, executor, _) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new RecordingPushHandle { ThrowOnPush = new WorkspaceException("git push failed: connection reset") };
+
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, SucceededWithChanges(), handle, CancellationToken.None);
+
+        result.PublishError.ShouldBe("git push failed: connection reset");
+        result.PublishFailureCode.ShouldBeNull("only a failure a retry cannot fix has a code; the message is all there is to say about the rest");
+        handle.PushCallCount.ShouldBe(AgentRunExecutor.PushMaxAttempts);
+    }
+
+    [Fact]
+    public async Task A_multi_repo_credential_rejection_is_isolated_to_its_repo_not_retried_and_recorded_on_that_repo_alone()
+    {
+        var (runId, executor, runs) = NewExecutor(epoch: ClaimedEpoch);
+        var handle = new MultiRepoRecordingPushHandle { RejectForAliases = { "api" } };
+
+        var result = await executor.PushProducedBranchIfEnabledAsync(new(runId, runId, ClaimedEpoch), DefaultTask, MultiRepoSucceeded(runId), handle, CancellationToken.None);
+
+        result.Status.ShouldBe(AgentRunStatus.Succeeded);
+        var web = result.RepositoryResults.Single(r => r.Alias == "web");
+        var api = result.RepositoryResults.Single(r => r.Alias == "api");
+        web.ProducedBranch.ShouldBe(AgentRunExecutor.BuildBranchName(runId, ClaimedEpoch), "the sibling's branch is kept");
+        web.PublishFailureCode.ShouldBeNull();
+        api.ProducedBranch.ShouldBeNull();
+        api.PublishError.ShouldNotBeNullOrEmpty();
+        api.PublishFailureCode.ShouldBe("git_credential_rejected");
+        handle.CallCountByAlias["api"].ShouldBe(1, "a rejected credential is not retried");
+        runs.AppendedEvents.Single().Text.ShouldStartWith("Could not push the agent's changes to a branch: [api]");
+    }
+
+    [Fact]
+    public void The_publish_failure_code_is_the_failures_own_code_for_a_rejected_credential_and_null_for_everything_else()
+    {
+        AgentRunExecutor.PublishFailureCodeOf(new GitCredentialRejectedException("rejected")).ShouldBe("git_credential_rejected");
+        AgentRunExecutor.PublishFailureCodeOf(new WorkspaceException("a plain failure")).ShouldBeNull();
+    }
+
+    [Fact]
+    public void The_publish_failure_code_is_omitted_from_a_stored_result_that_has_none_and_survives_a_round_trip_when_it_has_one()
+    {
+        // Rolling deploy / rollback: a result written without the field must read as it always did, and the field must not
+        // appear in the JSON of any result that has none — an older reader never meets a property it does not know.
+        var withoutCode = JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", PublishError = "x", RepositoryResults = new[] { new RepositoryRunResult { Alias = "web" } } }, AgentJson.Options);
+        withoutCode.ShouldNotContain("ublishFailureCode", Case.Insensitive, "null is omitted, so every earlier result serializes byte-identically");
+
+        var withCode = JsonSerializer.Serialize(new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", PublishError = "x", PublishFailureCode = "git_credential_rejected", RepositoryResults = new[] { new RepositoryRunResult { Alias = "web", PublishFailureCode = "git_credential_rejected" } } }, AgentJson.Options);
+        var read = JsonSerializer.Deserialize<AgentRunResult>(withCode, AgentJson.Options)!;
+        read.PublishFailureCode.ShouldBe("git_credential_rejected");
+        read.RepositoryResults.Single().PublishFailureCode.ShouldBe("git_credential_rejected");
+
+        JsonSerializer.Deserialize<AgentRunResult>(withoutCode, AgentJson.Options)!.PublishFailureCode.ShouldBeNull("a result stored before the field existed reads as having none");
+    }
+
     // ─── Helpers ─────────────────────────────────────────────────────────────
 
     private static AgentRunResult SucceededWithChanges() =>
@@ -592,6 +675,9 @@ public sealed class AgentRunExecutorPushTests
         public HashSet<string> NullForAliases { get; } = new();
         public HashSet<string> ThrowForAliases { get; } = new();
 
+        /// <summary>Aliases whose push throws a <see cref="GitCredentialRejectedException"/> — the workspace provider's verdict that the remote refused the credential even after it was resolved again.</summary>
+        public HashSet<string> RejectForAliases { get; } = new();
+
         /// <summary>Per-alias call counter — so a test can prove ONE repo's transient failure retries in isolation from its siblings.</summary>
         public Dictionary<string, int> CallCountByAlias { get; } = new();
 
@@ -614,6 +700,7 @@ public sealed class AgentRunExecutorPushTests
 
             if (CallCountByAlias[alias] <= failFirstN) throw new WorkspaceException($"git push failed for '{alias}': *** rejected (transient)");
             if (failFirstN == 0 && ThrowForAliases.Contains(alias)) throw new WorkspaceException($"git push failed for '{alias}': *** rejected");
+            if (RejectForAliases.Contains(alias)) throw new GitCredentialRejectedException($"The remote refused the git credential for https://example.test/{alias}.git, so the branch was not published.");
 
             var pushed = NullForAliases.Contains(alias) ? null : branchName;
             PushedByAlias[alias] = pushed;
