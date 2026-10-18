@@ -7,6 +7,7 @@ import { useRepositoryRejectedDeliveries, useRepositoryWebhookCoverage, useRepos
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { relativeTime } from "@/lib/codeTree";
 import { attemptOutcome, canRetryWebhook, connectionCoverageNote, rejectedDeliveriesNote, rejectionCopy, UNPLACED_DELIVERY_NOTE, webhookDiagnosis, webhookSetupSteps, webhookState, type WebhookSetupStep } from "@/lib/webhookState";
+import { ProviderRemedyCard } from "@/components/remedy/ProviderRemedyCard";
 
 /**
  * Repository → Webhook. What the repository's hooks are doing, why they are not, and how to finish
@@ -168,6 +169,10 @@ function RejectedDeliveries({ repositoryId, provider }: { repositoryId: string; 
             would read as "fifty happened", and an unreachable instance writes thousands. */}
         <div className="cn-listhead-c">{rejectedDeliveriesNote(answer.deliveries.length, answer.cap)}</div>
       </div>
+
+      {/* What to do about the refusals that blame the credential — once, above the rows that carry its reasons, because it is about the
+          credential the repository runs through now and not about any one delivery. Absent when none of them blames it. */}
+      {answer.remedy && <div className="rmd-delivery-fix"><ProviderRemedyCard remedy={answer.remedy} /></div>}
 
       <div className="cn-list">
         {answer.deliveries.map((delivery) => <RejectedDeliveryRow key={delivery.id} delivery={delivery} provider={provider} />)}

@@ -3,7 +3,9 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Failures;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Messages.Workflows;
 using Microsoft.EntityFrameworkCore;
 
@@ -62,9 +64,14 @@ public sealed class RunRecordLogger : IRunRecordLogger, IRedactedNodeOutputLedge
         await InsertAsync(runId, WorkflowRunRecordTypes.RunCompleted, nodeId: null, iterationKey: string.Empty, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
-    public async Task RunFailedAsync(Guid runId, string error, TimeSpan duration, CancellationToken cancellationToken)
+    public async Task RunFailedAsync(Guid runId, string error, TimeSpan duration, CancellationToken cancellationToken) => await RunFailedAsync(runId, error, duration, failure: null, cancellationToken).ConfigureAwait(false);
+
+    public async Task RunFailedAsync(Guid runId, string error, TimeSpan duration, PersistedFailure? failure, CancellationToken cancellationToken)
     {
-        var payload = JsonSerializer.Serialize(new { error, duration_ms = (long)duration.TotalMilliseconds });
+        var payload = failure is null
+            ? JsonSerializer.Serialize(new { error, duration_ms = (long)duration.TotalMilliseconds })
+            : JsonSerializer.Serialize(new { error, duration_ms = (long)duration.TotalMilliseconds, failure = PersistedFailureJson.ToElement(failure) });
+
         await InsertAsync(runId, WorkflowRunRecordTypes.RunFailed, nodeId: null, iterationKey: string.Empty, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 
@@ -132,11 +139,18 @@ public sealed class RunRecordLogger : IRunRecordLogger, IRedactedNodeOutputLedge
             : JsonSerializer.Serialize(new { outputs, routingHints, duration_ms, outputsRedacted });
     }
 
-    public async Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken cancellationToken)
+    public async Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken cancellationToken) =>
+        await NodeFailedAsync(runId, nodeId, iterationKey, error, duration, failure: null, cancellationToken).ConfigureAwait(false);
+
+    public async Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, PersistedFailure? failure, CancellationToken cancellationToken)
     {
         // outputs included as empty object for view-projection consistency (the view's
         // COALESCE on the latest record's payload->outputs needs the key to exist).
-        var payload = JsonSerializer.Serialize(new { error, outputs = EmptyObject(), duration_ms = (long)duration.TotalMilliseconds });
+        // A failure a person can repair rides beside the sentence; without one the payload is byte-identical to before.
+        var payload = failure is null
+            ? JsonSerializer.Serialize(new { error, outputs = EmptyObject(), duration_ms = (long)duration.TotalMilliseconds })
+            : JsonSerializer.Serialize(new { error, outputs = EmptyObject(), duration_ms = (long)duration.TotalMilliseconds, failure = PersistedFailureJson.ToElement(failure) });
+
         await InsertAsync(runId, WorkflowRunRecordTypes.NodeFailed, nodeId, iterationKey, payload, correlationId: null, parentRecordId: null, cancellationToken).ConfigureAwait(false);
     }
 

@@ -260,6 +260,18 @@ const REJECTION_COPY: Record<string, (who: string) => RejectionCopy> = {
     headline: "A pull request from someone without a role on the repository",
     remedy: `Not a fault. This trigger starts runs only for pull requests written by someone with a role on the repository at ${who} — and, for new commits, pushed by the author or by someone with a role — which is what a trigger does on a public or internal repository unless told otherwise. To let anyone's pull request start it, set “Pull requests from” to Anyone on the trigger. At most one of these is recorded per pull request per day, however many arrive.`,
   }),
+  // The two refusals that blame the repository's CREDENTIAL, not the delivery and not the author. Each is told apart from "author_not_member"
+  // on purpose: setting "Pull requests from" to Anyone fixes neither, and an operator sent there would change a trigger that was never wrong.
+  credential_rejected: (who) => ({
+    tone: "bad",
+    headline: "The repository's credential was refused",
+    remedy: `${who} would not accept the credential this repository runs through, so CodeSpace could not check who wrote the pull request and started nothing. The author is not in question — the credential is. Reconnect it, or link the repository to one that works; the next pull request event starts the run.`,
+  }),
+  author_standing_unknown: (who) => ({
+    tone: "bad",
+    headline: "Who wrote the pull request could not be read",
+    remedy: `${who} did not say who wrote the pull request — a 403 for a credential without the read_api scope or a role on the project, a rate limit, or no answer in time — so the trigger started nothing. Setting “Pull requests from” to Anyone is not the fix: nothing was learned about the author. If it was a 403, give the credential what it needs, or replace it, and the same pull request is admitted; a rate limit or no answer clears by itself, and the next pull request event asks again.`,
+  }),
   // A head commit that already ran arriving again — a close/reopen loop. Never newer code: a push moves
   // the head, and a new head always runs.
   pull_request_debounced: () => ({

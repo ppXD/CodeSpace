@@ -511,6 +511,14 @@ public sealed record DiagnosticBlock : RoomBlock
 
     /// <summary>The raw engine error, hidden behind "Show raw error". Null when there's nothing rawer than <see cref="Text"/>.</summary>
     public string? RawDetail { get; init; }
+
+    /// <summary>
+    /// The code of the failure the run recorded, when it is one a person can repair outside the run (a provider connection that was
+    /// disconnected, refused or redirects). Static, so it is safe in the cached turn: the card it asks for — what to do and who may —
+    /// is read live from the run's remedy, which depends on who is looking and on what has been fixed since. Null for every other
+    /// failure, which keeps its title, text and actions as they were.
+    /// </summary>
+    public string? FailureCode { get; init; }
 }
 
 /// <summary>

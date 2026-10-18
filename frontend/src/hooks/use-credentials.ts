@@ -276,7 +276,22 @@ export function useReplaceCredentialToken() {
       queryClient.invalidateQueries({ queryKey: ["credentials"] });
       queryClient.invalidateQueries({ queryKey: ["repositories"] });
       queryClient.invalidateQueries({ queryKey: ["credential-capabilities"] });
+      queryClient.invalidateQueries({ queryKey: ["run-remedy"] });
+      queryClient.invalidateQueries({ queryKey: ["repository"] });   // a repository's refused deliveries carry a remedy of their own
     },
+  });
+}
+
+/**
+ * The credentials the caller could move a credential's bindings onto, best first. Asked only when a fix is being picked
+ * (`enabled`), never on page load: it is a read per credential.
+ */
+export function useRelinkSuggestions(credentialId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["relink-suggestions", credentialId],
+    queryFn: () => oauthApi.getRelinkSuggestions(credentialId!),
+    enabled: enabled && credentialId != null,
+    staleTime: 0,
   });
 }
 

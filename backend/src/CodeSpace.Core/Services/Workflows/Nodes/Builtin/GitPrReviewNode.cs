@@ -130,7 +130,7 @@ public sealed class GitPrReviewNode : INodeRuntime
         // repo-level permission is only knowable here, at write time.)
         catch (PullRequestMovedException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number, expectedHeadSha)); }
         catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number, expectedHeadSha)); }
-        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number, expectedHeadSha)); }
+        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number, expectedHeadSha), ex); }
 
         context.Logger.LogInformation("Submitted {Verdict} review for repo {RepoId} PR #{Num}", verdict, repoId, number);
 

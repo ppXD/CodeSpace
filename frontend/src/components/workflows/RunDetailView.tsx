@@ -23,6 +23,7 @@ import { RunStatusBadge } from "./RunStatusBadge";
 import { RunTrace } from "./RunTrace";
 import { groupMapBranches, nodeIterationLabel, type MapRollup } from "./mapBranches";
 import { concurrentNodeKeys, runNodeKey } from "./runConcurrency";
+import { RunRemedyCard } from "@/components/remedy/RunRemedyCard";
 
 export { RunStatusBadge };
 
@@ -123,6 +124,9 @@ function ActivityRunDetailView({ runId, nested, depth, onOpenRun, view, setView,
         </div>
       ) : <RunViewTabs view={view} setView={setView} />}
 
+      {/* A failure on a provider connection says what to do about it, and who may — read live for whoever is looking. It renders nothing
+          for any other failure, so the banner below stays the whole story, as it always was. */}
+      {r.hasError && <RunRemedyCard runId={runId} onOpenRun={onOpenRun} />}
       {r.hasError && <div className="cn-banner cn-banner-err" style={{ margin: 0 }}><div className="cn-banner-h">Run failed</div><div className="cn-banner-p">Expand Run input &amp; output to read the recorded run-level error.</div></div>}
       {suspended && pendingWait.isLoading && <div className="wf-run-canvas wf-run-canvas-loading" role="status">Loading pending action…</div>}
       {suspended && pendingWait.error && <div className="cn-banner cn-banner-err" style={{ margin: 0 }}><div className="cn-banner-h">Pending action unavailable</div><div className="cn-banner-p">The full wait payload was not used as a fallback.</div></div>}

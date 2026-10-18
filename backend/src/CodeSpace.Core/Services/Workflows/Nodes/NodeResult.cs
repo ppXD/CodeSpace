@@ -23,6 +23,14 @@ public sealed record NodeResult
     /// <summary>Whether a <c>Failure</c> may be retried under the node's retry policy. Default true (the historical status-blind behaviour). A node marks a DETERMINISTIC failure false — a human-owed verdict, the user's own cancel — so the engine never burns attempts re-running work whose outcome cannot change.</summary>
     public bool Retryable { get; init; } = true;
 
+    /// <summary>
+    /// The exception a node turned into its own <see cref="Error"/> sentence, when it wants the failure behind the sentence kept: the
+    /// engine reads what the exception declares (a provider connection failure a person can repair) and writes it beside the
+    /// sentence, which stays exactly as the node worded it. Never read for retry: only a THROWN exception classifies a failure as
+    /// terminal, so a node that returns a failure with a cause is retried exactly as before.
+    /// </summary>
+    public Exception? Cause { get; init; }
+
     /// <summary>Set when Status == Suspended. Opaque token the resume mechanism feeds back.</summary>
     public SuspensionToken? SuspendUntil { get; init; }
 
@@ -43,6 +51,9 @@ public sealed record NodeResult
         new() { Status = NodeStatus.Success, Outputs = outputs ?? new Dictionary<string, JsonElement>(), RoutingHints = handles };
 
     public static NodeResult Fail(string error) => new() { Status = NodeStatus.Failure, Error = error };
+
+    /// <summary>A failure worded by the node, keeping the exception it was worded from (<see cref="Cause"/>) so what it declared can be recorded.</summary>
+    public static NodeResult Fail(string error, Exception cause) => new() { Status = NodeStatus.Failure, Error = error, Cause = cause };
 
     /// <summary>A failure with an explicit retry verdict — <paramref name="retryable"/> false marks a deterministic outcome the retry policy must not re-run.</summary>
     public static NodeResult Fail(string error, bool retryable) => new() { Status = NodeStatus.Failure, Error = error, Retryable = retryable };

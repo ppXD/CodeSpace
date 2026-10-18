@@ -132,7 +132,7 @@ public sealed class GitOpenPullRequestNode : INodeRuntime
         // it as a clean node failure. Provider scope / permission / validation failures map to actionable text.
         catch (InvalidOperationException ex) { return NodeResult.Fail(ex.Message); }
         catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeWriteFailure(ex)); }
-        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex)); }
+        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex), ex); }
 
         context.Logger.LogInformation("Opened PR #{Num} on repo {RepoId} ({Source} -> {Target})", pr.Number, repoId, sourceBranch, targetBranch);
 

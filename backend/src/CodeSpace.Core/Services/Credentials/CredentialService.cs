@@ -99,14 +99,24 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
     {
         var ids = summaries.Select(s => s.Id).ToList();
         var left = await DepartedCredentials.Of(_db).AsNoTracking().Where(c => c.TeamId == teamId && ids.Contains(c.Id)).Select(c => c.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
+        var bound = await CountBoundRepositoriesAsync(teamId, ids, cancellationToken).ConfigureAwait(false);
         var now = DateTimeOffset.UtcNow;
 
         return summaries.Select(s => s with
         {
             Health = CredentialHealthDerivation.Derive(s.Status, s.AuthType, s.ExpiresDate, left.Contains(s.Id), now),
-            DaysToExpiry = CredentialHealthDerivation.DaysToExpiry(s.AuthType, s.ExpiresDate, now)
+            DaysToExpiry = CredentialHealthDerivation.DaysToExpiry(s.AuthType, s.ExpiresDate, now),
+            BoundRepositoryCount = bound.GetValueOrDefault(s.Id)
         }).ToList();
     }
+
+    /// <summary>How many live repositories each listed credential holds — one grouped read for the whole list, so the number beside a credential (what reconnecting or disconnecting it puts at stake) costs the list no more than one query.</summary>
+    private async Task<Dictionary<Guid, int>> CountBoundRepositoriesAsync(Guid teamId, List<Guid> credentialIds, CancellationToken cancellationToken) =>
+        await _db.Repository.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.DeletedDate == null && r.CredentialId != null && credentialIds.Contains(r.CredentialId.Value))
+            .GroupBy(r => r.CredentialId!.Value)
+            .Select(g => new { CredentialId = g.Key, Count = g.Count() })
+            .ToDictionaryAsync(g => g.CredentialId, g => g.Count, cancellationToken).ConfigureAwait(false);
 
     public async Task<CredentialUsage> GetUsageAsync(Guid credentialId, CancellationToken cancellationToken)
     {

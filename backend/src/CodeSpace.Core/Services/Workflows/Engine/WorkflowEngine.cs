@@ -4,6 +4,7 @@ using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Constants;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Failures;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
@@ -449,7 +450,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // The bootstrap terminal is the same invariant as every other terminal: the authoritative row and the
         // matching tape fact become visible together. If ledger persistence fails, rollback leaves Running for the
         // abandoned-run reconciler instead of publishing a terminal state whose timeline can never explain it.
-        await _recordLogger.RunFailedAsync(runId, message, now - engineStartedAt, CancellationToken.None).ConfigureAwait(false);
+        await _recordLogger.RunFailedAsync(runId, message, now - engineStartedAt, ProviderFailureCapture.From(failure, repositoryId: null), CancellationToken.None).ConfigureAwait(false);
         await transaction.CommitAsync(CancellationToken.None).ConfigureAwait(false);
     }
 
@@ -3394,14 +3395,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 }
                 catch (SubworkflowStartException ex)
                 {
-                    return await FinalizeFailureAsync(exec, ex.Message, cancellationToken).ConfigureAwait(false);
+                    return await FinalizeFailureAsync(exec, ex.Message, thrown: null, cancellationToken).ConfigureAwait(false);
                 }
                 catch (AgentRunAdmissionException ex)
                 {
                     // The fail-closed admission cap refused this agent run at staging — a clean node failure (like a
                     // failed sub-workflow start), so the agent.run node routes to its error edge and, inside a map
                     // branch, the map's continue-on-error / terminate policy applies. NOT a crash, NOT a leaked wait.
-                    return await FinalizeFailureAsync(exec, ex.Message, cancellationToken).ConfigureAwait(false);
+                    return await FinalizeFailureAsync(exec, ex.Message, thrown: null, cancellationToken).ConfigureAwait(false);
                 }
             }
 
@@ -3421,7 +3422,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             retryable = retryable && (result?.Retryable ?? true);
 
             if (!retryable || attempt >= plan.MaxAttempts)
-                return await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
+                return await FinalizeFailureAsync(exec, lastError, thrown ?? result?.Cause, cancellationToken).ConfigureAwait(false);
 
             await LogRetryAndWaitAsync(exec, attempt, plan, lastError, attemptStartedAt, retryAfter, cancellationToken).ConfigureAwait(false);
 
@@ -3439,7 +3440,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
 
         // Defensive: the loop always returns on its final attempt.
-        return await FinalizeFailureAsync(exec, lastError, cancellationToken).ConfigureAwait(false);
+        return await FinalizeFailureAsync(exec, lastError, thrown: null, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -3593,11 +3594,17 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// once the walker merges it. The scope write happens in <see cref="MergeNodeOutcome"/>; it's
     /// harmless when the node has no error edge — the run fails and scope is dropped.
     /// </summary>
-    private async Task<NodeRunOutcome> FinalizeFailureAsync(NodeExecution exec, string error, CancellationToken cancellationToken)
+    private async Task<NodeRunOutcome> FinalizeFailureAsync(NodeExecution exec, string error, Exception? thrown, CancellationToken cancellationToken)
     {
-        await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, RedactForPersistence(exec.Scope, error), DateTimeOffset.UtcNow - exec.StartedAt, cancellationToken).ConfigureAwait(false);
+        var failure = ProviderFailureCapture.From(thrown, RepositoryActedOn(exec));
+
+        await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, RedactForPersistence(exec.Scope, error), DateTimeOffset.UtcNow - exec.StartedAt, failure, cancellationToken).ConfigureAwait(false);
         return new NodeRunOutcome(NodeStatus.Failure, BuildErrorOutput(error, exec.Node.Id), null, null);
     }
+
+    /// <summary>The repository the node was acting on, when it declares an input for one and the input resolved to an id — read off the manifest's own declaration, so no node is named here. Lets a provider failure that names no credential (a 401) be traced to the one the repository runs through.</summary>
+    private static Guid? RepositoryActedOn(NodeExecution exec) =>
+        exec.Runtime.Manifest.RepositoryInput is { } spec && exec.ResolvedInputs.TryGetValue(spec.InputKey, out var value) && value.ValueKind == JsonValueKind.String && Guid.TryParse(value.GetString(), out var id) ? id : null;
 
     /// <summary>
     /// The node's <c>error</c> output bag — <c>{ "error": { "message": ..., "node": ... } }</c>,

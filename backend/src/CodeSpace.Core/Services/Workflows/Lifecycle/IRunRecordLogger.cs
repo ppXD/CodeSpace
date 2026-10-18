@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.Core.Services.Workflows.Lifecycle;
 
@@ -41,6 +42,13 @@ public interface IRunRecordLogger
     /// <summary>Emit <c>run.failed</c>. Called on NodeFailureException / WorkflowSecretLeakException; <paramref name="error"/> is the run-level message.</summary>
     Task RunFailedAsync(Guid runId, string error, TimeSpan duration, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// <c>run.failed</c> that also keeps the failure the run ended on as a <see cref="PersistedFailure"/> beside the sentence, so a
+    /// reader can tell WHAT failed without parsing <paramref name="error"/>. Defaults to the plain record, which is what an
+    /// implementer that has not adopted failures writes — the failure is then simply not kept, never an error.
+    /// </summary>
+    Task RunFailedAsync(Guid runId, string error, TimeSpan duration, PersistedFailure? failure, CancellationToken cancellationToken) => RunFailedAsync(runId, error, duration, cancellationToken);
+
     /// <summary>Emit <c>run.cancelled</c>. Reserved for operator-cancel.</summary>
     Task RunCancelledAsync(Guid runId, TimeSpan duration, CancellationToken cancellationToken);
 
@@ -73,6 +81,13 @@ public interface IRunRecordLogger
 
     /// <summary>Emit <c>node.failed</c>. <paramref name="error"/> is the human-readable failure reason.</summary>
     Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// <c>node.failed</c> that also keeps the failure the node died of as a <see cref="PersistedFailure"/> beside
+    /// <paramref name="error"/> — the machine-readable half the run page turns into a remedy. A null <paramref name="failure"/>
+    /// writes exactly the plain record, byte for byte. Defaults to the plain record for an implementer that has not adopted it.
+    /// </summary>
+    Task NodeFailedAsync(Guid runId, string nodeId, string iterationKey, string error, TimeSpan duration, PersistedFailure? failure, CancellationToken cancellationToken) => NodeFailedAsync(runId, nodeId, iterationKey, error, duration, cancellationToken);
 
     /// <summary>
     /// Emit <c>attempt.failed</c> — the durable, structured record of ONE failed-but-will-be-retried node attempt,

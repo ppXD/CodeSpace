@@ -1,5 +1,5 @@
 import { ApiError, fetchJson } from "./request";
-import type { CompleteOAuthResponse, CredentialCapabilitiesResponse, CredentialSummary, CredentialUsage, DeleteProviderInstanceResponse, InitOAuthResponse, ProviderDefaults, ProviderInstanceSummary, ProviderInstanceUsage, ProviderKind, ReplaceCredentialTokenResponse, RevokeCredentialResponse } from "./types";
+import type { CompleteOAuthResponse, CredentialCapabilitiesResponse, CredentialSummary, CredentialUsage, DeleteProviderInstanceResponse, InitOAuthResponse, ProviderDefaults, ProviderInstanceSummary, ProviderInstanceUsage, ProviderKind, RelinkSuggestion, ReplaceCredentialTokenResponse, RevokeCredentialResponse } from "./types";
 
 /**
  * Thin typed wrappers around the new OAuth + credential endpoints. They handle:
@@ -116,6 +116,10 @@ export const oauthApi = {
       method: "PUT",
       body: JSON.stringify({ token }),
     }),
+
+  // The credentials the caller could move this one's bindings onto, best first: their own live connections, then the team's service tokens.
+  getRelinkSuggestions: (credentialId: string) =>
+    fetchJson<RelinkSuggestion[]>(`/api/credentials/${encodeURIComponent(credentialId)}/relink-suggestions`),
 
   // Pre-revoke preview — drives the confirm dialog's impact wording.
   getCredentialUsage: (credentialId: string) =>

@@ -97,7 +97,7 @@ public sealed class GitCommentIssueNode : INodeRuntime
         }
         catch (InvalidOperationException ex) { return NodeResult.Fail(ex.Message); }
         catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number)); }
-        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number)); }
+        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex, number), ex); }
 
         context.Logger.LogInformation("Posted comment {CommentId} on repo {RepoId} issue #{Num}", comment.ExternalId, repoId, number);
 

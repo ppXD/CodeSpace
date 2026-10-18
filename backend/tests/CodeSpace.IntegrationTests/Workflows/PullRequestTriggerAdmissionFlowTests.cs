@@ -3,6 +3,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.Workflows.Failures;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Webhooks;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
@@ -12,6 +13,7 @@ using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Events;
 using CodeSpace.Messages.Events.PullRequest;
+using CodeSpace.Messages.Failures;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -155,10 +157,11 @@ public class PullRequestTriggerAdmissionFlowTests
     }
 
     [Theory]
-    [InlineData(403, WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, "refused the lookup (HTTP 403)")]
-    [InlineData(503, WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, "answered HTTP 503 to the lookup")]
-    [InlineData(401, WorkflowRunRequestRejectionReasons.CredentialRejected, "answered HTTP 401 to the repository's credential")]
-    public async Task On_a_public_gitlab_project_a_pusher_whose_standing_could_not_be_read_is_refused_for_that_not_as_a_stranger(int status, string reason, string cause)
+    [InlineData(403, WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, "refused the lookup (HTTP 403)", StandingLookupCauses.AccessRefused, "403")]
+    [InlineData(503, WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, "answered HTTP 503 to the lookup", StandingLookupCauses.NoAnswer, "503")]
+    [InlineData(429, WorkflowRunRequestRejectionReasons.AuthorStandingUnknown, "answered HTTP 429 to the lookup", StandingLookupCauses.NoAnswer, "429")]
+    [InlineData(401, WorkflowRunRequestRejectionReasons.CredentialRejected, "answered HTTP 401 to the repository's credential", null, null)]
+    public async Task On_a_public_gitlab_project_a_pusher_whose_standing_could_not_be_read_is_refused_for_that_not_as_a_stranger(int status, string reason, string cause, string? lookup, string? providerStatus)
     {
         // The author is a known member; whoever else pushed to their fork's head has to be a member too, and asking GitLab
         // about them failed. Which refusal that is matters: "their standing is unknown, set Pull requests from to Anyone" sends
@@ -178,6 +181,29 @@ public class PullRequestTriggerAdmissionFlowTests
         refusal.ShouldContain("whoever pushed its new commits", customMessage: "the refusal says whose standing could not be read — here the pusher's, the author's being known");
         refusal.ShouldContain(cause);
         (await LoadRefusalsAsync(seed.TeamId, WorkflowRunRequestRejectionReasons.AuthorNotMember)).ShouldBeEmpty("nothing is known about the pusher, so no one was refused as a stranger");
+
+        // The structured half the repository's remedy reads: which lookup failed and what the provider answered — a 403 is the credential's to fix, a 503 or a 429 is not.
+        var kept = await LoadRefusalFailureAsync(seed.TeamId, reason);
+
+        kept?.Detail(StandingLookupCauses.DetailKey).ShouldBe(lookup, "the cause the refusal kept");
+        kept?.Detail("providerStatus").ShouldBe(providerStatus);
+        (kept is null).ShouldBe(lookup is null, "a refusal blamed on the credential outright keeps no lookup cause");
+    }
+
+    [Fact]
+    public async Task A_repository_with_no_credential_bound_keeps_that_as_why_its_authors_standing_was_never_asked()
+    {
+        using var gitlab = new StubProviderHost();
+        var seed = await SeedAsync(ProviderKind.GitLab, gitlab.BaseUrl);
+        await UnbindCredentialAsync(seed.RepositoryId);
+        await SeedActivationAsync(seed, Opened, "{}");
+
+        await PublishAsync(Event(Opened, seed.RepositoryId, number: 21, new PullRequestOrigin { AuthorExternalId = "51", RepositoryVisibility = RepositoryVisibility.Public, IsFork = true }));
+
+        (await CountRunsAsync(seed.WorkflowId)).ShouldBe(0);
+        gitlab.Requests.ShouldBeEmpty("there was no credential to ask with");
+
+        (await LoadRefusalFailureAsync(seed.TeamId, WorkflowRunRequestRejectionReasons.AuthorStandingUnknown))!.Detail(StandingLookupCauses.DetailKey).ShouldBe(StandingLookupCauses.NoCredential);
     }
 
     [Fact]
@@ -425,6 +451,24 @@ public class PullRequestTriggerAdmissionFlowTests
         using var scope = _fixture.BeginScope();
         var payloads = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.AsNoTracking().Where(r => r.WorkflowId == workflowId).Select(r => r.RunRequest.NormalizedPayloadJson).ToListAsync();
         return payloads.Select(p => JsonDocument.Parse(p).RootElement.GetProperty(field).GetString()!).ToList();
+    }
+
+    private async Task<PersistedFailure?> LoadRefusalFailureAsync(Guid teamId, string reason)
+    {
+        using var scope = _fixture.BeginScope();
+        var metadata = await scope.Resolve<CodeSpaceDbContext>().WorkflowRunRequest.AsNoTracking()
+            .Where(r => r.TeamId == teamId && r.Status == WorkflowRunRequestStatus.Rejected && r.Error!.StartsWith(reason + ":"))
+            .Select(r => r.RequestMetadataJson)
+            .SingleAsync();
+
+        return PersistedFailureJson.Read(metadata);
+    }
+
+    private async Task UnbindCredentialAsync(Guid repositoryId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE repository SET credential_id = NULL WHERE id = {repositoryId}");
     }
 
     private async Task<List<string>> LoadRefusalsAsync(Guid teamId, string reason)

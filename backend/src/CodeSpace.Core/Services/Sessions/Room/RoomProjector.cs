@@ -12,6 +12,7 @@ using CodeSpace.Core.Services.Plans;
 using CodeSpace.Core.Services.Supervisor;
 using CodeSpace.Core.Services.Tasks.Phases;
 using CodeSpace.Core.Services.Tasks.Timeline.Sources;
+using CodeSpace.Core.Services.Workflows.Failures;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
 using CodeSpace.Core.Services.Workflows.Budget;
@@ -54,8 +55,9 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
     private readonly IRunCleanupLedger _cleanup;
     private readonly CodeSpaceDbContext _db;
     private readonly ISessionTurnCache _cache;
+    private readonly IRunFailureReader _failures;
 
-    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, IArtifactManifestStore producedFiles, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, ITeamCostService costs, IBudgetLedger budget, ITeamCostCapResolver teamCaps, IRunCleanupLedger cleanup, CodeSpaceDbContext db, ISessionTurnCache cache)
+    public RoomProjector(ISessionSkeletonReader sessions, IRunPhaseProjector phases, IDecisionQueueService decisions, IRunActionCapabilityResolver actions, ISupervisorDecisionObservationBundle decisionObservations, IWorkPlanChecklistService checklists, IPublishManifestStore manifests, IArtifactManifestStore producedFiles, ISupervisorPublishedBranchResolver publishedBranches, IArtifactRangeReader artifacts, ITeamCostService costs, IBudgetLedger budget, ITeamCostCapResolver teamCaps, IRunCleanupLedger cleanup, CodeSpaceDbContext db, ISessionTurnCache cache, IRunFailureReader failures)
     {
         _sessions = sessions;
         _phases = phases;
@@ -73,6 +75,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
         _cleanup = cleanup;
         _db = db;
         _cache = cache;
+        _failures = failures;
     }
 
     public async Task<RoomView?> ProjectByRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken)
@@ -696,6 +699,12 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             ? await DeepFailureErrorAsync(runId, cancellationToken).ConfigureAwait(false)
             : null;
 
+        // The provider failure the run recorded, when it is one a person can repair outside the run. Static (a code and what it names), so
+        // it belongs in the cached turn; the card it points at — what to do, who may — is read live, for whoever is looking.
+        var failure = status == Messages.Enums.WorkflowRunStatus.Failure
+            ? (await _failures.ReadAsync(runId, teamId, cancellationToken).ConfigureAwait(false))?.Failure
+            : null;
+
         // The stage the repository policy put out of reach, through the completion authority's OWN reader — so the
         // Room and the authority can never word one run's patch-only finish differently. Only a TERMINAL turn asks
         // (a live run has not finished integrating anything yet), so a running turn pays zero extra query.
@@ -728,6 +737,7 @@ internal sealed class RoomProjector : IRoomProjector, IScopedDependency
             AcceptancePassed = acceptance,
             Deliveries = deliveries,
             RawError = deepError ?? error,
+            Failure = failure,
             PolicyBoundedStage = policyBoundedStage,
             RetrySteps = retrySteps,
             RespawnSteps = respawnSteps,

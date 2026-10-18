@@ -283,6 +283,10 @@ public sealed record AgentRunResult
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public string? PublishFailureCode { get; init; }
 
+    /// <summary>The machine-readable form of the provider failure this run hit — the one that ended it, or the one that kept its branch from being published — when it is one a person can repair outside the run (a connection disconnected, refused or redirecting): its code and what it names, so the run page can say what to do instead of printing <see cref="Error"/> or <see cref="PublishError"/>. Null for every other outcome and omitted from the stored result then, so every earlier result reads and writes byte-identically.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public Failures.PersistedFailure? Failure { get; init; }
+
     /// <summary>Set ONLY when the publish guard chain (<c>IPublishGuard</c>) blocked the push — a BY-CHOICE skip (never both this and <see cref="PublishError"/> at once). The winning guard's human-readable reason, folded onto the publish-manifest row's <c>Summary</c> so a by-choice skip explains itself.</summary>
     public string? PublishSkipReason { get; init; }
 }

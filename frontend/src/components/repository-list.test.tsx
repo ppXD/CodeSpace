@@ -33,15 +33,17 @@ describe("repository list controls", () => {
     repo({ id: "r2", fullPath: "acme/web", name: "web", status: "Error", lastError: "credential revoked" }),
   ];
 
+  // c1 is what both repositories run through (a working credential: the broken one is broken by its STATUS, not its credential); c2 is a spare.
   const credentials = [
+    { id: "c1", teamId: "t1", providerInstanceId: "pi1", ownerUserId: "u2", ownerUserName: "Ada", ownership: "Personal", authType: "Pat", displayName: "Ada's token", status: "Active", createdDate: "2026-01-01T00:00:00Z" },
     { id: "c2", teamId: "t1", providerInstanceId: "pi1", ownerUserId: "u1", ownerUserName: "Maya", ownership: "Personal", authType: "Pat", displayName: "Maya's token", status: "Active", createdDate: "2026-01-01T00:00:00Z" },
   ];
 
-  function renderAs(t: MeTeam) {
+  function renderAs(t: MeTeam, over: { repositories?: RepositorySummary[]; credentials?: unknown[] } = {}) {
     localStorage.setItem("codespace.jwt", "test-jwt");
     localStorage.setItem("codespace.activeTeamId", t.id);
 
-    const routes: Record<string, unknown> = { "/api/users/me": me(t), "/api/repositories": repositories, "/api/provider-instances": [instance], "/api/credentials": credentials };
+    const routes: Record<string, unknown> = { "/api/users/me": me(t), "/api/repositories": over.repositories ?? repositories, "/api/provider-instances": [instance], "/api/credentials": over.credentials ?? credentials };
 
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
       const url = typeof input === "string" ? input : input.toString();
@@ -85,5 +87,71 @@ describe("repository list controls", () => {
 
     expect(screen.getByRole("button", { name: /Re-link credential/ })).toBeTruthy();
     expect(screen.getByRole("button", { name: /Add repository/ })).toBeTruthy();
+  });
+
+  // ── Connection health: the chip belongs on EVERY repository whose credential is not healthy, not only the ones flipped to Error ──
+
+  const admin = () => team("Admin", ["repos.manage", "credentials.manage", "members.manage"]);
+  const credential = (id: string, over: Record<string, unknown> = {}) => ({ ...credentials[1], id, displayName: `cred ${id}`, ...over });
+  const onCredential = (id: string | null, over: Partial<RepositorySummary> = {}) => repo({ id: `r-${id ?? "none"}`, fullPath: `acme/${id ?? "none"}`, name: String(id ?? "none"), credentialId: id, ...over });
+
+  it("flags a repository still marked Active whose credential was refused, disconnected or is gone", async () => {
+    renderAs(admin(), {
+      credentials: [credential("rejected", { status: "Error", authType: "OAuth", lastError: "invalid_grant" }), credential("gone", { status: "Revoked" }), credential("left", { health: "owner_left" }), credential("fine")],
+      repositories: [onCredential("rejected"), onCredential("gone"), onCredential("left"), onCredential("fine"), onCredential("retired")],   // "retired" is in no list: soft-deleted
+    });
+
+    await waitFor(() => expect(screen.getByText("acme/retired")).toBeTruthy());
+
+    const chips = Array.from(document.querySelectorAll("[data-issue]:not(tr)")).map((e) => [e.getAttribute("data-issue"), e.textContent?.trim()]);
+    expect(chips).toEqual([["rejected", "needs reconnect"], ["disconnected", "credential disconnected"], ["owner_left", "owner left"], ["retired", "credential disconnected"]]);
+    expect(screen.getByText("4 repositories need a credential")).toBeTruthy();
+  });
+
+  it("says nothing about a repository whose credential works, and a credential list that has not arrived says nothing either", async () => {
+    renderAs(admin(), { credentials: [credential("fine")], repositories: [onCredential("fine")] });
+
+    await waitFor(() => expect(screen.getByText("acme/fine")).toBeTruthy());
+
+    expect(document.querySelector("[data-issue]")).toBeNull();
+    expect(screen.queryByText(/need a credential/)).toBeNull();
+  });
+
+  it("offers the fix on the repository: reconnect the credential, and re-link to another", async () => {
+    renderAs(admin(), { credentials: [credential("rejected", { status: "Error", authType: "OAuth" }), credential("spare")], repositories: [onCredential("rejected")] });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
+
+    expect(screen.getByRole("button", { name: /Re-link credential/ })).toBeTruthy();
+  });
+
+  it("offers a pasted token a Replace token, not a Reconnect", async () => {
+    renderAs(admin(), { credentials: [credential("rejected", { status: "Error", authType: "Pat" })], repositories: [onCredential("rejected")] });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy());
+
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+  });
+
+  it("offers a member who owns a refused pasted token its Replace token but not the re-link, and tells another member who to ask", async () => {
+    const mine = credential("mine", { status: "Error", authType: "Pat", ownerUserId: "u1" });
+    const theirs = credential("theirs", { status: "Error", authType: "Pat", ownerUserId: "u2", ownerUserName: "Ada" });
+    renderAs(team("Member", ["workflows.write"]), { credentials: [mine, theirs], repositories: [onCredential("mine"), onCredential("theirs")] });
+
+    await waitFor(() => expect(screen.getByText("acme/theirs")).toBeTruthy());
+
+    expect(screen.getAllByRole("button", { name: "Replace token" })).toHaveLength(1);   // only the one that is theirs: PUT /credentials/{id}/token passes an owner on membership
+    expect(screen.queryByRole("button", { name: /Re-link credential/ })).toBeNull();
+    expect(screen.getByText("Ask a team Admin or Owner to fix this connection.")).toBeTruthy();
+  });
+
+  it("offers a member no Reconnect on their own refused sign-in, because starting an OAuth connect takes credentials.manage and would answer 403", async () => {
+    const mine = credential("mine", { status: "Error", authType: "OAuth", ownerUserId: "u1" });
+    renderAs(team("Member", ["workflows.write"]), { credentials: [mine], repositories: [onCredential("mine")] });
+
+    await waitFor(() => expect(screen.getByText("acme/mine")).toBeTruthy());
+
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    expect(screen.getByText("Ask a team Admin or Owner to fix this connection.")).toBeTruthy();
   });
 });

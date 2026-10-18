@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Net.Sockets;
 using CodeSpace.Core.DependencyInjection;
+using CodeSpace.Core.Failures;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.AgentRunLogging;
@@ -326,6 +327,10 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
         // for a re-attach is durability or a silent degrade.
         var brokeredHere = false;
 
+        // Hoisted for the executor-error arm, so a provider failure it lands can name the repository the run was working in:
+        // the failure carries the credential when it knows one, and a 401 does not.
+        Guid? taskRepositoryId = null;
+
         try
         {
             // Re-check the parent workflow run's status the instant after the Queued→Running claim wins, closing the TOCTOU
@@ -339,6 +344,8 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
 
             var task = AgentTaskSecrets.Open(run, _sealer)
                        ?? throw new InvalidOperationException($"AgentRun {agentRunId} has an empty task envelope.");
+
+            taskRepositoryId = task.RepositoryId;
 
             // Reconcile the authored harness with the model's provider (from the pinned credential, or — for the
             // planner's loose model name — the pool row backing it) — if the pairing is impossible (e.g. an
@@ -813,7 +820,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // A launch that got as far as reserving may already have billed a provider, so this terminal settles the
             // claim PESSIMISTICALLY (no observed cost ⇒ Indeterminate at the reserved amount) rather than leaving it
             // live. A failure is not evidence that nothing was spent.
-            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(ex), Error = redactor.Redact(ex.Message) }, cancellationToken).ConfigureAwait(false);
+            await CompleteAndNotifyAsync(owner, run.TeamId, new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = ExecutorExitReason(ex), Error = redactor.Redact(ex.Message), Failure = ProviderFailureCapture.From(ex, taskRepositoryId) }, cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -2262,7 +2269,7 @@ public sealed class AgentRunExecutor : IAgentRunExecutor, IScopedDependency
             // token already redacted (the handle redacts it), so it's safe to persist onto the timeline.
             _logger.LogWarning(ex, "Agent run {RunId}: failed to push the produced branch ({Reason}); the run stays Succeeded with no branch output", runId, DescribePushFailure(ex));
             await AppendPushFailureWarningAsync(owner, ex.Message, cancellationToken).ConfigureAwait(false);
-            return result with { PublishError = ex.Message, PublishFailureCode = PublishFailureCodeOf(ex) };
+            return result with { PublishError = ex.Message, PublishFailureCode = PublishFailureCodeOf(ex), Failure = ProviderFailureCapture.From(ex, task.RepositoryId) };
         }
     }
 

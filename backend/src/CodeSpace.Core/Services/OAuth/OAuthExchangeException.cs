@@ -45,7 +45,17 @@ public sealed class OAuthExchangeException : Exception, IFailure
         Error = original.Error;
         Description = original.Description;
         ProviderBody = original.ProviderBody;
+        CredentialId = credentialId;
     }
+
+    /// <summary>The credential whose refresh the provider answered, when it is known (<see cref="ForCredential"/>); null for an exchange made before any credential existed. Carried in <see cref="Details"/> so a run that failed on this refresh can say which credential it was — and, with <see cref="Error"/>, whether the provider refused it or simply did not answer.</summary>
+    public Guid? CredentialId { get; }
+
+    /// <summary>The credential and the provider's error CODE (<c>http_503</c>, <c>temporarily_unavailable</c> — never the description or the body, which are the provider's to write) once a credential is known; nothing before then.</summary>
+    public IReadOnlyDictionary<string, object?>? Details => CredentialId is { } credential ? new Dictionary<string, object?> { ["credentialId"] = credential, ["oauthError"] = IsCodeShaped(Error) ? Error : null } : null;
+
+    /// <summary>An RFC 6749 error code is a short token (<c>invalid_grant</c>, <c>http_503</c>). What the provider wrote there is its own text, so only something shaped like a code is repeated in a detail a run keeps and a page shows.</summary>
+    private static bool IsCodeShaped(string error) => error.Length is > 0 and <= 64 && error.All(c => char.IsAsciiLetterOrDigit(c) || c is '_' or '-' or '.');
 
     public string Error { get; }
     public string? Description { get; }

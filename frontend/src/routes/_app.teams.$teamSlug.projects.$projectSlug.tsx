@@ -5,7 +5,9 @@ import { ApiError } from "@/api/request";
 import { projectsApi } from "@/api/projects";
 import type { RepositorySummary } from "@/api/types";
 import { useProject, useProjects } from "@/hooks/use-projects";
-import { useCredentials, useProviderInstances } from "@/hooks/use-credentials";
+import { useProviderInstances } from "@/hooks/use-credentials";
+import { ConnectionIssueChip, RepositoryConnectionFix } from "@/components/remedy/RepositoryConnectionIssue";
+import { useRepositoryConnectionIssues } from "@/hooks/use-repository-connection-issues";
 import { useRepositories, useUnbindRepository } from "@/hooks/use-repositories";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { useConfirm } from "@/components/dialog";
@@ -76,11 +78,11 @@ function ProjectDetailPage() {
   // project filter the backend can't match, or an "all repos" fetch would fire during resolve.
   const reposQuery = useRepositories({ projectId, enabled: !!projectId });
   const providerInstances = useProviderInstances();
-  const credentials = useCredentials();
+  const connection = useRepositoryConnectionIssues();
   const allProjects = useProjects();
 
   const instanceById = useMemo(() => new Map((providerInstances.data ?? []).map(i => [i.id, i])), [providerInstances.data]);
-  const credentialById = useMemo(() => new Map((credentials.data ?? []).map(c => [c.id, c])), [credentials.data]);
+  const credentialById = connection.credentialById;
 
   const [addRepoOpen, setAddRepoOpen] = useState(false);
   // Connect remote sits next to Add repository because Connections only matter
@@ -241,10 +243,12 @@ function ProjectDetailPage() {
                   {repos.map(r => {
                     const instance = instanceById.get(r.providerInstanceId);
                     const credential = r.credentialId ? credentialById.get(r.credentialId) : undefined;
+                    const issue = connection.issueOf(r);
                     return (
                       <tr
                         key={r.id}
                         data-status={r.status.toLowerCase()}
+                        data-issue={issue ? issue.kind : undefined}
                         onClick={() => navigate({
                           to: "/teams/$teamSlug/repositories/$repoFullPath",
                           params: { teamSlug, repoFullPath: encodeURIComponent(r.fullPath) },
@@ -254,8 +258,11 @@ function ProjectDetailPage() {
                           <div className="repo-cell">
                             {instance && <ProviderMark provider={instance.provider} />}
                             <div className="repo-info">
-                              <div className="repo-name">{r.name}</div>
+                              <div className="repo-name">{r.name}{issue && <ConnectionIssueChip issue={issue} />}</div>
                               <div className="repo-path"><span>{r.fullPath}</span></div>
+                              {/* The same chip and the same fix as the team's list: a project page showed only a credential column, so a
+                                  repository running through a dead credential read as fine here and failed every run. */}
+                              {issue && <RepositoryConnectionFix repository={r} issue={issue} />}
                             </div>
                           </div>
                         </td>

@@ -53,6 +53,18 @@ export class OAuthFlowError extends Error {
   }
 }
 
+/** What a failed connect says to the person who started it — shared by every screen that starts one (the Providers dialog, a remediation card). */
+export function describeOAuthFlowError(err: OAuthFlowError): string {
+  switch (err.code) {
+    case "popup_blocked": return "Your browser blocked the OAuth popup. Allow popups for this site and try again.";
+    case "cancelled":     return "You closed the authorization window. No connection was made.";
+    case "init_failed":   return `Couldn't start the OAuth flow: ${err.message}`;
+    case "provider_error": return err.providerError ? `Provider rejected: ${err.providerError}` : err.message;
+    case "timeout":       return "The authorization took too long. Try again.";
+    default:              return err.message;
+  }
+}
+
 interface RunInput extends Omit<InitOAuthRequest, "returnUrl"> {
   /** Optional override; defaults to the in-app `/oauth-callback` route on this page's origin (see `oauthReturnUrlsFor`). */
   returnUrl?: string;
@@ -119,6 +131,9 @@ export function useOAuthFlow() {
       // open modal / sidebar showing connection status re-fetches immediately rather than waiting for the next mount.
       await queryClient.invalidateQueries({ queryKey: ["credentials"] });
       await queryClient.invalidateQueries({ queryKey: ["repositories"] });
+      // A run page that offered this reconnect re-reads its remedy, so the card turns to "run it again" instead of waiting for a focus change.
+      await queryClient.invalidateQueries({ queryKey: ["run-remedy"] });
+      await queryClient.invalidateQueries({ queryKey: ["repository"] });
       return outcome;
     } finally {
       try { if (!popup.closed) popup.close(); } catch { /* cross-origin during provider visit; harmless */ }

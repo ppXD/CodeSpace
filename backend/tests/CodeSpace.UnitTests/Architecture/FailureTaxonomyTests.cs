@@ -131,6 +131,15 @@ public class FailureTaxonomyTests
     }
 
     [Fact]
+    public void The_provider_connection_failures_are_pinned_member_by_member()
+    {
+        // These are the failures a run's record writes down and the run page answers with a remedy. A member added is a new
+        // kind of card with its own copy and its own buttons; one removed leaves a failure back as the sentence nobody can act on.
+        FailureCodes.ProviderConnection.ShouldBe(new[] { "credential_disconnected", "credential_needs_reconnect", "provider_unauthorized", "git_credential_rejected", "provider_base_url_redirects", "oauth_exchange_failed" }, ignoreOrder: true);
+        FailureCodes.ProviderConnection.ShouldBeSubsetOf(FailureCodes.All, "every persisted failure code is a declared one");
+    }
+
+    [Fact]
     public void The_infra_exit_reasons_are_pinned_member_by_member()
     {
         // Membership decides whether a supervisor unit's failed attempt reads as "the model failed" or as "this

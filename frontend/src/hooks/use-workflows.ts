@@ -203,6 +203,24 @@ export function useWorkflowRunPendingWait(runId: string | null, enabled = true) 
 
 export const WORKFLOW_RUN_IDENTITY_POLL_MS = 2000;
 
+/**
+ * What is wrong with the provider connection a run failed on, and what THIS user can do about it. Read fresh — never cached
+ * with the page that shows it: it depends on who is looking and on what has been fixed since, so it re-asks when the window
+ * regains focus (a reconnect happens in a popup or another tab) and after any fix the card itself performs.
+ */
+export function useRunRemedy(runId: string | null, enabled = true) {
+  return useQuery({
+    queryKey: ["run-remedy", runId],
+    queryFn: () => workflowsApi.getRunRemedy(runId!),
+    enabled: enabled && runId != null,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+    // The card is the way out of a failure, not the failure itself: an API that has no such read (a rolling deploy, a rollback) must not
+    // be asked three times for every failed run a person opens. Focus asks again.
+    retry: false,
+  });
+}
+
 /** Bounded canonical route lookup. Full run detail remains owned by the session-less detail fallback. */
 export function useWorkflowRunIdentity(ref: string | null, enabled = true) {
   return useQuery({

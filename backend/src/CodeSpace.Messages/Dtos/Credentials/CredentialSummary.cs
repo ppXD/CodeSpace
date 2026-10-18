@@ -34,4 +34,7 @@ public sealed record CredentialSummary
 
     /// <summary>Whole days until a static token expires at its provider; null for an OAuth credential (its access token renews itself) and for a token with no recorded expiry.</summary>
     public int? DaysToExpiry { get; init; }
+
+    /// <summary>How many live repositories are bound through the credential — what a person reconnecting, replacing or disconnecting it needs to know is at stake. Zero from a server that predates it.</summary>
+    public int BoundRepositoryCount { get; init; }
 }

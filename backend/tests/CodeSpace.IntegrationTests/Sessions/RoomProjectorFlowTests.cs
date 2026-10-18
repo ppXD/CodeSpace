@@ -2,6 +2,7 @@ using System.Data.Common;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Autofac;
+using CodeSpace.Core.Failures;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
@@ -24,6 +25,8 @@ using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Sessions.Room;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Exceptions;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Messages.Plans;
 using CodeSpace.Messages.Quality;
 using CodeSpace.Messages.Tasks;
@@ -1342,6 +1345,51 @@ public class RoomProjectorFlowTests
 
         JsonSerializer.SerializeToElement(card, ApiJson).GetProperty("error").GetString()
             .ShouldBe("litellm.BadRequestError: Unexpected message role", "the field reaches the frontend on the wire, not only in the CLR projection");
+    }
+
+    [Fact]
+    public async Task A_run_that_failed_on_a_provider_connection_carries_the_failure_code_and_is_not_told_as_a_model_credential_problem()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Disconnected");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Review the MR", resultSummary: null, status: WorkflowRunStatus.Failure, error: "Node 'list' failed.");
+        var thrown = new CredentialDisconnectedException(Guid.NewGuid(), "GitLab · NACHO.L");
+
+        await RecordNodeFailureAsync(run, thrown.Message, ProviderFailureCapture.From(thrown, repositoryId: null));
+
+        var turn = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single();
+        var diag = turn.Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+
+        diag.FailureCode.ShouldBe("credential_disconnected", "the page asks for the live remedy by this code");
+        diag.Title.ShouldBe("The credential this run used was disconnected");
+        diag.Text.ShouldBe(thrown.Message, "the connection's own words — the credential's name included");
+        diag.Actions.ShouldNotContain(a => a.Kind == RoomActionKind.FixCredentials, "the model credentials are not what is broken, and the sentence's word 'credential' used to send people there");
+
+        var wire = JsonSerializer.SerializeToElement(turn.Blocks.OfType<DiagnosticBlock>().Single(), ApiJson);
+        wire.GetProperty("failureCode").GetString().ShouldBe("credential_disconnected", "the field reaches the frontend on the wire");
+        wire.EnumerateObject().Select(p => p.Name).ShouldNotContain("remedy", "who is asking and what has been fixed since are not in the cached turn — only the code is");
+    }
+
+    [Fact]
+    public async Task A_failed_run_recorded_before_failures_were_kept_reads_exactly_as_it_did()
+    {
+        var (teamId, _) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var sessionId = await SeedSessionAsync(teamId, "Legacy");
+        var run = await SeedTurnAsync(teamId, sessionId, turn: 1, goal: "Review the MR", resultSummary: null, status: WorkflowRunStatus.Failure, error: "Node 'list' failed.");
+
+        await RecordNodeFailureAsync(run, "The credential 'GitLab · NACHO.L' was disconnected, so nothing bound through it can authenticate.", failure: null);
+
+        var diag = (await ProjectByRunAsync(run, teamId))!.Blocks.OfType<AssistantTurnBlock>().Single().Blocks.OfType<DiagnosticBlock>().ShouldHaveSingleItem();
+
+        diag.FailureCode.ShouldBeNull("nothing recorded the code, so nothing claims one");
+        diag.Title.ShouldBe("Authentication failed", "an old row keeps the reading it always had");
+    }
+
+    private async Task RecordNodeFailureAsync(Guid runId, string error, PersistedFailure? failure)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>().NodeFailedAsync(runId, "list", string.Empty, error, TimeSpan.FromMilliseconds(3), failure, CancellationToken.None);
     }
 
     [Fact]

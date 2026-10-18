@@ -1,3 +1,4 @@
+using CodeSpace.Core.Services.Credentials.Remedy;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
@@ -19,12 +20,14 @@ public sealed class GetWorkflowRunQueryHandler : IRequestHandler<GetWorkflowRunQ
     private readonly IWorkflowService _service;
     private readonly IRunNodeOutputInflater _inflater;
     private readonly ICurrentTeam _currentTeam;
+    private readonly IProviderRemedyService _remedies;
 
-    public GetWorkflowRunQueryHandler(IWorkflowService service, IRunNodeOutputInflater inflater, ICurrentTeam currentTeam)
+    public GetWorkflowRunQueryHandler(IWorkflowService service, IRunNodeOutputInflater inflater, ICurrentTeam currentTeam, IProviderRemedyService remedies)
     {
         _service = service;
         _inflater = inflater;
         _currentTeam = currentTeam;
+        _remedies = remedies;
     }
 
     public async Task<WorkflowRunDetail?> Handle(GetWorkflowRunQuery request, CancellationToken cancellationToken)
@@ -33,6 +36,11 @@ public sealed class GetWorkflowRunQueryHandler : IRequestHandler<GetWorkflowRunQ
 
         var run = await _service.GetRunAsync(request.RunId, teamId, cancellationToken).ConfigureAwait(false);
 
-        return run == null ? null : await _inflater.InflateAsync(run, teamId, cancellationToken).ConfigureAwait(false);
+        if (run == null) return null;
+
+        var detail = await _inflater.InflateAsync(run, teamId, cancellationToken).ConfigureAwait(false);
+
+        // What is wrong with a provider connection the run failed on, and what THIS caller can do about it — only a finished run has one.
+        return WorkflowRunState.IsTerminal(detail.Status) ? detail with { Remedy = await _remedies.GetForRunAsync(detail.Id, teamId, cancellationToken).ConfigureAwait(false) } : detail;
     }
 }

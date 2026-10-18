@@ -105,7 +105,7 @@ public sealed class GitCreateIssueNode : INodeRuntime
         // node failure. Provider scope / permission / validation failures map to actionable text.
         catch (InvalidOperationException ex) { return NodeResult.Fail(ex.Message); }
         catch (ProviderInsufficientScopeException ex) { return NodeResult.Fail(DescribeWriteFailure(ex)); }
-        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex)); }
+        catch (ProviderApiException ex) { return NodeResult.Fail(DescribeWriteFailure(ex), ex); }
 
         context.Logger.LogInformation("Created issue #{Num} on repo {RepoId}", issue.Number, repoId);
 

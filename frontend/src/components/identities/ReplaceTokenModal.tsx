@@ -8,7 +8,7 @@ import { useReplaceCredentialToken } from "@/hooks/use-credentials";
 
 interface ReplaceTokenModalProps {
   /** The credential whose token is replaced. It keeps its id, so everything bound through it keeps working. */
-  credential: CredentialSummary;
+  credential: Pick<CredentialSummary, "id" | "displayName">;
   /** Human label for the dialog header, e.g. "GitLab · gitlab.com". */
   providerLabel: string;
   onClose: () => void;

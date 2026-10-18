@@ -1,11 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { useMemo, useState } from "react";
 
 import { ApiError } from "@/api/request";
 import type { CredentialSummary, ProviderInstanceSummary, ProviderKind, RepositorySummary } from "@/api/types";
-import { useAlert, useConfirm } from "@/components/dialog";
-import { useCredentials, useProviderInstances } from "@/hooks/use-credentials";
-import { useRelinkRepositoryCredential, useRepositories, useUnbindRepository } from "@/hooks/use-repositories";
+import { useConfirm } from "@/components/dialog";
+import { ConnectionIssueChip, RepositoryConnectionFix } from "@/components/remedy/RepositoryConnectionIssue";
+import { useRepositoryConnectionIssues } from "@/hooks/use-repository-connection-issues";
+import { useProviderInstances } from "@/hooks/use-credentials";
+import { useRepositories, useUnbindRepository } from "@/hooks/use-repositories";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { credentialOwnershipLabel } from "@/lib/credentialOrdering";
 
@@ -89,16 +90,15 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
 
   const repositories = useRepositories();
   const instances = useProviderInstances();
-  const credentials = useCredentials();
+  const connection = useRepositoryConnectionIssues();
   const unbind = useUnbindRepository();
   const confirm = useConfirm();
-  // Adding (a bind), unbinding and re-linking a repository all take repos.manage on the server. Without it the
-  // controls are absent rather than present-and-refused; the Error badge still says the repository needs a credential.
+  // Adding (a bind) and unbinding a repository take repos.manage on the server. Without it the controls are absent rather than
+  // present-and-refused; the connection chip still says what is wrong, and the fix beside it offers only what the caller may do.
   const mayManageRepos = useTeamPermissions().can(TeamPermissions.ReposManage);
 
   const instanceById = useMemo(() => new Map((instances.data ?? []).map(i => [i.id, i])), [instances.data]);
-  const credentialById = useMemo(() => new Map((credentials.data ?? []).map(c => [c.id, c])), [credentials.data]);
-  const allCredentials = credentials.data ?? [];
+  const credentialById = connection.credentialById;
 
   const askUnbind = async (r: RepositorySummary) => {
     const ok = await confirm({
@@ -112,6 +112,8 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
   };
 
   const rows = repositories.data ?? [];
+  // How many of the team's repositories cannot authenticate right now — the number a person scanning the page needs before any row.
+  const brokenCount = rows.filter(r => connection.issueOf(r) !== null).length;
 
   const filtered = rows.filter(r => {
     const instance = instanceById.get(r.providerInstanceId);
@@ -198,6 +200,12 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
       </div>
 
       <div className="ct-body">
+        {brokenCount > 0 && (
+          <div className="cn-banner cn-banner-warn" role="status" style={{ margin: "16px 16px 0" }}>
+            <div className="cn-banner-h">{brokenCount === 1 ? "1 repository needs a credential" : `${brokenCount} repositories need a credential`}</div>
+            <div className="cn-banner-p">Their credential was refused, disconnected or retired, so runs and webhooks through {brokenCount === 1 ? "it" : "them"} fail. Each one below says how to fix it.</div>
+          </div>
+        )}
         {repositories.isLoading && (
           <div className="ct-empty"><div className="ct-empty-h">Loading…</div></div>
         )}
@@ -224,10 +232,12 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
               {filtered.map(r => {
                 const instance = instanceById.get(r.providerInstanceId);
                 const credential = r.credentialId ? credentialById.get(r.credentialId) : undefined;
+                const issue = connection.issueOf(r);
                 return (
                   <tr
                     key={r.id}
                     data-status={r.status.toLowerCase()}
+                    data-issue={issue ? issue.kind : undefined}
                     onClick={() => onOpenRepo(r.fullPath)}
                   >
                     <td>
@@ -236,7 +246,7 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
                         <div className="repo-info">
                           <div className="repo-name">
                             {r.name}
-                            <RepoStatusBadge status={r.status} lastError={r.lastError ?? null} />
+                            {issue ? <ConnectionIssueChip issue={issue} /> : <RepoStatusBadge status={r.status} lastError={r.lastError ?? null} />}
                           </div>
                           <div className="repo-path">
                             <span>{r.fullPath}</span>
@@ -248,16 +258,11 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
                               {r.visibility.toLowerCase()}
                             </span>
                           </div>
-                          {/* Error-state CTA — always visible (not hover-only) because a broken
-                              repo needs a clear, discoverable fix. The action sits on the row's
-                              second line so it can't be missed even at a glance. */}
-                          {r.status === "Error" && mayManageRepos && (
-                            <RepoCredentialIssueAction
-                              repository={r}
-                              allCredentials={allCredentials}
-                              onConnectNew={() => setConnectOpen(true)}
-                            />
-                          )}
+                          {/* A broken connection's way out — always visible (not hover-only) because a broken repo needs a clear,
+                              discoverable fix, and shown for ANY repository whose credential is not healthy, not only the ones
+                              already flipped to Error: a repository whose credential was refused or disconnected stays "Active" and
+                              fails every run until someone looks. */}
+                          {issue && <RepositoryConnectionFix repository={r} issue={issue} onConnectNew={() => setConnectOpen(true)} />}
                         </div>
                       </div>
                     </td>
@@ -276,9 +281,8 @@ export function RepositoryListPage({ tab, query, onTabChange, onQueryChange, onO
                     <td className="synced">{formatRelative(r.lastEventDate ?? r.createdDate)}</td>
                     <td className="col-right">
                       <span className="row-act">
-                        {/* Hover-only toolbar is for normal-state ops (Open / Unbind). The
-                            re-link affordance was moved out — see RepoCredentialIssueAction
-                            on the row's name cell, which is always visible on Error rows. */}
+                        {/* Hover-only toolbar is for normal-state ops (Open / Unbind). The fix for a broken connection is not
+                            here — see RepositoryConnectionFix on the row's name cell, which is always visible. */}
                         <button title="Open in provider" onClick={e => { e.stopPropagation(); window.open(r.webUrl, "_blank", "noopener"); }}>
                           <Ic.ArrowOut size={14} />
                         </button>
@@ -333,7 +337,7 @@ function formatRelative(iso?: string | null) {
 /**
  * Inline status pill next to the repo name. Active = nothing shown. Other statuses get a
  * compact label chip. For Error specifically, the chip is PURELY informational here — the
- * action lives in RepoCredentialIssueAction below the URL, which is always visible and
+ * action lives in RepositoryConnectionFix below the URL, which is always visible and
  * can't be missed. Keeping the chip + action separate stops the chip from over-promising
  * interactivity at every screen size.
  */
@@ -357,135 +361,6 @@ function RepoStatusBadge({ status, lastError }: { status: RepositorySummary["sta
       {status === "Error" || status === "Unreachable" ? <Ic.Triangle size={10} /> : null}
       {labelByStatus[status]}
     </span>
-  );
-}
-
-/**
- * Always-visible recovery affordance for Error-state rows. Sits inline on the row's
- * second line so the user sees it the instant the table loads — no hover discoverability
- * problem like the old toolbar-icon design had.
- *
- * Two click destinations depending on whether there's a candidate credential:
- *   • At least one active credential of the same provider → opens the picker popover.
- *   • Zero candidates → opens the picker with a "Connect new credential" CTA that
- *     opens the Providers modal (via onConnectNew). Avoids dead-ending the user.
- *
- * Portal'd popover with flip-up positioning, same recipe as the kebab in the provider
- * list — keeps the menu visible even on the last row near the table edge.
- */
-function RepoCredentialIssueAction({
-  repository,
-  allCredentials,
-  onConnectNew,
-}: {
-  repository: RepositorySummary;
-  allCredentials: CredentialSummary[];
-  onConnectNew: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const [pos, setPos] = useState<{ top: number; left: number } | null>(null);
-  const triggerRef = useRef<HTMLButtonElement>(null);
-  const relink = useRelinkRepositoryCredential();
-  const alert = useAlert();
-
-  const candidates = useMemo(() =>
-    allCredentials.filter(c =>
-      c.providerInstanceId === repository.providerInstanceId
-      && c.status === "Active"
-      && c.id !== repository.credentialId,
-    ),
-  [allCredentials, repository.providerInstanceId, repository.credentialId]);
-
-  useEffect(() => {
-    if (!open || !triggerRef.current) return;
-    const POP_HEIGHT = Math.max(80, 48 + candidates.length * 36);
-    const POP_GAP = 6;
-    const rect = triggerRef.current.getBoundingClientRect();
-    const spaceBelow = window.innerHeight - rect.bottom;
-    const flipUp = spaceBelow < POP_HEIGHT + POP_GAP + 16;
-    setPos({
-      top: flipUp ? rect.top - POP_HEIGHT - POP_GAP : rect.bottom + POP_GAP,
-      left: rect.left,
-    });
-  }, [open, candidates.length]);
-
-  useEffect(() => {
-    if (!open) return;
-    const onClick = (e: MouseEvent) => {
-      const t = e.target as HTMLElement;
-      if (!t.closest(".relink-trigger") && !t.closest(".relink-pop")) setOpen(false);
-    };
-    const onScroll = () => setOpen(false);
-    window.addEventListener("click", onClick);
-    window.addEventListener("scroll", onScroll, true);
-    return () => {
-      window.removeEventListener("click", onClick);
-      window.removeEventListener("scroll", onScroll, true);
-    };
-  }, [open]);
-
-  const pick = async (credentialId: string) => {
-    setOpen(false);
-    try {
-      await relink.mutateAsync({ repositoryId: repository.id, credentialId });
-    } catch (err) {
-      await alert({
-        title: "Couldn't re-link credential",
-        message: err instanceof Error ? err.message : "Unexpected error.",
-        variant: "error",
-      });
-    }
-  };
-
-  const connectNew = () => {
-    setOpen(false);
-    onConnectNew();
-  };
-
-  const hasCandidates = candidates.length > 0;
-
-  return (
-    <div className="repo-fix">
-      <button
-        ref={triggerRef}
-        className="repo-fix-cta relink-trigger"
-        onClick={e => { e.stopPropagation(); setOpen(o => !o); }}
-        disabled={relink.isPending}
-      >
-        <Ic.Link size={11} />
-        {relink.isPending ? "Re-linking…" : hasCandidates ? "Re-link credential" : "Connect a credential to fix"}
-      </button>
-      {open && pos && createPortal(
-        <div
-          className="cn-row-pop relink-pop"
-          style={{ position: "fixed", top: pos.top, left: pos.left, right: "auto" }}
-          onClick={e => e.stopPropagation()}
-        >
-          <div className="relink-pop-head">
-            {hasCandidates ? "Re-link to credential" : "No active credential"}
-          </div>
-          {hasCandidates ? (
-            candidates.map(c => (
-              <button key={c.id} className="sb-pop-item" onClick={() => void pick(c.id)}>
-                <span className="relink-pop-name">{c.displayName}</span>
-                {c.ownerUserName && <span className="relink-pop-owner">{c.ownerUserName}</span>}
-              </button>
-            ))
-          ) : (
-            <>
-              <div className="relink-pop-empty">
-                No other active credentials for this provider. Connect one from Providers, then come
-                back and pick it here.
-              </div>
-              <button className="sb-pop-item" onClick={connectNew}>
-                <Ic.Plus size={12} /> Open Providers…
-              </button>
-            </>
-          )}
-        </div>,
-        document.body,
-      )}
-    </div>
   );
 }
 

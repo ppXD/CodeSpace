@@ -404,6 +404,11 @@ export interface DiagnosticBlock extends RoomBlockBase {
   text: string;
   actions?: RoomAction[] | null;
   rawDetail?: string | null;
+  /**
+   * The code of the provider failure the run recorded — a connection disconnected, refused or redirecting. Static, so it is
+   * safe in the cached turn; the card it asks for (what to do, and who may) is read live from the run's remedy.
+   */
+  failureCode?: string | null;
 }
 export interface DecisionBlock extends RoomBlockBase {
   type: "decision";

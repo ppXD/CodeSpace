@@ -1681,11 +1681,14 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .cn-cred { display: flex; flex-direction: column; gap: 7px; padding: 8px 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
 /* Top line: method · since · Disconnect (pinned right). Capability warnings, if any, drop to
    their own wrapping line below (.cn-cap-warns) so they never crowd or overflow this line. */
-.cn-cred-main { display: flex; align-items: center; gap: 10px; }
+/* Wraps: a credential row now carries its health chip, how many repositories are bound through it, and up to three actions. The
+   first action (margin-left:auto) stays pinned right; the rest follow it. */
+.cn-cred-main { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 10px; }
 .cn-cred-method { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; font-weight: 600; color: var(--ink-2); white-space: nowrap; }
 .cn-cred-method svg { color: var(--muted); }
 .cn-cred-since { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
-.cn-cred-x { margin-left: auto; flex-shrink: 0; height: 28px; padding: 0 10px; font-size: 12px; }
+.cn-cred-x { flex-shrink: 0; height: 28px; padding: 0 10px; font-size: 12px; }
+.cn-cred-main .cn-cred-x:first-of-type { margin-left: auto; }
 /* Capability warnings — a wrapping line listing what this token CAN'T do. A leading amber label
    ("Missing access") explains the chips; the row wraps freely so two or six warnings both fit
    without overflowing the credential card. */
@@ -1755,6 +1758,7 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 /* Inline status banners (info / error) */
 .cn-banner { padding: 12px 14px; border-radius: 10px; border: 1px solid var(--line); background: var(--panel); margin-bottom: 12px; }
 .cn-banner-err { background: #FCEDED; border-color: #F2C5C5; }
+.cn-banner-warn { background: #FBF1E2; border-color: #ECDAB5; }
 .cn-banner-h { font-size: 13px; font-weight: 600; color: var(--ink); margin-bottom: 2px; }
 .cn-banner-p { font-size: 12.5px; color: var(--muted); line-height: 1.5; }
 
@@ -1798,6 +1802,11 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .acs-root .tbl tr[data-status="error"] td:first-child {
   box-shadow: inset 3px 0 0 0 #B07A2E;   /* amber left accent */
 }
+/* A repository whose CREDENTIAL is broken reads the same as one already in Error — it fails every run just the same — even while
+   its status has not been flipped. data-issue is set by the connection join, not by status. */
+.acs-root .tbl tr[data-issue] td { background: rgba(176, 122, 46, 0.06); }
+.acs-root .tbl tr[data-issue]:hover td { background: rgba(176, 122, 46, 0.10); }
+.acs-root .tbl tr[data-issue] td:first-child { box-shadow: inset 3px 0 0 0 #B07A2E; }
 .acs-root .tbl tr[data-status="unreachable"] td { background: rgba(194, 69, 69, 0.05); }
 .acs-root .tbl tr[data-status="unreachable"]:hover td { background: rgba(194, 69, 69, 0.10); }
 .acs-root .tbl tr[data-status="unreachable"] td:first-child {
@@ -6523,6 +6532,42 @@ body.chat-resizing .acs-root .app { transition: none; }
 .room-err-attn { border-color: var(--rm-warn-line); background: var(--rm-warn-bg); }
 .room-err-attn .room-err-av { border-color: var(--rm-warn-line); color: var(--rm-warn); }
 .room-err-attn .room-err-raw { border-color: var(--rm-warn-line); color: var(--rm-warn); }
+
+/* provider remediation card — a failure on a git connection and the buttons that fix it. It IS the room's error card (same shell,
+   same attention palette) with its own rows: who/what the failure names, and who to ask when a button is not the viewer's. Once the
+   connection works again it turns to the room's good palette and leads with Re-run. */
+/* The room's semantic tokens are scoped to .room-room; this card also lives on the run detail page, the webhook tab and a repository's
+   header, where they are not defined. Declared here with the room's own values so it reads the same wherever it is mounted. */
+.rmd, .rmd-repo-issue {
+  --rm-good: #1F6B3F; --rm-good-bg: #E9F4EE; --rm-good-line: #C2E0CF;
+  --rm-warn: #A8590E; --rm-warn-bg: #FBF0DF; --rm-warn-line: #EFDABC;
+  --rm-danger: #9E3535; --rm-err-bg: #FBEDED; --rm-err-line: #F0C9C9;
+}
+.rmd-subjects { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+.rmd-subject { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; background: #fff; font-size: 11.5px; line-height: 1.6; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rmd-subject[data-works="true"] { border-color: var(--rm-good-line); color: var(--rm-good); }
+.rmd-subject .cn-cred-owner { margin-left: 2px; }
+.rmd-ask { margin: 10px 0 0; font-size: 12px; line-height: 1.55; color: var(--ink-2); }
+.rmd-ask-list { margin: 3px 0 5px; padding-left: 18px; }
+.rmd-ask-list strong { font-weight: 600; color: var(--ink); }
+.repo-fix .rmd-ask { margin: 0; }
+.rmd-fixed { border-color: var(--rm-good-line); background: var(--rm-good-bg); }
+.rmd-fixed .room-err-av { border-color: var(--rm-good-line); color: var(--rm-good); }
+.rmd-repos { margin: 0 0 12px; padding: 0 0 0 18px; font-size: 12.5px; color: var(--ink-2); line-height: 1.7; }
+.rmd-candidates { display: flex; flex-direction: column; gap: 6px; }
+.rmd-candidate { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: background .12s, border-color .12s; }
+.rmd-candidate:hover:not(:disabled) { background: var(--panel-2); border-color: var(--line-2); }
+.rmd-candidate:disabled { opacity: .6; cursor: default; }
+.rmd-candidate-main { display: inline-flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.rmd-candidate-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rmd-candidate-go { flex: none; font-size: 12px; color: var(--accent); font-weight: 500; }
+/* The repository page's connection row, above the tabs: chip, the sentence behind it, then the fixes. */
+.rmd-repo-issue { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 12px 0 0; padding: 9px 12px; border: 1px solid var(--rm-warn-line); border-radius: 10px; background: var(--rm-warn-bg); font-size: 12.5px; color: var(--ink-2); }
+.rmd-repo-issue-text { flex: 1 1 260px; min-width: 0; line-height: 1.5; }
+.rmd-repo-issue .repo-fix { margin-top: 0; display: flex; gap: 6px; flex-wrap: wrap; }
+.repo-fix { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+/* A refused delivery's remedy, inside the webhook tab's list of refusals. */
+.rmd-delivery-fix { margin-top: 10px; }
 
 /* buttons (turn footer + error remediation) */
 .room-btn, .room-btn-primary, .room-btn-ghost { display: inline-flex; align-items: center; gap: 6px; height: 30px; padding: 0 13px; border-radius: 8px; font: inherit; font-size: 12.5px; cursor: pointer; }
