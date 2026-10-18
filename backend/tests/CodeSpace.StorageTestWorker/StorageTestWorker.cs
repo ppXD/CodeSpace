@@ -13,6 +13,7 @@ public static class StorageTestWorker
     {
         if (args is ["log-completion-audit", var requestJson]) return await LogCompletionAuditWorker.RunAsync(requestJson).ConfigureAwait(false);
         if (args is [EgressSubnetReservationWorker.Mode, var spoolRoot, var count]) return EgressSubnetReservationWorker.Run(spoolRoot, int.Parse(count));
+        if (args is [OAuthRefreshPodWorker.Mode, var connectionString, var keysDirectory, var credentialId, var callers, var build]) return await OAuthRefreshPodWorker.RunAsync(connectionString, keysDirectory, Guid.Parse(credentialId), int.Parse(callers), Enum.Parse<PodBuild>(build)).ConfigureAwait(false);
         if (args.Length != 4) throw new ArgumentException("Expected root, object key, mode and payload byte.");
         var (root, key, mode, payloadByte) = (args[0], args[1], args[2], byte.Parse(args[3]));
 

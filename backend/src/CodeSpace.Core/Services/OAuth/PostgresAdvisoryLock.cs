@@ -6,9 +6,15 @@ namespace CodeSpace.Core.Services.OAuth;
 
 /// <summary>
 /// Postgres advisory lock. Holds a dedicated connection for the duration of the lock — the
-/// lock is session-scoped, so it auto-releases on connection close (covers process-crash
-/// recovery). DisposeAsync issues an explicit pg_advisory_unlock so the connection returns
-/// to the pool ready to be reused.
+/// lock is session-scoped, so it auto-releases when the session ends (covers process-crash
+/// recovery). DisposeAsync issues an explicit pg_advisory_unlock and then closes the connection.
+///
+/// <para>That connection is never pooled. Disposing a pooled connection only hands it back to the pool, still holding
+/// any lock it holds, and a lock acquired the instant its caller was cancelled — the webhook path gives up at five
+/// seconds — would sit on an idle pooled connection until the pool pruned it, queueing every later caller for that key
+/// behind a handle nobody owns. A connection of its own makes closing it what ends the session, so the server releases
+/// the lock however the acquire or the unlock went. Multiplexing, which requires pooling, is turned off with it: the
+/// configured string is otherwise used as it is.</para>
 /// </summary>
 public sealed class PostgresAdvisoryLock : ICrossProcessLock, IScopedDependency
 {
@@ -18,7 +24,7 @@ public sealed class PostgresAdvisoryLock : ICrossProcessLock, IScopedDependency
 
     public async Task<IAsyncDisposable> AcquireAsync(long key, CancellationToken cancellationToken)
     {
-        var conn = new NpgsqlConnection(_connectionString.Value);
+        var conn = new NpgsqlConnection(SessionConnectionString());
         await conn.OpenAsync(cancellationToken).ConfigureAwait(false);
 
         try
@@ -36,6 +42,9 @@ public sealed class PostgresAdvisoryLock : ICrossProcessLock, IScopedDependency
 
         return new Handle(conn, key);
     }
+
+    /// <summary>Multiplexing needs the pool this session must not use, so a deployed string that sets it would otherwise fail every acquire.</summary>
+    private string SessionConnectionString() => new NpgsqlConnectionStringBuilder(_connectionString.Value) { Pooling = false, Multiplexing = false }.ConnectionString;
 
     private sealed class Handle : IAsyncDisposable
     {
