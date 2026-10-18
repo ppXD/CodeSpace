@@ -17,15 +17,12 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryMemberStanding
 
     public async Task<PullRequestAuthorAssociation> GetMemberStandingAsync(ProviderContext context, RemoteRepository repository, string userExternalId, CancellationToken cancellationToken)
     {
-        var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
-        var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
+        var (host, credential) = await ResolveCredentialAsync(context, cancellationToken).ConfigureAwait(false);
         var url = $"{host.TrimEnd('/')}/api/v4/projects/{Uri.EscapeDataString(repository.ExternalId)}/members/all/{Uri.EscapeDataString(userExternalId)}";
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {auth.Token}");
-        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", auth.Token);
 
-        using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+        using var response = await GitLabHttp.SendAsync(request, credential, cancellationToken).ConfigureAwait(false);
 
         if ((int)response.StatusCode == 404) return PullRequestAuthorAssociation.None;
         if (!response.IsSuccessStatusCode) return PullRequestAuthorAssociation.Unknown;

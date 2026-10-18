@@ -62,6 +62,19 @@ public static class CredentialUrl
         return Uri.Compare(a, b, UriComponents.Scheme | UriComponents.Host | UriComponents.StrongPort, UriFormat.SafeUnescaped, StringComparison.OrdinalIgnoreCase) == 0;
     }
 
+    /// <summary>
+    /// Whether <paramref name="next"/> is the same endpoint as <paramref name="stored"/> with its scheme moved from http to
+    /// https and nothing else: the same host (case aside) and the same port — each scheme's own default (80 then 443), or one
+    /// explicit port both spell. The one change of endpoint that sends a key nowhere new: to the same host, over TLS. Another
+    /// host (an alias included), another port, a downgrade and a non-http(s) value are all something else.
+    /// </summary>
+    public static bool IsHttpsUpgrade(string? stored, string? next)
+    {
+        if (HttpUri(stored) is not { Scheme: "http" } a || HttpUri(next) is not { Scheme: "https" } b) return false;
+
+        return string.Equals(a.IdnHost, b.IdnHost, StringComparison.OrdinalIgnoreCase) && (a.IsDefaultPort ? b.IsDefaultPort : !b.IsDefaultPort && a.Port == b.Port);
+    }
+
     /// <summary>The endpoint alone — <c>scheme://host:port</c>, never userinfo, path or query — for a log line about where a key is sent.</summary>
     public static string Endpoint(string? url)
     {

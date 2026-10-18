@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Agents.Sandbox.Runners;
 using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
 
 namespace CodeSpace.UnitTests.Agents;
@@ -178,7 +179,7 @@ public class RunCommandCallerPostureTests
         // Each command gets a cgroup leaf of its own, beside the agent's, carrying the run's whole tier row. Two
         // commands a run starts at once would each get a full row; queued, they never hold more than one between them.
         var runner = new OverlapRunner(expectedConcurrency: 2);
-        var service = new RunCommandService(null!, null!, new SingleRunnerRegistry(runner), null!, LocalDefault(), new CallerCommandLanes());
+        var service = new RunCommandService(null!, null!, new SingleRunnerRegistry(runner), null!, LocalDefault(), new CallerCommandLanes(), NullLogger<RunCommandService>.Instance);
         var runId = Guid.NewGuid();
 
         await Task.WhenAll(service.RunAsync(AgentAsks(PostureOf(AgentAutonomyLevel.Trusted) with { RunId = runId }), CancellationToken.None), service.RunAsync(AgentAsks(PostureOf(AgentAutonomyLevel.Trusted) with { RunId = runId }), CancellationToken.None));
@@ -191,7 +192,7 @@ public class RunCommandCallerPostureTests
     public async Task Commands_from_two_runs_and_workflow_node_commands_are_not_queued_behind_each_other()
     {
         var runner = new OverlapRunner(expectedConcurrency: 3);
-        var service = new RunCommandService(null!, null!, new SingleRunnerRegistry(runner), null!, LocalDefault(), new CallerCommandLanes());
+        var service = new RunCommandService(null!, null!, new SingleRunnerRegistry(runner), null!, LocalDefault(), new CallerCommandLanes(), NullLogger<RunCommandService>.Instance);
 
         await Task.WhenAll(
             service.RunAsync(AgentAsks(PostureOf(AgentAutonomyLevel.Trusted) with { RunId = Guid.NewGuid() }), CancellationToken.None),

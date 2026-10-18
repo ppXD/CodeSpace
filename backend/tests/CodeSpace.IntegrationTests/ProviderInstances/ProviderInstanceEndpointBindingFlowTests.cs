@@ -51,6 +51,98 @@ public class ProviderInstanceEndpointBindingFlowTests
         row.DisplayName.ShouldBe("GitLab", "a refused edit changes nothing, the rest of it included");
     }
 
+    [Theory]
+    [InlineData("base", "http://gitlab.acme.test", "https://gitlab.acme.test")]
+    [InlineData("base", "http://gitlab.acme.test:8080", "https://gitlab.acme.test:8080")]
+    [InlineData("api", "http://gitlab.acme.test", "https://gitlab.acme.test")]
+    public async Task An_upgrade_of_http_to_https_on_the_same_host_is_allowed_while_a_token_is_connected(string field, string from, string to)
+    {
+        // The self-service fix for a base URL that redirects to https. Refused, it left the owner one way out — disconnecting
+        // every member's token, which strands every repository bound to one of them.
+        var (teamId, instanceId) = await SeedInstanceAsync(field == "base" ? from : Host, apiUrl: field == "api" ? from : null, withOAuth: true);
+        await SeedCredentialAsync(teamId, instanceId, CredentialStatus.Active);
+
+        await UpdateAsync(teamId, new UpdateProviderInstanceCommand { ProviderInstanceId = instanceId, BaseUrl = field == "base" ? to : null, ApiUrl = field == "api" ? to : null, OauthClientSecret = "" });
+
+        var row = await LoadAsync(instanceId);
+        (field == "base" ? row.BaseUrl : row.ApiUrl).ShouldBe(to);
+        using var verify = _fixture.BeginScope();
+        verify.Resolve<IPayloadEncryptor>().Decrypt(row.OauthClientSecretEnc!).ShouldBe("original-secret", "an upgrade of the same host needs no new client secret and replaces none");
+    }
+
+    [Theory]
+    [InlineData("base")]
+    [InlineData("api")]
+    public async Task An_upgrade_past_a_connected_token_is_saved_only_where_the_new_address_answers(string field)
+    {
+        // The carve-out sends a token nowhere new, but it can still land it on an address nothing serves over TLS — a host
+        // that does not do https, a certificate this server does not trust — and undoing that is itself an endpoint move,
+        // refused while the token is connected. So the new address must answer HTTP before the edit is kept.
+        var host = $"gitlab-{Guid.NewGuid():N}.acme.test";
+        var (teamId, instanceId) = await SeedInstanceAsync(field == "base" ? $"http://{host}" : Host, apiUrl: field == "api" ? $"http://{host}" : null, withOAuth: false);
+        await SeedCredentialAsync(teamId, instanceId, CredentialStatus.Active);
+        Probe().NeverAnswers($"https://{host}");
+
+        var refusal = await Should.ThrowAsync<ProviderEndpointUnreachableException>(() => UpdateAsync(teamId, new UpdateProviderInstanceCommand { ProviderInstanceId = instanceId, BaseUrl = field == "base" ? $"https://{host}" : null, ApiUrl = field == "api" ? $"https://{host}" : null }));
+
+        refusal.Origin.ShouldBe($"https://{host}");
+        var row = await LoadAsync(instanceId);
+        (field == "base" ? row.BaseUrl : row.ApiUrl).ShouldBe($"http://{host}", "a refused edit changes nothing: the owner is never stranded on an address nothing answers at");
+    }
+
+    [Fact]
+    public async Task An_upgrade_past_a_connected_token_asks_whether_the_new_address_answers_and_is_kept_when_it_does()
+    {
+        var host = $"gitlab-{Guid.NewGuid():N}.acme.test";
+        var (teamId, instanceId) = await SeedInstanceAsync($"http://{host}", apiUrl: null, withOAuth: false);
+        await SeedCredentialAsync(teamId, instanceId, CredentialStatus.Active);
+
+        await UpdateAsync(teamId, new UpdateProviderInstanceCommand { ProviderInstanceId = instanceId, BaseUrl = $"https://{host}" });
+
+        Probe().AskedToAnswer.ShouldContain($"https://{host}");
+        (await LoadAsync(instanceId)).BaseUrl.ShouldBe($"https://{host}");
+    }
+
+    [Fact]
+    public async Task An_upgrade_with_no_token_connected_is_not_asked_whether_it_answers_it_can_be_undone_freely()
+    {
+        var host = $"gitlab-{Guid.NewGuid():N}.acme.test";
+        var (teamId, instanceId) = await SeedInstanceAsync($"http://{host}", apiUrl: null, withOAuth: false);
+        Probe().NeverAnswers($"https://{host}");
+
+        await UpdateAsync(teamId, new UpdateProviderInstanceCommand { ProviderInstanceId = instanceId, BaseUrl = $"https://{host}" });
+
+        Probe().AskedToAnswer.ShouldNotContain($"https://{host}", "with nothing bound a mistaken address is one more edit away, so nothing is asked");
+        (await LoadAsync(instanceId)).BaseUrl.ShouldBe($"https://{host}");
+    }
+
+    [Fact]
+    public async Task An_edit_that_is_not_an_upgrade_is_not_asked_whether_it_answers()
+    {
+        var host = $"gitlab-{Guid.NewGuid():N}.acme.test";
+        var (teamId, instanceId) = await SeedInstanceAsync($"https://{host}", apiUrl: null, withOAuth: false);
+        await SeedCredentialAsync(teamId, instanceId, CredentialStatus.Active);
+
+        await UpdateAsync(teamId, new UpdateProviderInstanceCommand { ProviderInstanceId = instanceId, DisplayName = "renamed", BaseUrl = $"https://{host}/gitlab" });
+
+        Probe().AskedToAnswer.ShouldNotContain(a => a.Contains(host), "a rename, or a path on the same origin, relies on no carve-out");
+    }
+
+    [Theory]
+    [InlineData("http://gitlab.acme.test", "https://gitlab.acme.test:8443")]      // another port
+    [InlineData("http://gitlab.acme.test:8080", "https://gitlab.acme.test")]
+    [InlineData("http://gitlab.acme.test", "https://gitlab-alias.acme.test")]     // an alias host
+    [InlineData("https://gitlab.acme.test", "http://gitlab.acme.test")]           // a downgrade
+    public async Task An_upgrade_that_changes_anything_else_is_still_refused_while_a_token_is_connected(string from, string to)
+    {
+        var (teamId, instanceId) = await SeedInstanceAsync(from, apiUrl: null, withOAuth: false);
+        await SeedCredentialAsync(teamId, instanceId, CredentialStatus.Active);
+
+        await Should.ThrowAsync<ProviderEndpointCredentialsBoundException>(() => UpdateAsync(teamId, new UpdateProviderInstanceCommand { ProviderInstanceId = instanceId, BaseUrl = to }));
+
+        (await LoadAsync(instanceId)).BaseUrl.ShouldBe(from);
+    }
+
     [Fact]
     public async Task A_disconnected_token_does_not_bind_the_host()
     {
@@ -127,6 +219,13 @@ public class ProviderInstanceEndpointBindingFlowTests
 
         refusal.Message.ShouldNotContain("CANARY");
         (await LoadAsync(instanceId)).BaseUrl.ShouldBe(baseUrl);
+    }
+
+    private TestProviderEndpointProbe Probe()
+    {
+        using var scope = _fixture.BeginScope();
+
+        return scope.Resolve<TestProviderEndpointProbe>();
     }
 
     private async Task UpdateAsync(Guid teamId, UpdateProviderInstanceCommand command)

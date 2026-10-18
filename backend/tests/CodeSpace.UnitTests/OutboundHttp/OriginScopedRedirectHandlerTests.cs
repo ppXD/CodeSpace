@@ -117,9 +117,109 @@ public class OriginScopedRedirectHandlerTests
         inner.Hops.Count.ShouldBe(1);
     }
 
-    private static async Task<HttpResponseMessage> Send(ScriptedHandler inner, HttpRequestMessage request)
+    [Theory]
+    [InlineData(HttpStatusCode.MovedPermanently, "http://front.example.test/a", "http://other.example.test/b")]   // host changes
+    [InlineData(HttpStatusCode.Found, "http://front.example.test/a", "http://front.example.test:8080/b")]        // port changes
+    [InlineData(HttpStatusCode.Found, "http://front.example.test/a", "https://front.example.test/b")]            // http to https on the same host
+    [InlineData(HttpStatusCode.TemporaryRedirect, "http://front.example.test/a", "http://other.example.test/b")]
+    [InlineData(HttpStatusCode.Found, "https://front.example.test/a", "http://front.example.test/b")]            // a downgrade
+    public async Task A_caller_that_keeps_its_credential_to_one_origin_gets_a_cross_origin_redirect_back_unfollowed(HttpStatusCode status, string from, string to)
     {
-        using var invoker = new HttpMessageInvoker(new OriginScopedRedirectHandler { InnerHandler = inner });
+        // A git provider's token belongs to the one origin it was connected for. Followed anonymously a cross-origin hop
+        // is a 401 that reads as a bad token; returned, the caller can name the URL — and nothing was sent there.
+        var inner = new ScriptedHandler(Redirect(status, to), Ok());
+
+        using var response = await Send(inner, AuthoredRequest(HttpMethod.Get, from), followsCrossOrigin: false);
+
+        response.StatusCode.ShouldBe(status);
+        response.Headers.Location.ShouldBe(new Uri(to));
+        inner.Hops.Count.ShouldBe(1, "no request was made to the other origin");
+    }
+
+    [Fact]
+    public async Task A_caller_that_keeps_its_credential_to_one_origin_still_follows_a_same_origin_redirect_with_every_header()
+    {
+        var inner = new ScriptedHandler(Redirect(HttpStatusCode.MovedPermanently, "/v2/items"), Redirect(HttpStatusCode.Found, "http://API.example.test:80/v3/items"), Ok());
+
+        using var response = await Send(inner, AuthoredRequest(HttpMethod.Get, "http://api.example.test/v1/items"), followsCrossOrigin: false);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        inner.Hops.Select(h => h.Uri.AbsolutePath).ShouldBe(new[] { "/v1/items", "/v2/items", "/v3/items" }, "a spelling of the same origin (case, the default port) is the same origin");
+
+        foreach (var hop in inner.Hops) hop.Headers.Keys.ShouldBe(new[] { "Authorization", "Cookie", "PRIVATE-TOKEN", "X-Api-Key" }, ignoreOrder: true);
+    }
+
+    [Fact]
+    public async Task A_caller_that_keeps_its_credential_to_one_origin_re_sends_a_body_inside_the_origin()
+    {
+        var inner = new ScriptedHandler(Redirect(HttpStatusCode.TemporaryRedirect, "/next"), Ok());
+        var request = AuthoredRequest(HttpMethod.Post, "http://api.example.test/start");
+        request.Content = new StringContent("{\"a\":1}", Encoding.UTF8, "application/json");
+
+        using var response = await Send(inner, request, followsCrossOrigin: false);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        inner.Hops[1].Body.ShouldBe("{\"a\":1}");
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.MovedPermanently, "POST")]
+    [InlineData(HttpStatusCode.Found, "POST")]
+    [InlineData(HttpStatusCode.SeeOther, "POST")]
+    [InlineData(HttpStatusCode.MultipleChoices, "POST")]
+    [InlineData(HttpStatusCode.SeeOther, "PUT")]
+    [InlineData(HttpStatusCode.Found, "PUT")]               // a PUT is not turned into a GET, but the new request is the client's guess
+    [InlineData(HttpStatusCode.MovedPermanently, "DELETE")]
+    public async Task A_caller_whose_writes_are_answered_by_the_write_gets_a_rewriting_redirect_back_unfollowed(HttpStatusCode status, string method)
+    {
+        // A POST that a 301 or 302 turns into a GET would return that GET's answer as the write's: a markdown render, an
+        // unapprove, a hook create that "succeeded" because a list came back. Returned, the caller can say so.
+        var inner = new ScriptedHandler(Redirect(status, "/next"), Ok());
+        var request = AuthoredRequest(new HttpMethod(method), "http://api.example.test/start");
+        request.Content = new StringContent("{\"a\":1}", Encoding.UTF8, "application/json");
+
+        using var response = await Send(inner, request, repeatsWritesOnly: true);
+
+        response.StatusCode.ShouldBe(status);
+        inner.Hops.Count.ShouldBe(1, "the write was sent once, and nothing was sent after it");
+    }
+
+    [Theory]
+    [InlineData(HttpStatusCode.TemporaryRedirect, "POST")]
+    [InlineData(HttpStatusCode.PermanentRedirect, "POST")]
+    [InlineData(HttpStatusCode.TemporaryRedirect, "PUT")]
+    [InlineData(HttpStatusCode.MovedPermanently, "GET")]
+    [InlineData(HttpStatusCode.Found, "HEAD")]
+    [InlineData(HttpStatusCode.SeeOther, "GET")]
+    public async Task A_caller_whose_writes_are_answered_by_the_write_still_follows_a_redirect_that_repeats_the_request(HttpStatusCode status, string method)
+    {
+        // 307 and 308 mean "send this same request there"; a read is the same read at any status.
+        var inner = new ScriptedHandler(Redirect(status, "/next"), Ok());
+        var request = AuthoredRequest(new HttpMethod(method), "http://api.example.test/start");
+        if (method is "POST" or "PUT") request.Content = new StringContent("{\"a\":1}", Encoding.UTF8, "application/json");
+
+        using var response = await Send(inner, request, repeatsWritesOnly: true);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK);
+        inner.Hops[1].Method.ShouldBe(method);
+    }
+
+    [Fact]
+    public void By_default_a_write_may_be_rewritten_by_a_redirect()
+    {
+        new OriginScopedRedirectHandler().RepeatsWritesOnly.ShouldBeFalse();
+    }
+
+    [Fact]
+    public void By_default_a_cross_origin_redirect_is_followed()
+    {
+        // http.request has always followed them (dropping every header); the new mode is opt-in.
+        new OriginScopedRedirectHandler().FollowsCrossOrigin.ShouldBeTrue();
+    }
+
+    private static async Task<HttpResponseMessage> Send(ScriptedHandler inner, HttpRequestMessage request, bool followsCrossOrigin = true, bool repeatsWritesOnly = false)
+    {
+        using var invoker = new HttpMessageInvoker(new OriginScopedRedirectHandler { InnerHandler = inner, FollowsCrossOrigin = followsCrossOrigin, RepeatsWritesOnly = repeatsWritesOnly });
 
         return await invoker.SendAsync(request, CancellationToken.None);
     }

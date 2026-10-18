@@ -64,6 +64,29 @@ public class CredentialUrlTests
     [InlineData("gw.example:4000", "gw.example:4000", true)]
     public void SameEndpoint_compares_scheme_host_and_port(string? stored, string? next, bool expected) => CredentialUrl.SameEndpoint(stored, next).ShouldBe(expected);
 
+    [Theory]
+    [InlineData("http://gw.example", "https://gw.example", true)]                       // the default ports, 80 to 443
+    [InlineData("http://gw.example:80", "https://gw.example:443", true)]                // spelled out
+    [InlineData("http://gw.example:8080", "https://gw.example:8080", true)]             // the same explicit port
+    [InlineData("http://GW.example/v1", "https://gw.EXAMPLE/other?x=1", true)]          // host case, path and query are not part of it
+    [InlineData("http://a:b@gw.example", "https://gw.example", true)]
+    [InlineData("http://gw.example", "https://gw.example:8443", false)]                 // another port
+    [InlineData("http://gw.example:8080", "https://gw.example", false)]
+    [InlineData("http://gw.example:8080", "https://gw.example:8443", false)]
+    [InlineData("http://gw.example:443", "https://gw.example", false)]                  // an explicit 443 on http is not the https default
+    [InlineData("http://gw.example", "https://gw.example:80", false)]
+    [InlineData("https://gw.example", "http://gw.example", false)]                      // a downgrade
+    [InlineData("https://gw.example", "https://gw.example", false)]                     // not a move at all
+    [InlineData("http://gw.example", "http://gw.example", false)]
+    [InlineData("http://gw.example", "https://gw2.example", false)]                     // another host, an alias included
+    [InlineData("http://gw.example", "https://gw.example.evil.example", false)]
+    [InlineData("http://gw.example", "ftp://gw.example", false)]
+    [InlineData("gw.example:4000", "https://gw.example:4000", false)]                   // not an absolute http(s) URL
+    [InlineData(null, "https://gw.example", false)]
+    [InlineData("http://gw.example", null, false)]
+    [InlineData("", "", false)]
+    public void IsHttpsUpgrade_is_the_same_host_and_port_moved_from_http_to_https(string? stored, string? next, bool expected) => CredentialUrl.IsHttpsUpgrade(stored, next).ShouldBe(expected);
+
     private const string StoredWithCredentials = "https://svc:CANARY-PW-11@gw.example/v1?api-key=CANARY-Q-22&api-version=2024-01-01";
 
     [Theory]

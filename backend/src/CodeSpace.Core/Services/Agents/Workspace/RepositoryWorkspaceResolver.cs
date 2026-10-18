@@ -6,6 +6,7 @@ using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.Workspace;
 
@@ -28,11 +29,13 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IProviderAuthResolver _auth;
+    private readonly ILogger<RepositoryWorkspaceResolver> _logger;
 
-    public RepositoryWorkspaceResolver(CodeSpaceDbContext db, IProviderAuthResolver auth)
+    public RepositoryWorkspaceResolver(CodeSpaceDbContext db, IProviderAuthResolver auth, ILogger<RepositoryWorkspaceResolver> logger)
     {
         _db = db;
         _auth = auth;
+        _logger = logger;
     }
 
     public async Task<WorkspaceProvisionRequest?> ResolveAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
@@ -76,6 +79,8 @@ public sealed class RepositoryWorkspaceResolver : IAgentWorkspaceResolver, IScop
             throw new WorkspaceException($"Repository {repositoryId} has no HTTPS clone URL to clone from.");
 
         var token = await ResolveTokenAsync(repo, cancellationToken).ConfigureAwait(false);
+
+        CloneUrlAuthority.WarnWhenForeign(_logger, repo, credentialed: token is not null);
 
         var requestedRef = string.IsNullOrWhiteSpace(@ref) ? null : @ref;
 

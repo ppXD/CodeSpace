@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Providers.Auth;
 using CodeSpace.Core.Settings;
 using CodeSpace.Messages.Agents;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.Commands;
 
@@ -20,8 +21,9 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
     private readonly IWorkspaceProviderRegistry _workspaces;
     private readonly AgentDefaultRunnerSetting _defaultRunner;
     private readonly CallerCommandLanes _lanes;
+    private readonly ILogger<RunCommandService> _logger;
 
-    public RunCommandService(CodeSpaceDbContext db, IProviderAuthResolver auth, ISandboxRunnerRegistry runners, IWorkspaceProviderRegistry workspaces, AgentDefaultRunnerSetting defaultRunner, CallerCommandLanes lanes)
+    public RunCommandService(CodeSpaceDbContext db, IProviderAuthResolver auth, ISandboxRunnerRegistry runners, IWorkspaceProviderRegistry workspaces, AgentDefaultRunnerSetting defaultRunner, CallerCommandLanes lanes, ILogger<RunCommandService> logger)
     {
         _db = db;
         _auth = auth;
@@ -29,6 +31,7 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
         _workspaces = workspaces;
         _defaultRunner = defaultRunner;
         _lanes = lanes;
+        _logger = logger;
     }
 
     public async Task<SandboxResult> RunAsync(RunCommandRequest request, CancellationToken cancellationToken)
@@ -183,6 +186,8 @@ public sealed class RunCommandService : IRunCommandService, IScopedDependency
         EnsureRefWithinBinding(bound, request.Ref, repo);
 
         var token = await ResolveTokenAsync(repo, cancellationToken).ConfigureAwait(false);
+
+        CloneUrlAuthority.WarnWhenForeign(_logger, repo, credentialed: token is not null);
 
         return new WorkspaceRequest
         {

@@ -20,10 +20,32 @@ namespace CodeSpace.Core.Services.OutboundHttp;
 /// 300/301/302 after a POST, continue as a body-less GET; an https→http downgrade or a non-http scheme is not followed,
 /// and the 3xx is returned. Unlike it, at most <see cref="MaxRedirects"/> hops (the built-in allows 50) are followed,
 /// after which the last 3xx is returned as is.</para>
+///
+/// <para>A caller whose credential is its own and belongs to ONE origin — a git provider's client, its token attached to
+/// every request — sets <see cref="FollowsCrossOrigin"/> to false: a hop that would change origin is then not followed at
+/// all and the 3xx is returned for the caller to name, rather than followed anonymously into a 401 that reads as a bad token.
+/// A hop inside the origin is followed as above, with every header kept.</para>
+///
+/// <para>A caller whose answer to a write is the write's own answer sets <see cref="RepeatsWritesOnly"/>: a request that
+/// changes something (anything but GET or HEAD) is then followed only by a redirect that repeats it — 307 or 308 — and a
+/// 300, 301, 302 or 303 that would turn it into a GET, or leave its method and body to a client's guess, is returned as
+/// the 3xx. Followed, a POST's answer would be the answer to a GET it never sent.</para>
 /// </summary>
 public sealed class OriginScopedRedirectHandler : DelegatingHandler
 {
     public const int MaxRedirects = 10;
+
+    /// <summary>
+    /// Whether a hop that changes scheme, host or port is followed (without the request's headers) or returned as the 3xx
+    /// it is. True — the default, what an http.request workflow node has always had — follows it.
+    /// </summary>
+    public bool FollowsCrossOrigin { get; init; } = true;
+
+    /// <summary>
+    /// Whether a request that changes something is followed only by a 307 or 308, which repeat it. False — the default, as
+    /// every HTTP client does — also follows a 300, 301, 302 or 303 that turns a POST into a GET (and a 303 of any write).
+    /// </summary>
+    public bool RepeatsWritesOnly { get; init; }
 
     protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
     {
@@ -40,16 +62,20 @@ public sealed class OriginScopedRedirectHandler : DelegatingHandler
         return response;
     }
 
-    private static Uri? ReadFollowableTarget(HttpRequestMessage request, HttpResponseMessage response)
+    private Uri? ReadFollowableTarget(HttpRequestMessage request, HttpResponseMessage response)
     {
         if (!IsRedirect(response.StatusCode) || response.Headers.Location is not { } location) return null;
 
         var target = location.IsAbsoluteUri ? location : new Uri(request.RequestUri!, location);
 
-        return IsFollowable(request.RequestUri!, target) && !CarriesBodyAcrossOrigin(request, target, response.StatusCode) ? target : null;
+        return IsFollowable(request.RequestUri!, target) && (FollowsCrossOrigin || IsSameOrigin(request.RequestUri!, target)) && !CarriesBodyAcrossOrigin(request, target, response.StatusCode) && !(RepeatsWritesOnly && RewritesAWrite(request.Method, response.StatusCode)) ? target : null;
     }
 
-    private static bool IsRedirect(HttpStatusCode status) => (int)status is 300 or 301 or 302 or 303 or 307 or 308;
+    /// <summary>A redirect that is not a repeat of a request that changes something: a 300, 301, 302 or 303 answered to anything but a GET or a HEAD.</summary>
+    private static bool RewritesAWrite(HttpMethod method, HttpStatusCode status) => method != HttpMethod.Get && method != HttpMethod.Head && (int)status is 300 or 301 or 302 or 303;
+
+    /// <summary>The statuses that carry a <c>Location</c> to follow: 300, 301, 302, 303, 307 and 308.</summary>
+    internal static bool IsRedirect(HttpStatusCode status) => (int)status is 300 or 301 or 302 or 303 or 307 or 308;
 
     /// <summary>https anywhere, or http from http — never a downgrade, never another scheme.</summary>
     private static bool IsFollowable(Uri current, Uri target) => target.Scheme == Uri.UriSchemeHttps || (target.Scheme == Uri.UriSchemeHttp && current.Scheme == Uri.UriSchemeHttp);
@@ -65,7 +91,8 @@ public sealed class OriginScopedRedirectHandler : DelegatingHandler
         request.RequestUri = target;
     }
 
-    private static bool IsSameOrigin(Uri current, Uri target) => current.Scheme == target.Scheme && current.Port == target.Port && string.Equals(current.IdnHost, target.IdnHost, StringComparison.OrdinalIgnoreCase);
+    /// <summary>The same scheme, port and (case-insensitive, IDN-normalised) host — the origin a request's headers were written for.</summary>
+    internal static bool IsSameOrigin(Uri current, Uri target) => current.Scheme == target.Scheme && current.Port == target.Port && string.Equals(current.IdnHost, target.IdnHost, StringComparison.OrdinalIgnoreCase);
 
     private static bool ContinuesAsGet(HttpStatusCode status, HttpMethod method) => status == HttpStatusCode.SeeOther || ((int)status is 300 or 301 or 302 && method == HttpMethod.Post);
 

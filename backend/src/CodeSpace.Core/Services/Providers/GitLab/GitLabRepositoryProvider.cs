@@ -166,8 +166,8 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// </summary>
     public async Task<IReadOnlyList<RemotePullRequest>> ListPullRequestsAsync(ProviderContext context, RemoteRepository repository, PullRequestState? stateFilter, int page, int perPage, CancellationToken cancellationToken)
     {
-        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
-        var reader = new ProjectListReader(context.Instance, new NGitLab.Impl.API(new NGitLab.Impl.GitLabCredentials(host, token)).Get(), int.Parse(repository.ExternalId));
+        var (_, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var reader = new ProjectListReader(context.Instance, GitLabHttp.NewApi(host, credential).Get(), int.Parse(repository.ExternalId));
 
         // GitLab's `state=closed` is NOT the same as GitHub's `Closed` — it excludes
         // merged MRs, which on GitLab are a distinct state (`merged`), not closed-with-flag.
@@ -413,8 +413,8 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// </summary>
     public async Task<IReadOnlyList<RemoteIssue>> ListIssuesAsync(ProviderContext context, RemoteRepository repository, IssueState? stateFilter, int page, int perPage, CancellationToken cancellationToken)
     {
-        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
-        var reader = new ProjectListReader(context.Instance, new NGitLab.Impl.API(new NGitLab.Impl.GitLabCredentials(host, token)).Get(), int.Parse(repository.ExternalId));
+        var (_, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var reader = new ProjectListReader(context.Instance, GitLabHttp.NewApi(host, credential).Get(), int.Parse(repository.ExternalId));
 
         var issues = await ReadPageAsync<Issue>(reader, nameof(ListIssuesAsync), IssuePageUrl(reader.ProjectId, MapIssueStateFilterToGitLab(stateFilter), page, perPage), cancellationToken).ConfigureAwait(false);
 
@@ -472,11 +472,10 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// <summary>Issue counts via the REST <c>X-Total</c> header — the read_api-less fallback, mirroring <see cref="CountViaXTotalAsync"/> for MRs.</summary>
     private async Task<RemoteIssueCounts> CountIssuesViaXTotalAsync(ProviderContext context, int projectId, CancellationToken cancellationToken)
     {
-        var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
-        var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
+        var (host, credential) = await ResolveCredentialAsync(context, cancellationToken).ConfigureAwait(false);
 
-        var openTask = FetchStateCountAsync(host, projectId, "issues", "opened", auth, cancellationToken);
-        var closedTask = FetchStateCountAsync(host, projectId, "issues", "closed", auth, cancellationToken);
+        var openTask = FetchStateCountAsync(host, projectId, "issues", "opened", credential, cancellationToken);
+        var closedTask = FetchStateCountAsync(host, projectId, "issues", "closed", credential, cancellationToken);
 
         await Task.WhenAll(openTask, closedTask).ConfigureAwait(false);
 
@@ -730,14 +729,6 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         }, cancellationToken).ConfigureAwait(false);
     }
 
-    /// <summary>
-    /// Singleton HttpClient for the X-Total-header fallback path. .NET best practice — one
-    /// HttpClient per process (or per host) to avoid socket exhaustion. Per-call auth headers
-    /// are attached to each HttpRequestMessage individually so the same client can serve every
-    /// credential safely.
-    /// </summary>
-    private static readonly HttpClient _countsHttpClient = new();
-
     public async Task<RemotePullRequestCounts> CountPullRequestsAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {
         var client = await BuildClientAsync(context, cancellationToken).ConfigureAwait(false);
@@ -814,12 +805,11 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// </summary>
     private async Task<RemotePullRequestCounts> CountViaXTotalAsync(ProviderContext context, int projectId, CancellationToken cancellationToken)
     {
-        var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
-        var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
+        var (host, credential) = await ResolveCredentialAsync(context, cancellationToken).ConfigureAwait(false);
 
-        var openTask = FetchStateCountAsync(host, projectId, "merge_requests", "opened", auth, cancellationToken);
-        var closedTask = FetchStateCountAsync(host, projectId, "merge_requests", "closed", auth, cancellationToken);
-        var mergedTask = FetchStateCountAsync(host, projectId, "merge_requests", "merged", auth, cancellationToken);
+        var openTask = FetchStateCountAsync(host, projectId, "merge_requests", "opened", credential, cancellationToken);
+        var closedTask = FetchStateCountAsync(host, projectId, "merge_requests", "closed", credential, cancellationToken);
+        var mergedTask = FetchStateCountAsync(host, projectId, "merge_requests", "merged", credential, cancellationToken);
 
         await Task.WhenAll(openTask, closedTask, mergedTask).ConfigureAwait(false);
 
@@ -839,20 +829,14 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// with PerPage=1, parses the <c>X-Total</c> header. Returns 0 when the header is missing (GitLab's
     /// >10k pagination cutoff) or the response is non-success — counts should never error out the whole call.
     /// </summary>
-    private static async Task<int> FetchStateCountAsync(string host, int projectId, string resource, string state, ResolvedAuth auth, CancellationToken cancellationToken)
+    private static async Task<int> FetchStateCountAsync(string host, int projectId, string resource, string state, GitLabCredential credential, CancellationToken cancellationToken)
     {
         var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/{resource}?state={state}&per_page=1";
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
 
-        // GitLab accepts the OAuth Bearer token via the standard Authorization header
-        // and PATs via PRIVATE-TOKEN — both work for /merge_requests. Bearer is the
-        // common case (OAuth credentials are most users), PAT is the legacy fallback.
-        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {auth.Token}");
-        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", auth.Token);
-
         try
         {
-            using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            using var response = await GitLabHttp.SendAsync(request, credential, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return 0;
 
             if (response.Headers.TryGetValues("X-Total", out var values) && int.TryParse(values.FirstOrDefault(), out var total))
@@ -961,7 +945,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemotePullRequestReview> SubmitReviewAsync(ProviderContext context, RemoteRepository repository, int number, SubmitPullRequestReviewInput input, CancellationToken cancellationToken)
     {
-        var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
         var verdict = input.Verdict;
         var body = input.Body;
@@ -971,7 +955,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         // made OUTSIDE the resilience wrapper: it throws ALREADY-classified provider exceptions, which
         // the wrapper's duck-typed status-code mapper would otherwise double-wrap (and a 5xx re-retry).
         if (action == GitLabApprovalAction.Unapprove)
-            await UnapproveAsync(host, token, projectId, number, cancellationToken).ConfigureAwait(false);
+            await UnapproveAsync(host, credential, projectId, number, cancellationToken).ConfigureAwait(false);
 
         // approve → read the MR's current approval state first (GitLab's approve isn't idempotent).
         // Already-approved becomes a no-op; ineligible (author / low role) fails clearly outside the
@@ -1038,21 +1022,19 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// NGitLab 11.7 wraps approve but NOT unapprove (only <c>ResetApprovals</c>, which nukes EVERYONE's
     /// approvals — wrong semantic), so this mirrors the raw-HTTP pattern used by the scope probe.
     /// </summary>
-    private async Task UnapproveAsync(string host, string token, int projectId, int iid, CancellationToken cancellationToken)
+    private async Task UnapproveAsync(string host, GitLabCredential credential, int projectId, int iid, CancellationToken cancellationToken)
     {
         var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/merge_requests/{iid}/unapprove";
 
         using var request = new HttpRequestMessage(HttpMethod.Post, url);
-        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
-        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
 
-        using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+        using var response = await GitLabHttp.SendAsync(request, credential, cancellationToken).ConfigureAwait(false);
         var responseBody = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
         // The body becomes the failure's detail and scope hint, which reach external_call.failed and the node's error —
         // this raw call never passes the resilience translation that strikes an echo, so the token it presented is
         // struck here, before classification (which reads only the status and the scope tag).
-        var failure = ClassifyUnapproveResponse((int)response.StatusCode, CredentialNeedles.Strike(responseBody, [token]));
+        var failure = ClassifyUnapproveResponse((int)response.StatusCode, CredentialNeedles.Strike(responseBody, [credential.Token]));
         if (failure != null) throw failure;
     }
 
@@ -1186,17 +1168,14 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// </summary>
     private async Task<IReadOnlyList<string>?> TryFetchTokenScopesAsync(ProviderContext context, CancellationToken cancellationToken)
     {
-        var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
-        var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
+        var (host, credential) = await ResolveCredentialAsync(context, cancellationToken).ConfigureAwait(false);
         var url = $"{host.TrimEnd('/')}/api/v4/personal_access_tokens/self";
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {auth.Token}");
-        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", auth.Token);
 
         try
         {
-            using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+            using var response = await GitLabHttp.SendAsync(request, credential, cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return null;
 
             var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -1241,17 +1220,14 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         // decided by the gate against the node's declared capability — not here. The token's SCOPE
         // (api/read_api) is a separate axis the gate checks too, so this stays "what role does this person
         // hold", independent of which write they do.
-        var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
-        var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
+        var (host, credential) = await ResolveCredentialAsync(context, cancellationToken).ConfigureAwait(false);
         var url = $"{host.TrimEnd('/')}/api/v4/projects/{Uri.EscapeDataString(repository.ExternalId)}";
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {auth.Token}");
-        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", auth.Token);
 
         try
         {
-            using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseContentRead, cancellationToken).ConfigureAwait(false);
+            using var response = await GitLabHttp.SendAsync(request, credential, cancellationToken).ConfigureAwait(false);
             Serilog.Log.Information("[preflight-gitlab] GET projects/{Id} → HTTP {Status}", repository.ExternalId, (int)response.StatusCode);
 
             // Can't even see the project → not a member / no access at all.
@@ -1335,7 +1311,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemoteWebhook?> FindWebhookByCallbackUrlAsync(ProviderContext context, RemoteRepository repository, string callbackUrl, CancellationToken cancellationToken)
     {
-        var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
 
         try
@@ -1352,7 +1328,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             // Failing to LIST hooks fails the registration exactly as surely as failing to create
             // one, and for the same reasons (revoked token, no permission, instance down) — so the
             // operator gets the same evidence from either step.
-            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("GET", host, projectId, token, null), token), ex);
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, CaptureHookRequest("GET", host, projectId, credential, null), credential.Token), ex);
         }
     }
 
@@ -1382,7 +1358,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemoteWebhook> RegisterWebhookAsync(ProviderContext context, RemoteRepository repository, WebhookRegistration request, CancellationToken cancellationToken)
     {
-        var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
         var upsert = BuildHookUpsert(request);
         var payload = JsonSerializer.Serialize(upsert);
@@ -1397,19 +1373,17 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             return await _resilience.ExecuteNonIdempotentAsync(context.Instance, nameof(RegisterWebhookAsync), async _ =>
             {
                 using var message = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(payload, System.Text.Encoding.UTF8, "application/json") };
-                message.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
-                message.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
 
-                using var response = await _countsHttpClient.SendAsync(message, cancellationToken).ConfigureAwait(false);
+                using var response = await GitLabHttp.SendAsync(message, credential, cancellationToken).ConfigureAwait(false);
                 var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
 
                 if (!response.IsSuccessStatusCode)
                 {
                     // The refusal's body becomes last_error and the attempt's error, which any member can read: strike the token it may echo.
-                    var refusal = CredentialNeedles.Strike(body, [token]);
+                    var refusal = CredentialNeedles.Strike(body, [credential.Token]);
 
                     throw new ProviderWebhookRegistrationException(
-                        DescribeHookFailure(new HttpRequestException($"GitLab refused the hook with {(int)response.StatusCode}: {refusal}"), CaptureHookRequest("POST", host, projectId, token, payload), token),
+                        DescribeHookFailure(new HttpRequestException($"GitLab refused the hook with {(int)response.StatusCode}: {refusal}"), CaptureHookRequest("POST", host, projectId, credential, payload), credential.Token),
                         new HttpRequestException($"{(int)response.StatusCode}: {refusal}"));
                 }
 
@@ -1424,8 +1398,8 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
         }
         catch (Exception ex)
         {
-            var sent = CaptureHookRequest("POST", host, projectId, token, payload);
-            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, sent, token), ex);
+            var sent = CaptureHookRequest("POST", host, projectId, credential, payload);
+            throw new ProviderWebhookRegistrationException(DescribeHookFailure(ex, sent, credential.Token), ex);
         }
     }
 
@@ -1456,18 +1430,18 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     /// <summary>
     /// What we sent, for an operator to read months later. NGitLab hands back neither the URL it
     /// composed nor the payload it serialised, so both are reproduced here — verified against a
-    /// live instance: <c>{host}/api/v4/projects/{id}/hooks</c>, authenticated with a bearer token,
-    /// body serialised snake_case (which is why <see cref="_snakeCaseJson"/> reproduces it exactly).
+    /// live instance: <c>{host}/api/v4/projects/{id}/hooks</c>, authenticated in the header the credential's type names
+    /// (<see cref="GitLabCredential"/>), body serialised snake_case (which is why <see cref="_snakeCaseJson"/> reproduces it exactly).
     ///
-    /// <para>The credential is masked because <c>Authorization</c> is a credential header; the
+    /// <para>The credential is masked because <c>PRIVATE-TOKEN</c> and <c>Authorization</c> are credential headers; the
     /// webhook secret is masked because it rides in a field named <c>token</c>. Two independent
     /// rules in <see cref="ProviderCallCapture"/>, so neither secret depends on the other's rule.</para>
     /// </summary>
-    private static CapturedProviderRequest CaptureHookRequest(string method, string host, int projectId, string token, string? body)
+    private static CapturedProviderRequest CaptureHookRequest(string method, string host, int projectId, GitLabCredential credential, string? body)
     {
-        var headers = new Dictionary<string, string> { ["Authorization"] = $"Bearer {token}" };
+        var headers = new Dictionary<string, string> { [credential.HeaderName] = credential.HeaderValue };
 
-        return ProviderCallCapture.CaptureRedacted(method, $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/hooks", headers, body, new[] { token });
+        return ProviderCallCapture.CaptureRedacted(method, $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/hooks", headers, body, new[] { credential.Token });
     }
 
     /// <summary>
@@ -1607,37 +1581,35 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemoteCommitSummary?> GetLatestCommitAsync(ProviderContext context, RemoteRepository repository, string? path, string? reference, CancellationToken cancellationToken)
     {
-        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var (_, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
         var projectId = int.Parse(repository.ExternalId);
 
         return await _resilience.ExecuteAsync(context.Instance, nameof(GetLatestCommitAsync), async _ =>
-            await FetchLatestCommitAsync(host, token, projectId, gitRef, (path ?? string.Empty).Trim('/'), cancellationToken).ConfigureAwait(false),
+            await FetchLatestCommitAsync(host, credential, projectId, gitRef, (path ?? string.Empty).Trim('/'), cancellationToken).ConfigureAwait(false),
             cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyDictionary<string, RemoteCommitSummary>> ListPathCommitsAsync(ProviderContext context, RemoteRepository repository, IReadOnlyList<string> paths, string? reference, CancellationToken cancellationToken)
     {
-        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var (_, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var gitRef = string.IsNullOrWhiteSpace(reference) ? repository.DefaultBranch : reference;
         var projectId = int.Parse(repository.ExternalId);
 
         // One commit lookup per entry, bounded (cap 8) + best-effort (a path that fails is omitted).
         return await BoundedParallelMap.RunAsync<RemoteCommitSummary>(paths, 8,
-            (entryPath, ct) => FetchLatestCommitAsync(host, token, projectId, gitRef, entryPath.Trim('/'), ct),
+            (entryPath, ct) => FetchLatestCommitAsync(host, credential, projectId, gitRef, entryPath.Trim('/'), ct),
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<RemoteCommitSummary?> FetchLatestCommitAsync(string host, string token, int projectId, string gitRef, string path, CancellationToken cancellationToken)
+    private static async Task<RemoteCommitSummary?> FetchLatestCommitAsync(string host, GitLabCredential credential, int projectId, string gitRef, string path, CancellationToken cancellationToken)
     {
         var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/repository/commits?per_page=1&ref_name={Uri.EscapeDataString(gitRef)}";
         if (!string.IsNullOrEmpty(path)) url += $"&path={Uri.EscapeDataString(path)}";
 
         using var request = new HttpRequestMessage(HttpMethod.Get, url);
-        request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
-        request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
 
-        using var response = await _countsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+        using var response = await GitLabHttp.SendAsync(request, credential, cancellationToken).ConfigureAwait(false);
         if (!response.IsSuccessStatusCode) return null;
 
         var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -1662,7 +1634,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemoteRepositoryStats> GetStatsAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {
-        var (client, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var (client, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
 
         return await _resilience.ExecuteAsync(context.Instance, nameof(GetStatsAsync), async _ =>
@@ -1671,9 +1643,9 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             // stars/forks too. Branch/tag/release counts come from the X-Total header, best-effort.
             var project = await client.Projects.GetByIdAsync(projectId, new SingleProjectQuery { Statistics = true }).ConfigureAwait(false);
 
-            var branches = await CountResourceViaXTotalAsync(host, token, $"projects/{projectId}/repository/branches", cancellationToken).ConfigureAwait(false);
-            var tags = await CountResourceViaXTotalAsync(host, token, $"projects/{projectId}/repository/tags", cancellationToken).ConfigureAwait(false);
-            var releases = await CountResourceViaXTotalAsync(host, token, $"projects/{projectId}/releases", cancellationToken).ConfigureAwait(false);
+            var branches = await CountResourceViaXTotalAsync(host, credential, $"projects/{projectId}/repository/branches", cancellationToken).ConfigureAwait(false);
+            var tags = await CountResourceViaXTotalAsync(host, credential, $"projects/{projectId}/repository/tags", cancellationToken).ConfigureAwait(false);
+            var releases = await CountResourceViaXTotalAsync(host, credential, $"projects/{projectId}/releases", cancellationToken).ConfigureAwait(false);
 
             return new RemoteRepositoryStats
             {
@@ -1795,7 +1767,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<IReadOnlyList<RemoteLanguage>> GetLanguagesAsync(ProviderContext context, RemoteRepository repository, CancellationToken cancellationToken)
     {
-        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var (_, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
         var projectId = int.Parse(repository.ExternalId);
 
         return await _resilience.ExecuteAsync(context.Instance, nameof(GetLanguagesAsync), async _ =>
@@ -1803,10 +1775,8 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             // GitLab's /languages returns { "C#": 97.4, ... } — already percentages. Best-effort.
             var url = $"{host.TrimEnd('/')}/api/v4/projects/{projectId}/languages";
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
-            request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
 
-            using var response = await _countsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            using var response = await GitLabHttp.SendAsync(request, credential, cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return (IReadOnlyList<RemoteLanguage>)Array.Empty<RemoteLanguage>();
 
             var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -1816,16 +1786,14 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     }
 
     /// <summary>Item count for a paginated GitLab list via the X-Total header (per_page=1). Best-effort → null on any failure.</summary>
-    private static async Task<int?> CountResourceViaXTotalAsync(string host, string token, string path, CancellationToken cancellationToken)
+    private static async Task<int?> CountResourceViaXTotalAsync(string host, GitLabCredential credential, string path, CancellationToken cancellationToken)
     {
         try
         {
             var url = $"{host.TrimEnd('/')}/api/v4/{path}?per_page=1";
             using var request = new HttpRequestMessage(HttpMethod.Get, url);
-            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
-            request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
 
-            using var response = await _countsHttpClient.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+            using var response = await GitLabHttp.SendAsync(request, credential, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
             if (!response.IsSuccessStatusCode) return null;
 
             if (response.Headers.TryGetValues("X-Total", out var values) && int.TryParse(values.FirstOrDefault(), out var total))
@@ -1843,7 +1811,7 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
 
     public async Task<RemoteRenderedMarkdown> RenderMarkdownAsync(ProviderContext context, RemoteRepository repository, string markdown, CancellationToken cancellationToken)
     {
-        var (_, host, token) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
+        var (_, host, credential) = await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false);
 
         return await _resilience.ExecuteAsync(context.Instance, nameof(RenderMarkdownAsync), async _ =>
         {
@@ -1852,10 +1820,8 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
             var body = JsonSerializer.Serialize(new { text = markdown, gfm = true, project = repository.FullPath });
 
             using var request = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(body, System.Text.Encoding.UTF8, "application/json") };
-            request.Headers.TryAddWithoutValidation("Authorization", $"Bearer {token}");
-            request.Headers.TryAddWithoutValidation("PRIVATE-TOKEN", token);
 
-            using var response = await _countsHttpClient.SendAsync(request, cancellationToken).ConfigureAwait(false);
+            using var response = await GitLabHttp.SendAsync(request, credential, cancellationToken).ConfigureAwait(false);
             response.EnsureSuccessStatusCode();
 
             var json = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
@@ -1869,14 +1835,22 @@ public sealed partial class GitLabRepositoryProvider : IRepositoryCatalogCapabil
     private async Task<GitLabClient> BuildClientAsync(ProviderContext context, CancellationToken cancellationToken)
         => (await BuildAuthedAsync(context, cancellationToken).ConfigureAwait(false)).Client;
 
-    // Like BuildClientAsync but also surfaces the host + token for the raw /unapprove call NGitLab
-    // doesn't wrap. One auth resolve serves both (no double round-trip).
-    private async Task<(GitLabClient Client, string Host, string Token)> BuildAuthedAsync(ProviderContext context, CancellationToken cancellationToken)
+    // Like BuildClientAsync but also surfaces the host + credential for the raw calls NGitLab doesn't wrap.
+    // One auth resolve serves both (no double round-trip).
+    private async Task<(GitLabClient Client, string Host, GitLabCredential Credential)> BuildAuthedAsync(ProviderContext context, CancellationToken cancellationToken)
+    {
+        var (host, credential) = await ResolveCredentialAsync(context, cancellationToken).ConfigureAwait(false);
+
+        return (GitLabHttp.NewClient(host, credential), host, credential);
+    }
+
+    /// <summary>The host every call goes to (the API URL, else the base URL) and the credential to present there, in the header its type names.</summary>
+    private async Task<(string Host, GitLabCredential Credential)> ResolveCredentialAsync(ProviderContext context, CancellationToken cancellationToken)
     {
         var auth = await _authResolver.ResolveAsync(context, cancellationToken).ConfigureAwait(false);
         var host = string.IsNullOrWhiteSpace(context.Instance.ApiUrl) ? context.Instance.BaseUrl : context.Instance.ApiUrl;
 
-        return (new GitLabClient(host, auth.Token), host, auth.Token);
+        return (host, new GitLabCredential(auth.Token, context.Credential.AuthType));
     }
 
     private static RemoteRepository ToRemoteRepository(Project project) => new()
