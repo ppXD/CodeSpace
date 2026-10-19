@@ -76,6 +76,19 @@ Provider-credential tests share two more pieces, both in `CodeSpace.IntegrationT
   another node than the one that handled a provider failure has none; a standing lookup that got no answer blames nobody);
   `ProviderRemedyHttpE2ETests` pins the wire shape for an Owner, a Member and a Viewer. Those fixtures write the failure with
   the real `IRunRecordLogger` from the real exception through `ProviderFailureCapture`, never a hand-typed payload.
+- A provider failure inside a container (a `flow.map` branch, a `flow.loop` pass, either nested in the other) is carried onto the
+  container's own `node.failed` record, because the run's failure is the one the node that ended it recorded and that node is the
+  container. `ProviderFailureThroughTheEngineFlowTests.Containers.cs` drives the real engine through a map, a loop and both nestings against
+  the stub (the sentence each container writes is asserted untouched), and pins the choices that keep it honest: a `terminate` map answers for
+  the first failing branch by element order (not whichever finished first), a branch replayed from the ledger while a sibling was parked is
+  still the one that ended the map, a failure the body handled — or a `flow.try` caught — leaves nothing on a container that later failed on
+  something else, and a cell whose node worded its failure without a cause is traced through its own agent run, never a sibling's.
+  `CellFailureReaderFlowTests` pins the reader's boundary (the cell's newest record, then its last agent run; nothing outside the cell — not
+  another run of the same team either) and that the real rerun seeder carries a failed cell's failure into the fork it replays it in, from the
+  cell's own record or from the original run's agent run, and leaves a failure-less cell's record as it was. A map-branch rerun whose fork fails
+  again on the replayed failed branch answers with the original run's remedy, never the fresh branch's
+  (`ProviderFailureThroughTheEngineFlowTests.Rerun.cs`, and over HTTP in `ProviderFailureInAContainerHttpE2ETests`, which also pins what the run
+  detail and the lean remedy read answer, plus that a run recorded before containers carried the failure answers exactly as it did).
 - `RefreshPodHarness` — pods as real OS processes (`CodeSpace.StorageTestWorker`'s `oauth-refresh-pod` mode) running the
   production refresher, or the pinned previous build's (`StorageTestWorker/PreviousBuild`), against the fixture's Postgres.
   One process shares one refresh semaphore, so only separate processes exercise the cross-pod advisory lock.

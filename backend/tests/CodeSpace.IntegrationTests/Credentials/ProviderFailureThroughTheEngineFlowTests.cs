@@ -38,7 +38,7 @@ namespace CodeSpace.IntegrationTests.Credentials;
 /// <para>The one fake is GitLab, so the only thing between these tests and production is the provider's own answers.</para>
 [Collection(PostgresCollection.Name)]
 [Trait("Category", "Integration")]
-public class ProviderFailureThroughTheEngineFlowTests
+public partial class ProviderFailureThroughTheEngineFlowTests
 {
     private readonly PostgresFixture _fixture;
 
