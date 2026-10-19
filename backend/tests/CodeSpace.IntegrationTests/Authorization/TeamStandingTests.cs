@@ -68,6 +68,42 @@ public sealed class TeamStandingTests : IAsyncLifetime
         composed.ShouldBe(asked, $"{person}: the predicate a query composes answers exactly as the scalar ask does");
     }
 
+    [Theory]
+    [InlineData(Person.Member, TeamRole.Member)]
+    [InlineData(Person.InstanceAdminOutsideTheTeam, TeamRole.Owner)]
+    [InlineData(Person.InstanceAdminInTheTeam, TeamRole.Member)]   // acted ON, the row they hold is read before the role — the opposite of RoleHeldAsync, where someone ACTING stands as the Owner their role makes them
+    [InlineData(Person.InstanceAdminOutsideTheTeamWithTheRoleSwitchedOff, null)]
+    [InlineData(Person.ExInstanceAdminOutsideTheTeam, null)]
+    [InlineData(Person.DepartedMember, null)]
+    [InlineData(Person.AnotherTeamsMember, null)]
+    [InlineData(Person.NoAccount, null)]
+    public async Task The_role_a_person_is_acted_on_as_exists_exactly_when_they_stand_and_is_the_row_before_the_role(Person person, TeamRole? role)
+    {
+        var (teamId, userId) = await SeedAsync(person);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var actedOn = await TeamStanding.RoleActedOnAsync(db, teamId, userId, CancellationToken.None);
+        var stands = await TeamStanding.HeldAsync(db, teamId, userId, CancellationToken.None);
+
+        actedOn.ShouldBe(role, $"{person}");
+        (actedOn is not null).ShouldBe(stands, $"{person}: someone is acted on as a role exactly when they stand in a live team");
+    }
+
+    [Fact]
+    public async Task Many_people_are_read_in_one_ask_and_only_those_who_stand_are_named()
+    {
+        var (teamId, member) = await SeedAsync(Person.Member);
+        var (_, outsider) = await SeedAsync(Person.NoAccount);
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        (await TeamStanding.RolesActedOnAsync(db, teamId, new[] { member, outsider, Guid.NewGuid() }, CancellationToken.None)).ShouldBe(new Dictionary<Guid, TeamRole> { [member] = TeamRole.Member });
+        (await TeamStanding.RolesActedOnAsync(db, teamId, Array.Empty<Guid>(), CancellationToken.None)).ShouldBeEmpty();
+    }
+
     // ── World ─────────────────────────────────────────────────────────────────────
 
     private async Task<(Guid TeamId, Guid UserId)> SeedAsync(Person person)

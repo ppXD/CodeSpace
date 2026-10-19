@@ -390,9 +390,10 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
   // which role holds it.
   const { can } = useTeamPermissions();
   const mayAddProvider = can(TeamPermissions.ReposManage);
-  // Team tokens are nobody's own, so adding or revoking one takes credentials.manage, and so does starting an OAuth
+  // Team tokens are nobody's own, so adding or revoking one takes credentials.manage, and so does starting a NEW OAuth
   // connect (the server's init declares it) — unlike Disconnect on the Personal tab, which only ever lists the
-  // caller's own credentials, and "Use a token", which links a personal token: both stay theirs on membership alone.
+  // caller's own credentials, "Use a token", which links a personal token, and Reconnect, which re-authorizes one of those
+  // same credentials in place: all stay theirs on membership alone (the server's init passes a credential's own person).
   const mayManageCredentials = can(TeamPermissions.CredentialsManage);
   return (
     <>
@@ -451,7 +452,7 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
                     revokingId={revokingId}
                     errorMsg={errors[instance.id]}
                     onConnect={mayManageCredentials ? onConnect : null}
-                    onReconnect={mayManageCredentials ? onReconnect : null}
+                    onReconnect={onReconnect}
                     onReplaceToken={onReplaceToken}
                     onConnectPat={onConnectPat}
                     onDisconnect={onDisconnect}
@@ -506,8 +507,8 @@ interface ProviderRowProps {
   errorMsg: string | undefined;
   /** Null when the caller may not start an OAuth connect — the button is absent rather than present-and-refused. */
   onConnect: ((instance: ProviderInstanceSummary) => void) | null;
-  /** Null when the caller may not start an OAuth connect — Reconnect starts one, so it is absent too. */
-  onReconnect: ((instance: ProviderInstanceSummary, credential: CredentialSummary) => void) | null;
+  /** Reconnect re-authorizes one of the caller's own credentials in place, so it needs no more than membership — the row lists only theirs. */
+  onReconnect: (instance: ProviderInstanceSummary, credential: CredentialSummary) => void;
   onReplaceToken: (credential: CredentialSummary, instance: ProviderInstanceSummary) => void;
   onConnectPat: (instance: ProviderInstanceSummary) => void;
   onDisconnect: (credential: CredentialSummary) => void;
@@ -573,7 +574,7 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
                 <BoundRepositories credential={c} />
                 {/* Sign in again to the SAME credential (an OAuth sign-in), or paste a new token into it (a token): either way
                     it keeps its id, so the repositories bound through it keep working. */}
-                {c.authType === "OAuth" && instance.oauthEnabled && onReconnect && (
+                {c.authType === "OAuth" && instance.oauthEnabled && (
                   <button className="btn btn-ghost cn-cred-x" onClick={() => onReconnect(instance, c)} disabled={isConnecting}>
                     {isConnecting ? <><Ic.Clock size={13} /> …</> : "Reconnect"}
                   </button>

@@ -328,14 +328,14 @@ public partial class CredentialReauthorizationFlowTests
     }
 
     [Fact]
-    public async Task Starting_a_reconnect_takes_credentials_manage_whoever_the_owner_is()
+    public async Task Starting_a_reconnect_takes_credentials_manage_unless_the_credential_is_the_askers_own()
     {
-        // The start of any OAuth connect is the Admin's (the marker on the command); naming a credential does not lower it.
+        // The start of any OAuth connect is the Admin's (the marker on the command); naming a credential lowers it to the credential's
+        // own person — and to no one else, whatever their role (the owner's own start is pinned in the OwnerReconnect tests).
         using var gitlab = new GitLabDoorkeeperStub();
         var world = await SeedWorldAsync(gitlab).ConfigureAwait(false);
         var mayas = await SeedOAuthCredentialAsync(world, world.MayaId, "at-m", "rt-m").ConfigureAwait(false);
 
-        await Should.ThrowAsync<TenantAccessDeniedException>(() => InitAsync(world, world.MayaId, mayas)).ConfigureAwait(false);
         await Should.ThrowAsync<TenantAccessDeniedException>(() => InitAsync(world, world.ViewerId, mayas)).ConfigureAwait(false);
 
         (await CountPendingStatesAsync(world).ConfigureAwait(false)).ShouldBe(0);

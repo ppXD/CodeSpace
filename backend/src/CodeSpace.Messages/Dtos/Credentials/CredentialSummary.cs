@@ -35,6 +35,14 @@ public sealed record CredentialSummary
     /// <summary>Whole days until a static token expires at its provider; null for an OAuth credential (its access token renews itself) and for a token with no recorded expiry.</summary>
     public int? DaysToExpiry { get; init; }
 
+    /// <summary>
+    /// Whether the person asking may put this credential right IN PLACE — reconnect its sign-in, or replace its pasted token — decided by the rules the
+    /// endpoints behind those buttons apply, so a client shows the button exactly when the endpoint would accept the request: the credential's own person,
+    /// or <c>credentials.manage</c>, and for a sign-in also the reach over its person (an Admin cannot reconnect another Admin's or an Owner's). False when
+    /// its person has left the team. Null from a server that predates it: a client then falls back to what it can tell from the role.
+    /// </summary>
+    public bool? CallerMayRepair { get; init; }
+
     /// <summary>How many live repositories are bound through the credential — what a person reconnecting, replacing or disconnecting it needs to know is at stake. Zero from a server that predates it.</summary>
     public int BoundRepositoryCount { get; init; }
 }

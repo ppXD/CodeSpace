@@ -1,3 +1,4 @@
+using CodeSpace.Core.Authorization;
 using CodeSpace.Messages.Dtos.Credentials;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Failures;
@@ -28,6 +29,10 @@ public sealed partial class ProviderRemedyService
         public CredentialRow? Credential { get; set; }
 
         public string? OwnerName { get; set; }
+
+        /// <summary>Who the credential belongs to as the rules about acting on it read them: null when it belongs to no person, and a person who stands as no one when they left (<see cref="CredentialPerson"/>).</summary>
+        public CredentialPerson? Person { get; set; }
+
         public InstanceRow? Instance { get; set; }
 
         /// <summary>Credentials still presented through the instance — read only for a redirect, where it decides whether editing the address is accepted.</summary>

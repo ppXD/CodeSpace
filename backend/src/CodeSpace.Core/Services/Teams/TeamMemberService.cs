@@ -97,7 +97,8 @@ public sealed class TeamMemberService : ITeamMemberService, IScopedDependency
             throw new KeyNotFoundException("that person is not a member of this team");
 
         var actor = await _membership.ResolveRoleAsync(teamId, cancellationToken).ConfigureAwait(false);
-        var target = await ResolveStandingRoleAsync(teamId, userId, cancellationToken).ConfigureAwait(false);
+        var target = await TeamStanding.RoleActedOnAsync(_db, teamId, userId, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException("that person is not a member of this team");
 
         EnsureMayActOn(actor, target, isSelf: userId == RequireUser());
     }
@@ -257,18 +258,6 @@ public sealed class TeamMemberService : ITeamMemberService, IScopedDependency
 
     private async Task ShareLockMembershipAsync(Guid teamId, Guid userId, CancellationToken cancellationToken) =>
         await _db.Database.SqlQuery<int>($"SELECT 1 AS \"Value\" FROM team_membership WHERE team_id = {teamId} AND user_id = {userId} FOR KEY SHARE").ToListAsync(cancellationToken).ConfigureAwait(false);
-
-    /// <summary>
-    /// The rank a person with standing is acted on at: their membership's role, read as <see cref="ChangeRoleAsync"/> and
-    /// <see cref="RemoveAsync"/> read it; or, for someone who stands in the team without one — only an instance Admin can —
-    /// an Owner's, the rank <see cref="TeamMembershipResolver"/> gives that role in every team.
-    /// </summary>
-    private async Task<TeamRole> ResolveStandingRoleAsync(Guid teamId, Guid userId, CancellationToken cancellationToken)
-    {
-        var membership = await _db.TeamMembership.AsNoTracking().SingleOrDefaultAsync(m => m.TeamId == teamId && m.UserId == userId, cancellationToken).ConfigureAwait(false);
-
-        return membership?.Role ?? TeamRole.Owner;
-    }
 
     private async Task EnsureTeamLiveAsync(Guid teamId, CancellationToken cancellationToken)
     {

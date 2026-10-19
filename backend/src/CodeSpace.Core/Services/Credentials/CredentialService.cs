@@ -1,3 +1,4 @@
+using CodeSpace.Core.Authorization;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -35,9 +36,10 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
     private readonly ICredentialHealthService _health;
     private readonly ICredentialReauthorizer _reauthorizer;
     private readonly ITeamMemberService _members;
+    private readonly TeamMembershipResolver _membership;
     private readonly ILogger<CredentialService> _logger;
 
-    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthGrantRevoker grants, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ICredentialHealthService health, ICredentialReauthorizer reauthorizer, ITeamMemberService members, ILogger<CredentialService> logger)
+    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthGrantRevoker grants, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ICredentialHealthService health, ICredentialReauthorizer reauthorizer, ITeamMemberService members, TeamMembershipResolver membership, ILogger<CredentialService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
@@ -53,6 +55,7 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
         _health = health;
         _reauthorizer = reauthorizer;
         _members = members;
+        _membership = membership;
         _logger = logger;
     }
 
@@ -87,7 +90,9 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
             })
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return await WithHealthAsync(summaries, teamId, cancellationToken).ConfigureAwait(false);
+        var withHealth = await WithHealthAsync(summaries, teamId, cancellationToken).ConfigureAwait(false);
+
+        return await WithCallerRepairAsync(withHealth, teamId, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

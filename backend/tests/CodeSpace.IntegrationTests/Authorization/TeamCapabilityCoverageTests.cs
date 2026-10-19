@@ -123,7 +123,9 @@ public class TeamCapabilityCoverageTests
         // The mirror of every assertion above: gating is not the goal, correct gating is. A Viewer who
         // cannot mark a conversation read has been locked out of their own account, not secured.
         var team = await SeedTeamAsync().ConfigureAwait(false);
-        var selfService = RequestTypes().Where(t => typeof(IRequireTeamMembership).IsAssignableFrom(t) && !typeof(IRequireTeamPermission).IsAssignableFrom(t)).ToList();
+        // An OAuth connect carries its own marker: it is the Admin's to mint a credential, and the credential's own person's to re-authorize.
+        // The zeroed probe names no credential, so it is the connect, which is not self-service — see GatedWrites.
+        var selfService = RequestTypes().Where(t => typeof(IRequireTeamMembership).IsAssignableFrom(t) && !typeof(IRequireTeamPermission).IsAssignableFrom(t) && !typeof(IRequireCredentialReauthorization).IsAssignableFrom(t)).ToList();
 
         selfService.ShouldNotBeEmpty("no self-service write was discovered — this assertion would pass vacuously");
 
@@ -166,6 +168,9 @@ public class TeamCapabilityCoverageTests
         var writes = RequestTypes()
             .Where(t => typeof(IRequireTeamPermission).IsAssignableFrom(t))
             .Select(t => new GatedWrite(t, ((IRequireTeamPermission)Probe(t)).RequiredPermission))
+            // A connect that may re-authorize a credential is gated on credentials.manage as long as it names none — and a zeroed probe names none.
+            // Without these the OAuth connect would drop out of "every route to mint a credential is closed to a Viewer" the day it left IRequireTeamPermission.
+            .Concat(RequestTypes().Where(t => typeof(IRequireCredentialReauthorization).IsAssignableFrom(t)).Select(t => new GatedWrite(t, TeamPermissions.CredentialsManage)))
             .ToList();
 
         writes.ShouldNotBeEmpty("the reflection scan found no permission-gated writes — every check in this class would pass vacuously");

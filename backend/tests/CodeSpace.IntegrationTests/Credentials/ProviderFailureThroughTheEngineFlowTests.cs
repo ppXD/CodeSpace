@@ -50,6 +50,7 @@ public class ProviderFailureThroughTheEngineFlowTests
         using var gitlab = new GitLabDoorkeeperStub();   // never heard of the pair the row holds: the refresh is answered invalid_grant
         var team = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var seed = await GitLabCredentialSeed.SeedAsync(_fixture, gitlab.BaseUrl, "at-0", "rt-0", expired: true, existingTeam: team);
+        await RecordThePersonItWasConnectedForAsync(seed.CredentialId, team.UserId);
 
         var runId = await RunListPullRequestsAsync(team, seed.RepositoryId);
 
@@ -362,6 +363,17 @@ public class ProviderFailureThroughTheEngineFlowTests
         if (!allowNone) remedy.ShouldNotBeNull("the run recorded a failure a person can repair");
 
         return remedy;
+    }
+
+    /// <summary>
+    /// What a connect always does and the shared seed leaves out: a sign-in is somebody's, so the credential names its person. A reconnect re-authorizes a
+    /// person's own connection — it refuses one with none — so the button the remedy shows for it is only honest on a row shaped as a connect shapes it.
+    /// </summary>
+    private async Task RecordThePersonItWasConnectedForAsync(Guid credentialId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE credential SET owner_user_id = {userId} WHERE id = {credentialId}");
     }
 
     private async Task DisconnectAsync(Guid credentialId)

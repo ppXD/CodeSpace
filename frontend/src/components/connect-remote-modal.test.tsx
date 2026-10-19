@@ -13,9 +13,9 @@ import { ConnectRemoteModal } from "@/_imported/ai-code-space/connect-remote-mod
  * beyond membership. The modal must offer exactly that: a Member keeps Disconnect on the Personal tab — which lists
  * only their own credentials — and sees team tokens without a Revoke that could only answer 403.
  *
- * <p>The same for connecting: adding a team token and starting an OAuth connect take credentials.manage, and editing
- * or removing a provider takes repos.manage. Linking a personal access token takes only membership, so "Use a token"
- * stays for everyone.</p>
+ * <p>The same for connecting: adding a team token and starting a NEW OAuth connect (which mints a credential) take
+ * credentials.manage, and editing or removing a provider takes repos.manage. Linking a personal access token takes only
+ * membership, so "Use a token" stays for everyone. Reconnecting a credential you own is not a new connect — see below.</p>
  */
 describe("connect remote modal credential controls", () => {
   const team = (role: MeTeam["role"], permissions: string[]): MeTeam => ({
@@ -138,8 +138,9 @@ describe("connect remote modal credential controls", () => {
 /**
  * A credential that stopped working is brought back IN PLACE: Reconnect signs in again to the same credential (its id goes
  * to the API as replaceCredentialId, so what is bound through it needs no moving), and Replace token pastes a new token into
- * it. Starting an OAuth connect takes credentials.manage, so Reconnect is absent for a role that would only be refused;
- * replacing the token of your own credential takes only membership, and a team token takes credentials.manage.
+ * it. Both are the credential's own person's on membership alone, or credentials.manage's for anyone else's: the Personal tab lists
+ * only the caller's own credentials, so both are always offered there whatever the role. A plain Connect with OAuth mints a
+ * credential and stays credentials.manage's.
  */
 describe("connect remote modal re-authorizing a credential in place", () => {
   const admin: MeTeam = {
@@ -209,13 +210,28 @@ describe("connect remote modal re-authorizing a credential in place", () => {
     expect(JSON.stringify(init.body)).not.toContain("replaceCredentialId");
   });
 
-  it("offers a member no Reconnect, which would only be refused, and still offers Replace token on their own token", async () => {
-    renderAs(member, [credential("oauth-1", "OAuth"), credential("pat-1", "Pat")]);
+  it.each([
+    ["Member", member],
+    ["Viewer", { ...admin, role: "Viewer", permissions: [] } as MeTeam],
+  ] as const)("offers a %s Reconnect on their own sign-in and Replace token on their own token: the credential's own person passes on membership", async (_role, asker) => {
+    vi.spyOn(window, "open").mockReturnValue(null);
+    const calls = renderAs(asker, [credential("oauth-1", "OAuth"), credential("pat-1", "Pat")], { "/api/credentials/oauth/init": { authorizeUrl: "https://gitlab.test/oauth/authorize", state: "s" } });
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Disconnect" })).toHaveLength(2));
 
-    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
     expect(screen.getAllByRole("button", { name: "Replace token" })).toHaveLength(1);
+    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+
+    await waitFor(() => expect(calls.some((c) => c.url.endsWith("/api/credentials/oauth/init"))).toBe(true));
+    expect(calls.find((c) => c.url.endsWith("/api/credentials/oauth/init"))!.body).toMatchObject({ providerInstanceId: "pi1", replaceCredentialId: "oauth-1" });
+  });
+
+  it("still offers a member no plain Connect with OAuth, which would mint a credential and answer 403", async () => {
+    renderAs(member, []);
+
+    await waitFor(() => expect(screen.getByRole("button", { name: /Use a token/ })).toBeTruthy());
+
+    expect(screen.queryByRole("button", { name: /Connect with OAuth/ })).toBeNull();
   });
 
   it("puts a pasted token into the credential in place and closes", async () => {

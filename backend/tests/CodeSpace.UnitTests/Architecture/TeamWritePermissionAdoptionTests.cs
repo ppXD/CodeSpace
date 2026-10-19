@@ -40,6 +40,7 @@ public class TeamWritePermissionAdoptionTests
         var ungated = TeamWriteCommands()
             .Where(t => !typeof(IRequireTeamPermission).IsAssignableFrom(t))
             .Where(t => !typeof(IRequireCredentialManagement).IsAssignableFrom(t))
+            .Where(t => !typeof(IRequireCredentialReauthorization).IsAssignableFrom(t))
             .Where(t => !SelfServiceByDesign.ContainsKey(t.Name))
             .Select(t => t.FullName!)
             .OrderBy(n => n, StringComparer.Ordinal)
@@ -77,6 +78,19 @@ public class TeamWritePermissionAdoptionTests
 
         type.ShouldNotBeNull("RevokeCredentialCommand is no longer seen as a team write — the scan below must keep covering credential-keyed commands");
         typeof(IRequireCredentialManagement).IsAssignableFrom(type!).ShouldBeTrue("revoking a credential must be gated by IRequireCredentialManagement, not by its resource marker alone");
+    }
+
+    [Fact]
+    public void Starting_an_oauth_connect_takes_credentials_manage_unless_it_re_authorizes_the_callers_own_credential()
+    {
+        // A plain connect mints a credential, which is credentials.manage's. Naming a credential to re-authorize in place is the
+        // management rule's instead: its own person on membership alone, anyone else credentials.manage. The marker carries both
+        // bars, so the command must not also declare the permission — that would demand it of an owner reconnecting their own.
+        var type = TeamWriteCommands().SingleOrDefault(t => t.Name == "InitCredentialOAuthCommand");
+
+        type.ShouldNotBeNull("InitCredentialOAuthCommand is no longer seen as a team write — the scan below must keep covering the OAuth connect");
+        typeof(IRequireCredentialReauthorization).IsAssignableFrom(type!).ShouldBeTrue("starting a connect must be gated by IRequireCredentialReauthorization, which holds both the connect's bar and the owner's");
+        typeof(IRequireTeamPermission).IsAssignableFrom(type!).ShouldBeFalse("a plain IRequireTeamPermission would close the owner's own reconnect to everyone below Admin");
     }
 
     [Fact]

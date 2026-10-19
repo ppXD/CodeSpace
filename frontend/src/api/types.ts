@@ -53,6 +53,13 @@ export interface CredentialSummary {
   daysToExpiry?: number | null;
   /** How many live repositories are bound through it — what reconnecting, replacing or disconnecting it puts at stake. Absent from a server that predates it; read it as zero. */
   boundRepositoryCount?: number;
+  /**
+   * Whether the caller may put it right in place — reconnect its sign-in or replace its pasted token — by the rules the endpoints behind those
+   * buttons apply: its own person, or `credentials.manage`, and for a sign-in also the reach over its person (an Admin cannot reconnect another
+   * Admin's or an Owner's), and never once its person left. The server's answer, so a button is shown exactly when it would be accepted. Absent
+   * from a server that predates it: read the role then (`ownsIt || can(CredentialsManage)`), which is what every client did before.
+   */
+  callerMayRepair?: boolean | null;
 }
 
 export interface InitOAuthResponse {

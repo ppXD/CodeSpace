@@ -10,6 +10,7 @@ using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Dtos.Credentials;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -25,8 +26,8 @@ namespace CodeSpace.IntegrationTests.Credentials;
 /// written by the real <see cref="IRunRecordLogger"/> from the real exceptions, so the shapes cannot drift from what the engine
 /// writes; the engine's own capture of them is <see cref="ProviderFailureThroughTheEngineFlowTests"/>.
 ///
-/// <para>Pins: the per-role matrix (an Owner, an Admin, a Member, a Viewer, and the credential's own person — who may replace their own
-/// pasted token but not reconnect a sign-in, because that endpoint takes credentials.manage), a retired credential, a failure traced through
+/// <para>Pins: the per-role matrix (an Owner, an Admin, a Member, a Viewer, and the credential's own person — who may reconnect their own
+/// sign-in or replace their own pasted token on membership alone, the one rule both endpoints apply, agreed with the real commands), a retired credential, a failure traced through
 /// the run's scope, an agent run's own account (only the LAST one, and only when the node that ended the run is the one that spawned it), a
 /// run whose handled provider failure is not why it ended, a push the remote refused on a run that otherwise finished, a run of another
 /// team, a redirect inside one origin (no address to edit), a base URL carrying userinfo (masked), and the refused-delivery remedy a
@@ -68,8 +69,8 @@ public class ProviderRemedyFlowTests
             return;
         }
 
-        remedy.Actions.Single(a => a.Kind == RemedyActionKind.Reconnect).DisabledReason.ShouldBe("Needs the Admin or Owner role.", "the sign-in flow is a credentials.manage request whoever the credential belongs to");
-        remedy.AskPeople.Select(p => p.Role).ShouldBe(new[] { "Owner", "Admin" }, "the credential's own person cannot reconnect it either, so only the team's Owners and Admins are named");
+        remedy.Actions.Single(a => a.Kind == RemedyActionKind.Reconnect).DisabledReason.ShouldBe($"Only {world.CredentialOwnerName}, or a team Admin, can do this.", "someone else's sign-in is the credentials.manage bar, the same as someone else's pasted token");
+        remedy.AskPeople.Select(p => p.Role).ShouldBe(new[] { "Owner of the credential", "Owner", "Admin" }, "the person whose sign-in it is can reconnect it, then the team's Owners and Admins");
         remedy.AskPeople.ShouldAllBe(p => p.UserId != asker, "nobody is told to ask themselves");
     }
 
@@ -113,23 +114,176 @@ public class ProviderRemedyFlowTests
     }
 
     [Fact]
-    public async Task The_credentials_own_person_is_not_offered_a_reconnect_of_their_oauth_sign_in_as_a_plain_member_because_the_endpoint_would_refuse_it()
+    public async Task The_credentials_own_person_is_offered_the_reconnect_of_their_oauth_sign_in_as_a_plain_member_and_the_endpoint_accepts_it()
     {
         var world = await SeedCredentialWorldAsync(owner: TeamRole.Member);
+        await ConfigureOAuthAppAsync(world.InstanceId);
         var runId = await SeedFailedRunAsync(world, new CredentialNeedsReconnectException(world.CredentialId, "GitLab · nacho", "invalid_grant"));
 
         var remedy = (await RemedyAsync(world.CredentialOwnerId, world.TeamId, runId))!;
         var reconnect = remedy.Actions.Single(a => a.Kind == RemedyActionKind.Reconnect);
 
-        reconnect.Enabled.ShouldBeFalse("POST /api/credentials/oauth/init needs credentials.manage");
-        reconnect.DisabledReason.ShouldBe("Needs the Admin or Owner role.");
-        remedy.AskPeople.Select(p => p.Role).ShouldBe(new[] { "Owner", "Admin" });
+        reconnect.Enabled.ShouldBeTrue("a person re-authorizes their own credential on membership alone");
+        reconnect.DisabledReason.ShouldBeNull();
+        remedy.Actions.Single(a => a.Kind == RemedyActionKind.Relink).Enabled.ShouldBeFalse("re-linking a repository is still the Admin's");
 
-        // The probe the button's state stands for: the same asker sending the same command is refused by the same rule.
+        // The probe the button's state stands for: the same asker sending the same command is accepted by the same rule.
         using var scope = _fixture.BeginScopeAs(world.CredentialOwnerId, world.TeamId);
-        var refused = await Should.ThrowAsync<CodeSpace.Core.Authorization.TenantAccessDeniedException>(() => scope.Resolve<MediatR.IMediator>().Send(new CodeSpace.Messages.Commands.Credentials.InitCredentialOAuthCommand { ProviderInstanceId = world.InstanceId, DisplayName = "GitLab · nacho", ReplaceCredentialId = world.CredentialId }));
+        var started = await scope.Resolve<MediatR.IMediator>().Send(new CodeSpace.Messages.Commands.Credentials.InitCredentialOAuthCommand { ProviderInstanceId = world.InstanceId, DisplayName = "GitLab · nacho", ReplaceCredentialId = world.CredentialId });
 
-        refused.Message.ShouldContain("credentials.manage");
+        started.State.ShouldNotBeNullOrEmpty();
+    }
+
+    /// <summary>
+    /// Every way a person can stand toward a credential: the asker's role, whether the credential is theirs (then the person's role is the
+    /// asker's own) or someone else's with a role of its own, and whether that person has since left the team without the credential
+    /// being retired yet. Each for a sign-in and a pasted token.
+    /// </summary>
+    public static TheoryData<TeamRole, bool, TeamRole, bool, AuthType> RepairMatrix()
+    {
+        var roles = new[] { TeamRole.Owner, TeamRole.Admin, TeamRole.Member, TeamRole.Viewer };
+        var data = new TheoryData<TeamRole, bool, TeamRole, bool, AuthType>();
+
+        foreach (var authType in new[] { AuthType.OAuth, AuthType.Pat })
+            foreach (var asker in roles)
+            {
+                data.Add(asker, true, asker, false, authType);
+
+                foreach (var person in roles) data.Add(asker, false, person, false, authType);
+
+                data.Add(asker, false, TeamRole.Member, true, authType);
+            }
+
+        return data;
+    }
+
+    [Theory]
+    [MemberData(nameof(RepairMatrix))]
+    public async Task A_repair_button_is_enabled_exactly_when_the_endpoint_behind_it_accepts_that_asker(TeamRole askerRole, bool owns, TeamRole personRole, bool personLeft, AuthType authType)
+    {
+        // The agreement the remedy exists to keep, measured against the real commands: what the remedy decides for a person is what the
+        // pipeline and the service answer that same person, and the Providers list says the same. Accepted means the command RETURNED — any
+        // exception, of any kind, is a refusal — so a guard the button does not know about cannot read as "accepted".
+        using var gitlab = new GitLabDoorkeeperStub();
+        var world = await SeedCredentialWorldAsync(owner: owns ? askerRole : personRole, authType, gitlab);
+        var asker = owns ? world.CredentialOwnerId : await AddMemberAsync(world.TeamId, askerRole, $"Asker {askerRole}");
+        var runId = await SeedFailedRunAsync(world, new CredentialNeedsReconnectException(world.CredentialId, "GitLab · nacho", "invalid_grant"));
+
+        if (personLeft) await RemoveMembershipAsync(world.TeamId, world.CredentialOwnerId);
+
+        var remedy = (await RemedyAsync(asker, world.TeamId, runId))!;
+        var kind = authType == AuthType.OAuth ? RemedyActionKind.Reconnect : RemedyActionKind.ReplaceToken;
+        var offered = remedy.Actions.Single(a => a.Kind == kind).Enabled;
+
+        var listed = (await ListedAsync(asker, world.TeamId)).Single(c => c.Id == world.CredentialId).CallerMayRepair;
+
+        var accepted = await AcceptedByTheEndpointAsync(asker, world, authType);
+
+        var who = $"a {askerRole} who {(owns ? "owns" : "does not own")} a credential whose person {(personLeft ? "has left" : $"is a {personRole}")}";
+        offered.ShouldBe(accepted, $"the {kind} button for {who} must be enabled exactly when its endpoint accepts them");
+        listed.ShouldBe(accepted, $"the Providers list, which the repository rows read, must say the same of {who}");
+    }
+
+    private async Task<IReadOnlyList<CredentialSummary>> ListedAsync(Guid asker, Guid teamId)
+    {
+        using var scope = _fixture.BeginScopeAs(asker, teamId);
+
+        return await scope.Resolve<ICredentialService>().ListAsync(null, CancellationToken.None);
+    }
+
+    [Fact]
+    public async Task An_admin_looking_at_an_owners_sign_in_is_told_it_is_the_owners_alone_and_is_not_sent_to_ask_a_peer()
+    {
+        var world = await SeedCredentialWorldAsync(owner: TeamRole.Owner);
+        var admin = await AddMemberAsync(world.TeamId, TeamRole.Admin, "Asker Admin");
+        var runId = await SeedFailedRunAsync(world, new CredentialNeedsReconnectException(world.CredentialId, "GitLab · nacho", "invalid_grant"));
+
+        var remedy = (await RemedyAsync(admin, world.TeamId, runId))!;
+        var reconnect = remedy.Actions.Single(a => a.Kind == RemedyActionKind.Reconnect);
+
+        reconnect.Enabled.ShouldBeFalse();
+        reconnect.DisabledReason.ShouldBe($"Only {world.CredentialOwnerName} can reconnect their own sign-in.");
+        remedy.Actions.Single(a => a.Kind == RemedyActionKind.Relink).Enabled.ShouldBeTrue("an Admin can still move the repository off it");
+        remedy.AskPeople.Select(p => p.UserId).ShouldBe(new[] { world.CredentialOwnerId }, "the Admin who is asking and the Admin beside them cannot sign in as an Owner, so only the person is named");
+        remedy.AskPeople.Single().Role.ShouldBe("Owner of the credential");
+    }
+
+    [Fact]
+    public async Task A_peer_admins_sign_in_is_the_persons_or_an_owners_and_only_they_are_named()
+    {
+        var world = await SeedCredentialWorldAsync(owner: TeamRole.Admin);
+        var admin = await AddMemberAsync(world.TeamId, TeamRole.Admin, "Asker Admin");
+        var runId = await SeedFailedRunAsync(world, new CredentialNeedsReconnectException(world.CredentialId, "GitLab · nacho", "invalid_grant"));
+
+        var remedy = (await RemedyAsync(admin, world.TeamId, runId))!;
+
+        remedy.Actions.Single(a => a.Kind == RemedyActionKind.Reconnect).DisabledReason.ShouldBe($"Only {world.CredentialOwnerName}, or a team Owner, can reconnect this sign-in.");
+        remedy.AskPeople.Select(p => (p.UserId, p.Role)).ShouldBe(new[] { (world.CredentialOwnerId, "Owner of the credential"), (world.OwnerId, "Owner") }, "Ada, the other Admin, could not sign in as a peer any more than the asker: only the person and the team's Owner can");
+    }
+
+    [Theory]
+    [InlineData(AuthType.OAuth)]
+    [InlineData(AuthType.Pat)]
+    public async Task A_credential_whose_person_left_is_nobodys_to_repair_and_names_nobody_for_it(AuthType authType)
+    {
+        var world = await SeedCredentialWorldAsync(owner: TeamRole.Member, authType);
+        var member = await AddMemberAsync(world.TeamId, TeamRole.Member, "Asker Member");
+        var runId = await SeedFailedRunAsync(world, new CredentialNeedsReconnectException(world.CredentialId, "GitLab · nacho", "invalid_grant"));
+        await RemoveMembershipAsync(world.TeamId, world.CredentialOwnerId);
+
+        var remedy = (await RemedyAsync(member, world.TeamId, runId))!;
+        var repair = remedy.Actions.Single(a => a.Kind is RemedyActionKind.Reconnect or RemedyActionKind.ReplaceToken);
+
+        repair.DisabledReason.ShouldBe($"{world.CredentialOwnerName} has left this team, so this cannot be repaired.");
+        remedy.Actions.Select(a => a.Kind).First().ShouldBe(RemedyActionKind.Relink, "moving off it is the way out, as for a retired credential");
+        remedy.AskPeople.Select(p => p.UserId).ShouldNotContain(world.CredentialOwnerId, "someone who left cannot be asked");
+        remedy.AskPeople.Select(p => p.Role).ShouldBe(new[] { "Owner", "Admin" }, "the Admins who can re-link, which a Member cannot");
+    }
+
+    [Fact]
+    public async Task A_credential_whose_person_left_but_is_not_retired_yet_reads_as_owner_left_beside_the_failure()
+    {
+        // A 401 on a credential still marked Active: nothing records that it is refused, so what the card says about it is what the list would.
+        var world = await SeedCredentialWorldAsync(owner: TeamRole.Member);
+        await SetStatusAsync(world.CredentialId, CredentialStatus.Active);
+        var runId = await SeedFailedRunAsync(world, new ProviderApiException(ProviderKind.GitLab, 401, "ListPullRequestsAsync", "401", new Exception("x")));
+        await RemoveMembershipAsync(world.TeamId, world.CredentialOwnerId);
+
+        var remedy = (await RemedyAsync(world.OwnerId, world.TeamId, runId))!;
+
+        remedy.Credential!.Health.ShouldBe(CredentialHealth.OwnerLeft);
+        (await ListedAsync(world.OwnerId, world.TeamId)).Single(c => c.Id == world.CredentialId).Health.ShouldBe(CredentialHealth.OwnerLeft, "the list and the card read the same row alike");
+    }
+
+    [Fact]
+    public async Task A_team_service_sign_in_is_refused_to_an_admin_by_the_endpoint_and_the_button_says_so_without_blaming_their_role()
+    {
+        // Not something the product mints — a connect always yields a Personal credential — but a row the server refuses to reconnect all the same.
+        using var gitlab = new GitLabDoorkeeperStub();
+        var world = await SeedCredentialWorldAsync(owner: TeamRole.Member, AuthType.OAuth, gitlab);
+        await MakeTeamServiceAsync(world.CredentialId);
+        var admin = await AddMemberAsync(world.TeamId, TeamRole.Admin, "Asker Admin");
+        var runId = await SeedFailedRunAsync(world, new CredentialNeedsReconnectException(world.CredentialId, "GitLab · nacho", "invalid_grant"));
+
+        var reconnect = (await RemedyAsync(admin, world.TeamId, runId))!.Actions.Single(a => a.Kind == RemedyActionKind.Reconnect);
+
+        reconnect.Enabled.ShouldBeFalse();
+        reconnect.DisabledReason.ShouldBe("A team's own credential has no one's sign-in to reconnect; replace its token instead.");
+        (await AcceptedByTheEndpointAsync(admin, world, AuthType.OAuth)).ShouldBeFalse();
+        (await ListedAsync(admin, world.TeamId)).Single(c => c.Id == world.CredentialId).CallerMayRepair.ShouldBe(false);
+    }
+
+    /// <summary>The command the button runs, as the asker sends it: true when it returns, false for any refusal at all.</summary>
+    private async Task<bool> AcceptedByTheEndpointAsync(Guid asker, World world, AuthType authType)
+    {
+        using var scope = _fixture.BeginScopeAs(asker, world.TeamId);
+        var mediator = scope.Resolve<MediatR.IMediator>();
+
+        var thrown = await Record.ExceptionAsync(() => authType == AuthType.OAuth
+            ? mediator.Send(new CodeSpace.Messages.Commands.Credentials.InitCredentialOAuthCommand { ProviderInstanceId = world.InstanceId, DisplayName = "GitLab · nacho", ReplaceCredentialId = world.CredentialId })
+            : mediator.Send(new CodeSpace.Messages.Commands.Credentials.ReplaceCredentialTokenCommand { CredentialId = world.CredentialId, Token = FreshToken }));
+
+        return thrown is null;
     }
 
     [Fact]
@@ -419,8 +573,15 @@ public class ProviderRemedyFlowTests
 
     private sealed record World(Guid TeamId, Guid OwnerId, Guid CredentialOwnerId, string CredentialOwnerName, Guid InstanceId, Guid CredentialId, Guid RepositoryId);
 
-    /// <summary>A team with an Owner, an Admin, and a person (<paramref name="owner"/>'s role) who owns the one credential, which a repository runs through.</summary>
-    private async Task<World> SeedCredentialWorldAsync(TeamRole owner, AuthType authType = AuthType.OAuth)
+    /// <summary>The token a replace is sent, which the stub knows as the credential's own account's.</summary>
+    private const string FreshToken = "glpat-fresh";
+
+    /// <summary>
+    /// A team with an Owner, an Admin, and a person (<paramref name="owner"/>'s role) who owns the one credential, which a repository runs
+    /// through. Given a <paramref name="gitlab"/>, the provider connection is that stub's — with its OAuth app, the person's account on it and
+    /// <see cref="FreshToken"/> as a token of theirs — so a connect or a token replace the remedy offers can be sent for real and succeed.
+    /// </summary>
+    private async Task<World> SeedCredentialWorldAsync(TeamRole owner, AuthType authType = AuthType.OAuth, GitLabDoorkeeperStub? gitlab = null)
     {
         var team = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
         var admin = await AddMemberAsync(team.TeamId, TeamRole.Admin, "Ada Admin");
@@ -429,10 +590,21 @@ public class ProviderRemedyFlowTests
 
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
+        var encryptor = scope.Resolve<IPayloadEncryptor>();
         var suffix = Guid.NewGuid().ToString("N")[..8];
-        var instance = new ProviderInstance { Id = Guid.NewGuid(), TeamId = team.TeamId, Provider = ProviderKind.GitLab, DisplayName = "gitlab", BaseUrl = $"http://127.0.0.1:1/{suffix}", ApiUrl = $"http://127.0.0.1:1/{suffix}" };
+        var address = gitlab?.BaseUrl ?? $"http://127.0.0.1:1/{suffix}";
+        var instance = new ProviderInstance { Id = Guid.NewGuid(), TeamId = team.TeamId, Provider = ProviderKind.GitLab, DisplayName = "gitlab", BaseUrl = address, ApiUrl = address };
         var credential = new Credential { Id = Guid.NewGuid(), TeamId = team.TeamId, ProviderInstanceId = instance.Id, OwnerUserId = nacho, Ownership = CredentialOwnership.Personal, AuthType = authType, DisplayName = "GitLab · nacho", EncryptedPayload = "x", Status = CredentialStatus.Error, LastError = "needs reconnect: invalid_grant" };
         var repository = NewRepository(team.TeamId, instance.Id, credential.Id, "acme/api");
+
+        if (gitlab is not null)
+        {
+            instance.OauthClientId = GitLabDoorkeeperStub.DefaultClientId;
+            instance.OauthClientSecretEnc = encryptor.Encrypt(GitLabDoorkeeperStub.DefaultClientSecret);
+            credential.EncryptedPayload = encryptor.Encrypt(scope.Resolve<ICredentialPayloadSerializer>().Serialize(authType == AuthType.OAuth ? new OAuthPayload { AccessToken = "at-0", RefreshToken = "rt-0", ExpiresAt = DateTimeOffset.UtcNow.AddMinutes(-1) } : new PatPayload { Token = "glpat-expired" }));
+            gitlab.SeedPersonalAccessToken("nacho", FreshToken);
+            db.UserProviderIdentity.Add(new UserProviderIdentity { Id = Guid.NewGuid(), UserId = nacho, ProviderInstanceId = instance.Id, CredentialId = credential.Id, ProviderUserId = gitlab.UserIdOf("nacho").ToString(), ProviderUsername = "nacho" });
+        }
 
         db.ProviderInstance.Add(instance);
         db.Credential.Add(credential);
@@ -442,6 +614,25 @@ public class ProviderRemedyFlowTests
         _ = admin;
 
         return new World(team.TeamId, team.UserId, nacho, nachoName, instance.Id, credential.Id, repository.Id);
+    }
+
+    private async Task RemoveMembershipAsync(Guid teamId, Guid userId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().TeamMembership.Where(m => m.TeamId == teamId && m.UserId == userId).ExecuteDeleteAsync();
+    }
+
+    /// <summary>Gives the provider connection the OAuth app a connect needs, so a start that is let in by authorization is not then refused for having none.</summary>
+    private async Task ConfigureOAuthAppAsync(Guid instanceId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var instance = await db.ProviderInstance.SingleAsync(i => i.Id == instanceId);
+
+        instance.OauthClientId = "remedy-app";
+        instance.OauthClientSecretEnc = scope.Resolve<IPayloadEncryptor>().Encrypt("remedy-secret");
+        await db.SaveChangesAsync();
     }
 
     private async Task<string> NameOfAsync(Guid userId)
@@ -482,6 +673,20 @@ public class ProviderRemedyFlowTests
         using var scope = _fixture.BeginScope();
 
         await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE provider_instance SET base_url = {baseUrl} WHERE id = {instanceId}");
+    }
+
+    private async Task SetStatusAsync(Guid credentialId, CredentialStatus status)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE credential SET status = {status.ToString()}, last_error = NULL WHERE id = {credentialId}");
+    }
+
+    private async Task MakeTeamServiceAsync(Guid credentialId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().Database.ExecuteSqlInterpolatedAsync($"UPDATE credential SET ownership = 'TeamService', owner_user_id = NULL WHERE id = {credentialId}");
     }
 
     private async Task RetireAsync(Guid credentialId)

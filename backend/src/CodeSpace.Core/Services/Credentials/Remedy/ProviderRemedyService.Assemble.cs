@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Redaction;
+using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Dtos.Credentials;
 using CodeSpace.Messages.Enums;
 
@@ -42,10 +43,12 @@ public sealed partial class ProviderRemedyService
             Provider = _ctx.Instance?.Provider.ToString(),
             CredentialName = credential?.DisplayName ?? _ctx.Failure.Detail("credentialName"),
             OwnerName = _ctx.OwnerName,
-            CallerOwnsCredential = OwnsCredential(credential),
+            CallerOwnsCredential = _ctx.Person is { IsCaller: true },
+            OwnerRole = _ctx.Person?.Standing,
+            CredentialOwnerLeft = _ctx.Person is { Standing: null },
             CredentialRetired = credential?.DeletedDate != null,
             CredentialIsStaticToken = credential is { } c && CredentialHealthDerivation.IsStaticToken(c.AuthType),
-            CredentialIsTeamService = credential?.Ownership == CredentialOwnership.TeamService,
+            CredentialIsTeamService = credential is not null && _ctx.Person is null,
             Repositories = RepositoryPhrase(),
             RepositoryCount = _ctx.Repositories.Count,
             RedirectsTo = _ctx.Failure.Detail("finalOrigin"),
@@ -67,8 +70,6 @@ public sealed partial class ProviderRemedyService
             ? RemedyResolution.RepairRedirect(_ctx.Failure.Detail("requestedOrigin"), _ctx.Failure.Detail("finalOrigin"), instance.BaseUrl, instance.ApiUrl, _ctx.ConnectedCredentials)
             : null;
 
-    private bool OwnsCredential(CredentialRow? credential) => credential is { Ownership: CredentialOwnership.Personal, OwnerUserId: { } owner } && owner == _ctx.CallerId;
-
     private string? RepositoryPhrase() => _ctx.Repositories.Count switch
     {
         0 => null,
@@ -79,7 +80,7 @@ public sealed partial class ProviderRemedyService
 
     private void ChooseActions()
     {
-        var caller = CallerStanding.Of(_ctx.Role, OwnsCredential(_ctx.Credential));
+        var caller = CallerStanding.Of(_ctx.Role, _ctx.Person);
         var subjects = new RemedyActions.ActionSubjects(HasCredential: _ctx.Credential is not null, HasRepositories: _ctx.Repositories.Count > 0, HasProviderInstance: _ctx.Instance is not null, OffersRerun: _ctx.OffersRerun);
 
         _ctx.Actions = RemedyActions.Build(_ctx.Code, _ctx.Facts, caller, subjects);
@@ -108,30 +109,46 @@ public sealed partial class ProviderRemedyService
         OwnerName = _ctx.OwnerName,
         AuthType = c.AuthType,
         Status = c.Status,
-        Health = CredentialHealthDerivation.Derive(c.Status, c.AuthType, c.ExpiresDate, ownerLeft: false, DateTimeOffset.UtcNow),
+        Health = CredentialHealthDerivation.Derive(c.Status, c.AuthType, c.ExpiresDate, ownerLeft: _ctx.Person is { Standing: null }, DateTimeOffset.UtcNow),
         Retired = c.DeletedDate != null,
         ProviderInstanceId = c.ProviderInstanceId
     };
 
     private RemedyRepository ToRepository(RepositoryRow r) => new() { Id = r.Id, FullPath = r.FullPath, Status = r.Status, CredentialId = r.CredentialId, CredentialWorks = RepositoryWorks(r, DateTimeOffset.UtcNow) };
 
-    /// <summary>Who to ask when something is not the caller's to do: the credential's own person for a repair only they can make, then the team's Owners and Admins. Empty when every action is the caller's — a list of people to ask beside buttons that work would only be noise.</summary>
+    /// <summary>
+    /// Who to ask when something is not the caller's to do: the credential's own person for a repair only they can make, then the team's Owners and
+    /// Admins who could do what the caller cannot. Empty when every action is the caller's — a list of people to ask beside buttons that work would only be noise.
+    /// </summary>
     private async Task<IReadOnlyList<RemedyPerson>> WhoToAskAsync(CancellationToken cancellationToken)
     {
-        if (!_ctx.Actions.Any(a => !a.Enabled && a.Kind is not RemedyActionKind.Rerun)) return Array.Empty<RemedyPerson>();
+        var refused = _ctx.Actions.Where(a => !a.Enabled && a.Kind is not RemedyActionKind.Rerun).ToList();
+
+        if (refused.Count == 0) return Array.Empty<RemedyPerson>();
 
         var people = new List<RemedyPerson>();
 
-        // Only a token replace can be the credential's own person's to make; a reconnect needs credentials.manage whoever owns it, so naming them would send the asker to someone who cannot do it either.
-        var repairIsTheirs = _ctx.Actions.Any(a => !a.Enabled && a.Kind is RemedyActionKind.ReplaceToken);
+        // Putting the credential right in place — a reconnect or a token replace — is its own person's to make, so they are named first, as long as they still stand in the team.
+        var repairIsTheirs = refused.Any(a => a.Kind is RemedyActionKind.Reconnect or RemedyActionKind.ReplaceToken);
 
-        if (repairIsTheirs && _ctx.Credential is { Ownership: CredentialOwnership.Personal, OwnerUserId: { } owner } && owner != _ctx.CallerId && _ctx.OwnerName is { } ownerName)
+        if (repairIsTheirs && _ctx.Person is { Standing: not null } && _ctx.Credential is { OwnerUserId: { } owner } && owner != _ctx.CallerId && _ctx.OwnerName is { } ownerName)
             people.Add(new RemedyPerson { UserId = owner, Name = ownerName, Role = "Owner of the credential" });
 
         var administrators = await ReadTeamAdministratorsAsync(cancellationToken).ConfigureAwait(false);
 
-        people.AddRange(administrators.Where(a => a.UserId != _ctx.CallerId && people.All(p => p.UserId != a.UserId)).Select(a => new RemedyPerson { UserId = a.UserId, Name = a.Name, Role = a.Role.ToString() }));
+        people.AddRange(administrators.Where(a => a.UserId != _ctx.CallerId && people.All(p => p.UserId != a.UserId) && CouldDoWhatIsRefused(a.Role, refused)).Select(a => new RemedyPerson { UserId = a.UserId, Name = a.Name, Role = a.Role.ToString() }));
 
         return people.Take(MaxPeople).ToList();
     }
+
+    /// <summary>
+    /// Whether an Owner or Admin could do at least one of what the caller cannot: they hold every permission, but a reconnect also needs the reach over
+    /// the credential's person — an Admin cannot sign in as another Admin — and nobody repairs what has no person in the team to repair it for.
+    /// </summary>
+    private bool CouldDoWhatIsRefused(TeamRole administrator, IReadOnlyList<RemedyAction> refused) => refused.Any(action => action.Kind switch
+    {
+        RemedyActionKind.Reconnect => _ctx.Person is { Standing: { } person } && TeamRoleRank.Reaches(administrator, person, isOwn: false),
+        RemedyActionKind.ReplaceToken => _ctx.Person is null or { Standing: not null },
+        _ => true
+    });
 }

@@ -54,7 +54,7 @@ public enum RemedyActionKind
     /// <summary>Move the repository (or every repository the credential holds) onto a live credential.</summary>
     [JsonStringEnumMemberName("relink")] Relink,
 
-    /// <summary>Sign in again with the provider, into the SAME credential, so nothing bound through it changes. Needs <c>credentials.manage</c> whoever owns the credential: starting an OAuth connect is that request.</summary>
+    /// <summary>Sign in again with the provider, into the SAME credential, so nothing bound through it changes. The credential's own person, or <c>credentials.manage</c>: starting a connect that names the credential is held to the same bar as replacing its token.</summary>
     [JsonStringEnumMemberName("reconnect")] Reconnect,
 
     /// <summary>Paste a new token into the SAME credential, so nothing bound through it changes. The credential's own person, or <c>credentials.manage</c>.</summary>

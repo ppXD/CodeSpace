@@ -84,6 +84,7 @@ public sealed partial class ProviderRemedyService : IProviderRemedyService, ISco
         await LoadProviderInstanceAsync(cancellationToken).ConfigureAwait(false);
         await LoadConnectedCredentialsAsync(cancellationToken).ConfigureAwait(false);
         await ResolveCallerAsync(cancellationToken).ConfigureAwait(false);
+        await LoadPersonAsync(cancellationToken).ConfigureAwait(false);
 
         DecideResolved();
         StateFacts();

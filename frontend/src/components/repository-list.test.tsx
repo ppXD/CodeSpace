@@ -145,13 +145,66 @@ describe("repository list controls", () => {
     expect(screen.getByText("Ask a team Admin or Owner to fix this connection.")).toBeTruthy();
   });
 
-  it("offers a member no Reconnect on their own refused sign-in, because starting an OAuth connect takes credentials.manage and would answer 403", async () => {
+  it.each([
+    ["Member", ["workflows.write"]],
+    ["Viewer", []],
+  ] as const)("offers a %s Reconnect on their own refused sign-in but not on a teammate's: starting a reconnect passes the credential's own person on membership, anyone else needs credentials.manage", async (role, permissions) => {
     const mine = credential("mine", { status: "Error", authType: "OAuth", ownerUserId: "u1" });
+    const theirs = credential("theirs", { status: "Error", authType: "OAuth", ownerUserId: "u2", ownerUserName: "Ada" });
+    renderAs(team(role, [...permissions]), { credentials: [mine, theirs], repositories: [onCredential("mine"), onCredential("theirs")] });
+
+    await waitFor(() => expect(screen.getByText("acme/theirs")).toBeTruthy());
+
+    expect(screen.getAllByRole("button", { name: "Reconnect" })).toHaveLength(1);   // only the one that is theirs
+    expect(screen.queryByRole("button", { name: /Re-link credential/ })).toBeNull();
+    expect(screen.getByText("Ask a team Admin or Owner to fix this connection.")).toBeTruthy();   // for the teammate's row
+  });
+
+  it("offers an admin a Reconnect on a teammate's refused sign-in, because credentials.manage reaches every credential of the team", async () => {
+    const theirs = credential("theirs", { status: "Error", authType: "OAuth", ownerUserId: "u2", ownerUserName: "Ada" });
+    renderAs(admin(), { credentials: [theirs], repositories: [onCredential("theirs")] });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
+  });
+
+  // ── What the server says the caller may repair beats what the role suggests: the reach over a credential's person is the server's to know ──
+
+  it("offers a Reconnect only where the server says the caller may — an admin has credentials.manage and still cannot sign in as a peer Admin or an Owner", async () => {
+    const peers = credential("peers", { status: "Error", authType: "OAuth", ownerUserId: "u2", ownerUserName: "Ada", callerMayRepair: false });
+    const members = credential("members", { status: "Error", authType: "OAuth", ownerUserId: "u3", ownerUserName: "Milo", callerMayRepair: true });
+    renderAs(admin(), { credentials: [peers, members], repositories: [onCredential("peers"), onCredential("members")] });
+
+    await waitFor(() => expect(screen.getByText("acme/peers")).toBeTruthy());
+
+    expect(screen.getAllByRole("button", { name: "Reconnect" })).toHaveLength(1);   // only the Member's sign-in
+    expect(screen.getAllByRole("button", { name: /Re-link credential/ })).toHaveLength(2);   // moving off a credential is still the admin's, for both rows
+  });
+
+  it("offers no Replace token on a token whose person left, however the role reads, and no Reconnect on a sign-in the server refuses", async () => {
+    const left = credential("left", { status: "Error", authType: "Pat", ownerUserId: "u2", ownerUserName: "Ada", callerMayRepair: false });
+    const outranked = credential("outranked", { status: "Error", authType: "OAuth", ownerUserId: "u3", ownerUserName: "Olive", callerMayRepair: false });
+    renderAs(admin(), { credentials: [left, outranked], repositories: [onCredential("left"), onCredential("outranked")] });
+
+    await waitFor(() => expect(screen.getByText("acme/outranked")).toBeTruthy());
+
+    expect(screen.queryByRole("button", { name: "Replace token" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+  });
+
+  it("tells a member who may not repair a credential who to ask, whatever they own, when the server says no", async () => {
+    const mine = credential("mine", { status: "Error", authType: "OAuth", ownerUserId: "u1", callerMayRepair: false });
     renderAs(team("Member", ["workflows.write"]), { credentials: [mine], repositories: [onCredential("mine")] });
 
     await waitFor(() => expect(screen.getByText("acme/mine")).toBeTruthy());
 
     expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
     expect(screen.getByText("Ask a team Admin or Owner to fix this connection.")).toBeTruthy();
+  });
+
+  it("offers a teammate's sign-in to a member the server says may repair it, as it says nothing else about roles", async () => {
+    const theirs = credential("theirs", { status: "Error", authType: "OAuth", ownerUserId: "u2", ownerUserName: "Ada", callerMayRepair: true });
+    renderAs(team("Member", ["workflows.write"]), { credentials: [theirs], repositories: [onCredential("theirs")] });
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
   });
 });
