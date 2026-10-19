@@ -2,6 +2,7 @@ using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Credentials;
+using CodeSpace.Core.Services.OAuth;
 using CodeSpace.IntegrationTests.Infrastructure;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Enums;
@@ -63,6 +64,7 @@ public sealed class RetireSweepFairnessFlowTests
 
             credential.DeletedDate.ShouldBeNull("a retirement that failed leaves the token exactly as it was — nothing half-done");
             credential.Status.ShouldBe(CredentialStatus.Active);
+            await AssertLockFreeAsync(stuck);
         }
     }
 
@@ -90,6 +92,14 @@ public sealed class RetireSweepFairnessFlowTests
         await SweepOnceAsync();
 
         (await _kit.LoadCredentialAsync(permanent)).DeletedDate.ShouldBeNull("failing that many passes in a row put it out of the sweep's rotation, so a pass within the window does not attempt it even though it would now succeed");
+    }
+
+    /// <summary>A candidate that failed gave its lock back: a re-authorization of it is not left waiting behind a sweep that is long gone.</summary>
+    private async Task AssertLockFreeAsync(Guid credentialId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await using var held = await CredentialRefreshLock.AcquireAsync(scope.Resolve<ICrossProcessLock>(), credentialId, CancellationToken.None).WaitAsync(TimeSpan.FromSeconds(5));
     }
 
     private async Task SweepOnceAsync()

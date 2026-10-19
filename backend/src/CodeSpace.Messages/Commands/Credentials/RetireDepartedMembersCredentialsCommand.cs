@@ -11,7 +11,8 @@ namespace CodeSpace.Messages.Commands.Credentials;
 /// token an instance Admin lent a team they are not in, once they lose the role — the app never takes the role away, so
 /// no departure retires those. Each token is retired exactly as a departure retires it — blanked, Revoked,
 /// soft-deleted, its repositories marked "needs a new credential", its act-as identities soft-deleted — and the provider
-/// is not asked. Idempotent and bounded: a retired token is no longer a candidate, so the backlog only shrinks. NOT
+/// is not asked. Idempotent and bounded: a retired token is no longer a candidate, so the backlog only shrinks. A token a
+/// refresh or an in-place re-authorization is writing is skipped for this pass and retired by a later one. NOT
 /// tenant-scoped: a system-wide repair that runs without an actor context (mirrors <c>RepairDisconnectedCredentialBindingsCommand</c>).
 ///
 /// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): each token is retired and saved on its own, and a

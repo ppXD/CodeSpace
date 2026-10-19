@@ -2,8 +2,8 @@ namespace CodeSpace.Core.Services.OAuth;
 
 /// <summary>
 /// A sibling of <see cref="ICrossProcessLock"/> for work that must not run twice at once and should simply be skipped, not
-/// queued, when something else is already doing it: a recurring sweep whose previous pass is still going. Same key space as
-/// <see cref="ICrossProcessLock"/>.
+/// queued, when something else is already doing it: a recurring sweep whose previous pass is still going, or a credential a
+/// write of its token holds (<c>CredentialRefreshLock.TryAcquireAsync</c>). Same key space as <see cref="ICrossProcessLock"/>.
 /// </summary>
 public interface ICrossProcessTryLock
 {

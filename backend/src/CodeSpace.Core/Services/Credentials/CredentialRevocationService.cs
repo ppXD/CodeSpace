@@ -1,6 +1,7 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -22,12 +23,14 @@ public sealed class CredentialRevocationService : ICredentialRevocationService, 
 
     private readonly CodeSpaceDbContext _db;
     private readonly ISweepFailureBackoff _backoff;
+    private readonly ICrossProcessTryLock _tryLock;
     private readonly ILogger<CredentialRevocationService> _logger;
 
-    public CredentialRevocationService(CodeSpaceDbContext db, ISweepFailureBackoff backoff, ILogger<CredentialRevocationService> logger)
+    public CredentialRevocationService(CodeSpaceDbContext db, ISweepFailureBackoff backoff, ICrossProcessTryLock tryLock, ILogger<CredentialRevocationService> logger)
     {
         _db = db;
         _backoff = backoff;
+        _tryLock = tryLock;
         _logger = logger;
     }
 
@@ -80,10 +83,33 @@ public sealed class CredentialRevocationService : ICredentialRevocationService, 
     }
 
     /// <summary>
-    /// Re-read under the candidate rule and retired on its own save, so one failure undoes no other. A person who rejoined
-    /// since the candidate list was read keeps the token.
+    /// Retire one candidate under the credential's refresh lock. A token somebody is writing — a refresh, or a re-authorization
+    /// by a person who has just rejoined — is skipped, not waited for, and met again on the next tick: retiring it under that write
+    /// would blank the token the write lands, and the person would be told their re-authorization worked.
     /// </summary>
     private async Task<bool> RetireDepartedOneAsync(DepartedCredential candidate, CancellationToken cancellationToken)
+    {
+        await using var held = await CredentialRefreshLock.TryAcquireAsync(_tryLock, candidate.Id, cancellationToken).ConfigureAwait(false);
+
+        if (held is null) return SkipBusy(candidate);
+
+        return await RetireHeldAsync(candidate, cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool SkipBusy(DepartedCredential candidate)
+    {
+        _logger.LogInformation("{Sweep}: credential {CredentialId} is being written (a refresh or a re-authorization holds its lock); it stays a candidate for the next pass", SweepName, candidate.Id);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Re-read under the candidate rule — now under the lock, so no write of the token can land between the verdict and the
+    /// retirement — and retired on its own save, so one failure undoes no other. A person who rejoined since the candidate list
+    /// was read keeps the token, and so does a re-authorization they completed before the lock was taken. The verdict is the
+    /// person's standing and the credential's ownership, which no write of its health changes, so the lock is the whole exclusion here.
+    /// </summary>
+    private async Task<bool> RetireHeldAsync(DepartedCredential candidate, CancellationToken cancellationToken)
     {
         try
         {

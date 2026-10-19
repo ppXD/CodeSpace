@@ -6,7 +6,8 @@ namespace CodeSpace.UnitTests.OAuth;
 /// <summary>
 /// 🟢 High fidelity — the production <see cref="CredentialRefreshLock"/> and its real in-process semaphores; only the
 /// cross-process tier is a recording fake, because ordering against it is the claim. A refresh and a re-authorization both
-/// take this one lock, and what they share is process-wide state, so these pin the properties that make "the same lock"
+/// take this one lock — and the sweeps that move or retire what hangs on a dead credential take it without waiting
+/// (<c>TryAcquireAsync</c>) — and what they share is process-wide state, so these pin the properties that make "the same lock"
 /// true: the same credential excludes, another does not, and the two tiers are taken and given back in one fixed order.
 /// </summary>
 [Trait("Category", "Unit")]
@@ -112,6 +113,83 @@ public class CredentialRefreshLockTests
         third.IsCompleted.ShouldBeFalse();
     }
 
+    [Fact]
+    public async Task A_try_acquire_of_a_free_credential_takes_both_tiers_and_gives_them_back()
+    {
+        var id = Guid.NewGuid();
+        var tryLock = new RecordingTryLock();
+
+        var held = await CredentialRefreshLock.TryAcquireAsync(tryLock, id, CancellationToken.None);
+
+        held.ShouldNotBeNull("nothing holds the credential");
+        tryLock.Events.ShouldBe(new[] { "acquire" });
+
+        await held.DisposeAsync();
+
+        tryLock.Events.ShouldBe(new[] { "acquire", "release" });
+        await using var again = await CredentialRefreshLock.AcquireAsync(new RecordingCrossProcessLock(), id, CancellationToken.None).WaitAsync(Patience);
+    }
+
+    [Fact]
+    public async Task A_try_acquire_of_a_credential_this_process_holds_returns_at_once_without_asking_the_advisory_lock()
+    {
+        var id = Guid.NewGuid();
+        var tryLock = new RecordingTryLock();
+        var holder = await CredentialRefreshLock.AcquireAsync(new RecordingCrossProcessLock(), id, CancellationToken.None);
+
+        var attempt = await CredentialRefreshLock.TryAcquireAsync(tryLock, id, CancellationToken.None).WaitAsync(Patience);
+
+        attempt.ShouldBeNull("a refresh or re-authorization in this process holds the credential, and a sweep does not queue behind it");
+        tryLock.Events.ShouldBeEmpty("the in-process semaphore is the first tier: nothing is asked of Postgres once it says busy");
+
+        await holder.DisposeAsync();
+
+        await using var afterwards = await CredentialRefreshLock.TryAcquireAsync(tryLock, id, CancellationToken.None);
+        afterwards.ShouldNotBeNull("once the holder lets go the credential is free for the sweep again");
+    }
+
+    [Fact]
+    public async Task A_try_acquire_of_a_credential_another_pod_holds_returns_null_and_gives_the_semaphore_back()
+    {
+        var id = Guid.NewGuid();
+        var tryLock = new RecordingTryLock { Busy = true };
+
+        var attempt = await CredentialRefreshLock.TryAcquireAsync(tryLock, id, CancellationToken.None);
+
+        attempt.ShouldBeNull("another pod holds the advisory lock");
+        tryLock.Events.ShouldBe(new[] { "refused" });
+        await using var again = await CredentialRefreshLock.AcquireAsync(new RecordingCrossProcessLock(), id, CancellationToken.None).WaitAsync(Patience);
+    }
+
+    [Fact]
+    public async Task A_try_acquire_whose_advisory_attempt_fails_gives_the_semaphore_back()
+    {
+        var id = Guid.NewGuid();
+
+        var failure = await Should.ThrowAsync<InvalidOperationException>(async () => await CredentialRefreshLock.TryAcquireAsync(new RecordingTryLock { Fail = true }, id, CancellationToken.None));
+
+        failure.Message.ShouldContain("advisory");
+        await using var again = await CredentialRefreshLock.AcquireAsync(new RecordingCrossProcessLock(), id, CancellationToken.None).WaitAsync(Patience);
+    }
+
+    [Fact]
+    public async Task A_credential_held_by_a_try_acquire_holds_up_a_waiting_acquire_until_it_is_disposed()
+    {
+        // One semaphore for both ways in: a sweep that holds a credential excludes a re-authorization exactly as a refresh would.
+        var id = Guid.NewGuid();
+        var crossProcess = new RecordingCrossProcessLock();
+        var sweep = await CredentialRefreshLock.TryAcquireAsync(new RecordingTryLock(), id, CancellationToken.None);
+
+        var reauthorization = CredentialRefreshLock.AcquireAsync(crossProcess, id, CancellationToken.None);
+
+        await Task.Delay(ShortWait);
+        reauthorization.IsCompleted.ShouldBeFalse("the re-authorization waits for the sweep's hold, so it cannot write while the sweep is moving");
+
+        await sweep!.DisposeAsync();
+
+        await using var handle = await reauthorization.WaitAsync(Patience);
+    }
+
     private sealed class RecordingCrossProcessLock : ICrossProcessLock
     {
         private readonly object _gate = new();
@@ -135,6 +213,41 @@ public class CredentialRefreshLockTests
             private readonly RecordingCrossProcessLock _owner;
 
             public Release(RecordingCrossProcessLock owner) { _owner = owner; }
+
+            public ValueTask DisposeAsync()
+            {
+                lock (_owner._gate) { _owner._events.Add("release"); }
+
+                return ValueTask.CompletedTask;
+            }
+        }
+    }
+
+    private sealed class RecordingTryLock : ICrossProcessTryLock
+    {
+        private readonly object _gate = new();
+        private readonly List<string> _events = new();
+
+        public bool Busy { get; init; }
+
+        public bool Fail { get; init; }
+
+        public List<string> Events { get { lock (_gate) { return _events.ToList(); } } }
+
+        public Task<IAsyncDisposable?> TryAcquireAsync(long key, CancellationToken cancellationToken)
+        {
+            if (Fail) throw new InvalidOperationException("simulated: the advisory lock could not be tried");
+
+            lock (_gate) { _events.Add(Busy ? "refused" : "acquire"); }
+
+            return Task.FromResult<IAsyncDisposable?>(Busy ? null : new Release(this));
+        }
+
+        private sealed class Release : IAsyncDisposable
+        {
+            private readonly RecordingTryLock _owner;
+
+            public Release(RecordingTryLock owner) { _owner = owner; }
 
             public ValueTask DisposeAsync()
             {

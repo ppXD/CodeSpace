@@ -2,6 +2,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.OAuth;
 using CodeSpace.Core.Services.Webhooks.Registration;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
@@ -22,6 +23,16 @@ namespace CodeSpace.Core.Services.Credentials;
 /// one other connection <see cref="FindOnlyOtherConnectionAsync"/> implies) or a person relinks them
 /// (<see cref="ICredentialRelinkService"/>), each a deliberate act rather than a side effect of connecting. The repair sweep
 /// stays the fallback for what none of those doors reached, and walks its backlog in bounded pages (<see cref="SweepPass{TCandidate}"/>).
+///
+/// <para>Both judge a credential dead and act on the verdict a moment later, and an in-place re-authorization
+/// (<see cref="ICredentialReauthorizer"/>) can land in between — after which the credential is healthy and what is bound to it
+/// must stay. The sweep takes the credential's refresh lock (<see cref="CredentialRefreshLock"/>) and judges it again under it,
+/// skipping a credential somebody is writing and meeting it on a later pass, so the re-authorization is either before the
+/// verdict or after the move. That lock is taken by the writers of the token only, and the credential's row has other writers —
+/// the hourly health probe writes a refused credential back to Active when its provider accepts it again — so the sweep also holds the
+/// row for the move (<see cref="MoveWhileHoldingRowAsync"/>). A connect cannot hold the lock until its unit of work commits without leaking it
+/// on a rollback, so it holds the dead credential's row for the transaction instead (<see cref="HoldAsReadAsync"/>): that excludes
+/// every writer of the row, ended by the commit or the rollback whichever comes.</para>
 /// </summary>
 public sealed partial class CredentialSuccessionService : ICredentialSuccessionService, IStrandedCredentialCensus, IScopedDependency
 {
@@ -34,14 +45,16 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
     private readonly IConnectionWebhookRegistrationDispatcher _hookDispatcher;
     private readonly IPostCommitActions _postCommit;
     private readonly ISweepFailureBackoff _backoff;
+    private readonly ICrossProcessTryLock _tryLock;
     private readonly ILogger<CredentialSuccessionService> _logger;
 
-    public CredentialSuccessionService(CodeSpaceDbContext db, IConnectionWebhookRegistrationDispatcher hookDispatcher, IPostCommitActions postCommit, ISweepFailureBackoff backoff, ILogger<CredentialSuccessionService> logger)
+    public CredentialSuccessionService(CodeSpaceDbContext db, IConnectionWebhookRegistrationDispatcher hookDispatcher, IPostCommitActions postCommit, ISweepFailureBackoff backoff, ICrossProcessTryLock tryLock, ILogger<CredentialSuccessionService> logger)
     {
         _db = db;
         _hookDispatcher = hookDispatcher;
         _postCommit = postCommit;
         _backoff = backoff;
+        _tryLock = tryLock;
         _logger = logger;
     }
 
@@ -67,7 +80,8 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
     /// The owner's dead credentials on the successor's instance and team — revoked, or refused by their provider. Filtered on
     /// the tracked entities, not in SQL: a token link revokes the credential it replaces in the same unit of work, so that row
     /// is Revoked in memory before it is Revoked in the database. No date is asked of a refused one here: the successor is
-    /// being created now, after whatever the owner's credentials last did.
+    /// being created now, after whatever the owner's credentials last did. Held as read before it is moved
+    /// (<see cref="HoldAsReadAsync"/>), because a re-authorization can have revived one since.
     /// </summary>
     private async Task<List<Guid>> LoadDeadPredecessorIdsAsync(Credential successor, Guid ownerId, CancellationToken cancellationToken)
     {
@@ -75,7 +89,42 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
             .Where(c => c.TeamId == successor.TeamId && c.ProviderInstanceId == successor.ProviderInstanceId && c.OwnerUserId == ownerId && c.Id != successor.Id)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return owned.Where(c => c.Status is CredentialStatus.Revoked or CredentialStatus.Error).Select(c => c.Id).ToList();
+        var dead = owned.Where(c => c.Status is CredentialStatus.Revoked or CredentialStatus.Error).ToList();
+
+        return await HoldAsReadAsync(dead, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Locks each dead credential's row until the unit of work ends and keeps only the ones still stored exactly as they were
+    /// read — same status, same payload. A re-authorization writes the row (status Active, a new payload), so one that landed
+    /// since the read changed it and the credential is healthy: its bindings stay. One that lands after the lock waits for the
+    /// commit, because its write needs the row this transaction holds — and then finds the bindings already moved, as it would
+    /// after the sweep. <c>FOR NO KEY UPDATE</c> excludes that write and nothing that merely refers to the credential; locked in id
+    /// order so two connects of one owner queue behind each other instead of deadlocking. Compared with the values the entity
+    /// was loaded with, not the ones it holds, because a token link has already marked the credential it replaces Revoked in memory.
+    /// </summary>
+    private async Task<List<Guid>> HoldAsReadAsync(List<Credential> dead, CancellationToken cancellationToken)
+    {
+        if (dead.Count == 0) return new List<Guid>();
+
+        var ids = dead.Select(c => c.Id).ToArray();
+
+        await HoldRowsAsync(ids, cancellationToken).ConfigureAwait(false);
+
+        var stored = await _db.Credential.AsNoTracking().Where(c => ids.Contains(c.Id)).Select(c => new StoredState(c.Id, c.Status, c.EncryptedPayload)).ToListAsync(cancellationToken).ConfigureAwait(false);
+
+        return dead.Where(credential => IsStoredAsRead(credential, stored)).Select(c => c.Id).ToList();
+    }
+
+    /// <summary>Locks the rows until the transaction they are taken in ends, in id order so two holders of overlapping sets queue behind each other instead of deadlocking. A row that is not there is not an error: whoever judges it afterwards finds nothing.</summary>
+    private async Task HoldRowsAsync(Guid[] ids, CancellationToken cancellationToken) =>
+        await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT 1 FROM credential WHERE id = ANY({ids}) ORDER BY id FOR NO KEY UPDATE", cancellationToken).ConfigureAwait(false);
+
+    private bool IsStoredAsRead(Credential credential, List<StoredState> stored)
+    {
+        var read = _db.Entry(credential).OriginalValues;
+
+        return stored.Any(s => s.Id == credential.Id && s.Status == read.GetValue<CredentialStatus>(nameof(Credential.Status)) && s.EncryptedPayload == read.GetValue<string>(nameof(Credential.EncryptedPayload)));
     }
 
     /// <summary>
@@ -96,18 +145,22 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
             .Take(take)
             .ToListAsync(cancellationToken).ConfigureAwait(false);
 
-        return rows.Select(row => new StrandedCredential(row.DeadId, row.SuccessorId!.Value)).ToList();
+        return rows.Select(row => new StrandedCredential(row.DeadId)).ToList();
     }
 
     /// <summary>
     /// Every candidate after <paramref name="after"/> (all of them when null), unbounded: what <see cref="LoadStrandedAsync"/>
-    /// pages through and <see cref="CountAsync"/> counts, so the two cannot disagree about what a candidate is.
+    /// pages through and <see cref="CountAsync"/> counts, so the two cannot disagree about what a candidate is. Narrowed to
+    /// <paramref name="only"/> it is the verdict on that one credential, which <see cref="RepairAsync"/> asks for again under
+    /// the credential's lock — the one definition of "dead and stranded", asked twice.
     /// </summary>
-    private IQueryable<StrandedRow> StrandedWithSuccessor(Guid? after = null)
+    private IQueryable<StrandedRow> StrandedWithSuccessor(Guid? after = null, Guid? only = null)
     {
         var deadCredentials = _db.Credential.AsNoTracking().Where(c => (c.Status == CredentialStatus.Revoked || c.Status == CredentialStatus.Error) && c.OwnerUserId != null);
 
         if (after is Guid cursor) deadCredentials = deadCredentials.Where(c => c.Id.CompareTo(cursor) > 0);
+
+        if (only is Guid single) deadCredentials = deadCredentials.Where(c => c.Id == single);
 
         return deadCredentials
             .Where(dead => _db.Repository.Any(r => r.CredentialId == dead.Id && r.TeamId == dead.TeamId && r.ProviderInstanceId == dead.ProviderInstanceId && r.DeletedDate == null)
@@ -124,16 +177,38 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
             .Where(candidate => candidate.SuccessorId != null);
     }
 
-    /// <summary>Move one dead credential's bindings and save them on their own, then hand its revived hooks to the registrar.</summary>
+    /// <summary>
+    /// Move one dead credential's bindings, under the credential's refresh lock. A credential somebody is writing — a refresh, or
+    /// a re-authorization that may be reviving it — is skipped, not waited for: nothing is lost, the next pass meets it again.
+    /// </summary>
     private async Task<bool> RepairAsync(StrandedCredential candidate, CancellationToken cancellationToken)
+    {
+        await using var held = await CredentialRefreshLock.TryAcquireAsync(_tryLock, candidate.DeadId, cancellationToken).ConfigureAwait(false);
+
+        if (held is null) return SkipBusy(candidate);
+
+        return await RepairHeldAsync(candidate, cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool SkipBusy(StrandedCredential candidate)
+    {
+        _logger.LogInformation("{Sweep}: credential {CredentialId} is being written (a refresh or a re-authorization holds its lock); it stays a candidate for the next pass", SweepName, candidate.DeadId);
+
+        return false;
+    }
+
+    /// <summary>
+    /// The candidate was read before the lock was taken, so it is judged again now — and the move saved and committed as one
+    /// transaction (<see cref="MoveWhileHoldingRowAsync"/>). The revived hooks go to the registrar once it has committed.
+    /// </summary>
+    private async Task<bool> RepairHeldAsync(StrandedCredential candidate, CancellationToken cancellationToken)
     {
         try
         {
-            var successor = await _db.Credential.SingleAsync(c => c.Id == candidate.SuccessorId, cancellationToken).ConfigureAwait(false);
+            var adopted = await MoveWhileHoldingRowAsync(candidate, cancellationToken).ConfigureAwait(false);
 
-            var adopted = await AdoptBindingsAsync(successor, new List<Guid> { candidate.DeadId }, cancellationToken).ConfigureAwait(false);
+            if (adopted is null) return false;
 
-            await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
             await DispatchAfterCommitAsync(adopted.RevivedHookIds, cancellationToken).ConfigureAwait(false);
 
             return true;
@@ -142,6 +217,34 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
         {
             _db.ChangeTracker.Clear();
         }
+    }
+
+    /// <summary>
+    /// The one credential's own transaction — not the batch's, which a sweep must not have (<see cref="ScopedTransaction"/>): the row is
+    /// locked <c>FOR NO KEY UPDATE</c> first and judged dead and stranded second, so what is moved is judged on the row as it is for as
+    /// long as the move takes. The refresh lock excludes the writers of the token — a refresh, a re-authorization — and this excludes
+    /// every other writer of the row, which the hourly health probe is: it writes a refused credential back to Active when its
+    /// provider accepts it again, without that lock. A verdict recorded since the page was read is seen by the judgement; one that
+    /// arrives after the row is held waits for the commit, and then finds the bindings already moved. The successor is the one this
+    /// verdict names, not the one the page did. Null when the credential is no longer a candidate: nothing moves.
+    /// </summary>
+    private async Task<Adopted?> MoveWhileHoldingRowAsync(StrandedCredential candidate, CancellationToken cancellationToken)
+    {
+        await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+
+        await HoldRowsAsync(new[] { candidate.DeadId }, cancellationToken).ConfigureAwait(false);
+
+        var verdict = await StrandedWithSuccessor(only: candidate.DeadId).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (verdict is null) return null;
+
+        var successor = await _db.Credential.SingleAsync(c => c.Id == verdict.SuccessorId!.Value, cancellationToken).ConfigureAwait(false);
+        var adopted = await AdoptBindingsAsync(successor, new List<Guid> { candidate.DeadId }, cancellationToken).ConfigureAwait(false);
+
+        await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
+        await transaction.CommitAsync(cancellationToken).ConfigureAwait(false);
+
+        return adopted;
     }
 
     /// <summary>Re-point every live binding of <paramref name="predecessorIds"/> at <paramref name="successor"/> as tracked changes. Returns what moved, and the group hooks now waiting for a registrar.</summary>
@@ -216,10 +319,13 @@ public sealed partial class CredentialSuccessionService : ICredentialSuccessionS
             await _postCommit.RunAfterCommitAsync(ct => _hookDispatcher.DispatchAsync(hookId, ct), cancellationToken).ConfigureAwait(false);
     }
 
-    private sealed record StrandedCredential(Guid DeadId, Guid SuccessorId) : ISweepCandidate
+    private sealed record StrandedCredential(Guid DeadId) : ISweepCandidate
     {
         public Guid Id => DeadId;
     }
+
+    /// <summary>What a credential's row holds that a re-authorization changes: compared with what the entity was read with.</summary>
+    private sealed record StoredState(Guid Id, CredentialStatus Status, string EncryptedPayload);
 
     private sealed record Adopted(int RepositoryCount, int ConnectionWebhookCount, List<Guid> RevivedHookIds);
 

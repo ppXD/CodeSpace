@@ -17,7 +17,9 @@ public interface ICredentialSuccessionService
     /// <paramref name="successor"/>, lifting the "needs a new credential" error a disconnect set and reviving the hooks its
     /// failures buried. A credential with no
     /// owner (team-service) succeeds nobody. Tracked changes only — the caller's unit of work saves them with the
-    /// successor, and the revived hooks are dispatched after it commits.
+    /// successor, and the revived hooks are dispatched after it commits. A dead credential that a re-authorization has
+    /// revived since it was read keeps its bindings, and one revived after that waits for the unit of work to commit: the
+    /// credentials are held until it ends.
     /// </summary>
     Task CarryForwardAsync(Credential successor, CancellationToken cancellationToken);
 
@@ -28,7 +30,10 @@ public interface ICredentialSuccessionService
     /// credential that fails is skipped and logged, and the pass goes on to the ones after it — however many fail, they
     /// cannot crowd a repairable credential out of the pass — and one that has failed several passes in a row is set aside
     /// for a while rather than attempted, and warned about, every tick. A pass is bounded in attempts as well as in
-    /// repairs (<see cref="SweepPass{TCandidate}"/>).
+    /// repairs (<see cref="SweepPass{TCandidate}"/>). Each credential is repaired under its refresh lock and judged dead
+    /// again once it is held: one a re-authorization has revived since the page was read is no longer a candidate and keeps
+    /// its bindings, and one a refresh or a re-authorization is writing is skipped, not waited for, and met on the next pass. The move is made
+    /// holding the credential's row, so a verdict the health probe records meanwhile waits for it.
     /// </summary>
     Task<int> RepairStrandedAsync(int batchSize, CancellationToken cancellationToken);
 
