@@ -18,6 +18,11 @@ namespace CodeSpace.Core.Services.Credentials.Remedy;
 ///
 /// <para>Read-only. Nothing here changes a credential, a repository or a run: every action the remedy offers is a request the
 /// client makes of the endpoint that already does it, under that endpoint's own authorization.</para>
+///
+/// <para>A failure a <c>flow.subworkflow</c> node carried up from its child run is the child's remedy for the parent's page: the same code, credential,
+/// repositories, resolution (measured from when the child recorded the failure, not from when the parent was resumed) and actions, for the caller's standing in
+/// the PARENT's team (which is the child's, by construction), with the run it happened in named (<see cref="ProviderRemedy.Origin"/>) and Re-run still the run
+/// the page is for. A child that is not this team's run is never named, and changes nothing else about the remedy either.</para>
 /// </summary>
 public sealed partial class ProviderRemedyService : IProviderRemedyService, IScopedDependency
 {
@@ -42,7 +47,11 @@ public sealed partial class ProviderRemedyService : IProviderRemedyService, ISco
 
         if (recorded is null) return null;
 
-        _ctx = new RemedyContext { TeamId = teamId, Code = recorded.Failure.Code, Failure = recorded.Failure, At = recorded.At, ScopeRepositoryIds = recorded.ScopeRepositoryIds, OffersRerun = true };
+        // A failure carried up from a sub-workflow's child run is the child's remedy: traced through the repositories the CHILD was launched against, and judged
+        // "fixed since" from when the CHILD recorded it — as its own page does — because the parent's record is only as old as the last sibling it waited for.
+        var origin = await ReadOriginAsync(recorded.Failure.Origin, teamId, cancellationToken).ConfigureAwait(false);
+
+        _ctx = new RemedyContext { TeamId = teamId, Code = recorded.Failure.Code, Failure = recorded.Failure, At = origin?.FailedAt ?? recorded.At, ScopeRepositoryIds = origin?.ScopeRepositoryIds ?? recorded.ScopeRepositoryIds, Origin = origin?.Origin, OffersRerun = true };
 
         return await BuildAsync(cancellationToken).ConfigureAwait(false);
     }

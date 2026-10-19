@@ -32,6 +32,13 @@ public static class ProviderFailureCapture
         return null;
     }
 
+    /// <summary>
+    /// The failure a record already carries, kept only when it is one this capture would have written itself — a provider connection failure
+    /// (<see cref="FailureCodes.ProviderConnection"/>). For a node that read a failure back from where it happened (a sub-workflow's child run
+    /// recorded it) instead of catching an exception: the same filter, so what is carried onward is never wider than what is captured.
+    /// </summary>
+    public static PersistedFailure? OfRecord(PersistedFailure? recorded) => recorded is not null && FailureCodes.ProviderConnection.Contains(recorded.Code) ? recorded : null;
+
     private static PersistedFailure? FromAny(IEnumerable<Exception> candidates, Guid? repositoryId) =>
         candidates.Select(candidate => From(candidate, repositoryId)).FirstOrDefault(found => found is not null);
 

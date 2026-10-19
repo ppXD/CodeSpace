@@ -3,9 +3,11 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows.Dispatch;
+using CodeSpace.Core.Services.Workflows.Failures;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Messages.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -37,7 +39,8 @@ public interface ISubworkflowService
     /// When a child run reaches a terminal state, resume the parent parked on it: find the parent's pending
     /// <c>Subworkflow</c> wait whose <c>Token</c> equals this child's id (which also distinguishes a sub-workflow child
     /// from a replay child — a replay's "parent" holds no such wait), then resolve it with the child's status + outputs +
-    /// error so the node can map them, via the wait-for-all completion path. Returns true iff THIS call resolved the wait
+    /// error — and, for a child that ended on a provider failure a person can repair, that failure and the run it happened in — so the
+    /// node can map them, via the wait-for-all completion path. Returns true iff THIS call resolved the wait
     /// (false when there is no such pending wait — not a sub-workflow child, or a concurrent resume / this child's own
     /// happy-path resume already won). Idempotent (the wait CAS) and best-effort (a failure is logged, never propagated —
     /// the child already completed cleanly). The ONE resume path shared by the engine's on-completion call AND the
@@ -55,14 +58,16 @@ public sealed class SubworkflowService : ISubworkflowService, IScopedDependency
     private readonly IRunStarter _runStarter;
     private readonly IWorkflowRunDispatcher _dispatcher;
     private readonly IWorkflowResumeService _resumeService;
+    private readonly IRunFailureReader _failures;
     private readonly ILogger<SubworkflowService> _logger;
 
-    public SubworkflowService(CodeSpaceDbContext db, IRunStarter runStarter, IWorkflowRunDispatcher dispatcher, IWorkflowResumeService resumeService, ILogger<SubworkflowService> logger)
+    public SubworkflowService(CodeSpaceDbContext db, IRunStarter runStarter, IWorkflowRunDispatcher dispatcher, IWorkflowResumeService resumeService, IRunFailureReader failures, ILogger<SubworkflowService> logger)
     {
         _db = db;
         _runStarter = runStarter;
         _dispatcher = dispatcher;
         _resumeService = resumeService;
+        _failures = failures;
         _logger = logger;
     }
 
@@ -123,12 +128,8 @@ public sealed class SubworkflowService : ISubworkflowService, IScopedDependency
 
             if (waitId is null) return false;   // not a sub-workflow child (e.g. a replay), or its wait already resolved
 
-            var payload = JsonSerializer.Serialize(new
-            {
-                status = status.ToString(),
-                outputs = JsonSafeParseObject(child.OutputsJson),
-                error,
-            });
+            var failure = status == WorkflowRunStatus.Failure ? await ReadChildFailureAsync(child, cancellationToken).ConfigureAwait(false) : null;
+            var payload = BuildResumePayload(child, status, error, failure);
 
             // Resolve ONLY this child's own wait — never the sibling waits a parallel fan-out of children holds — so each
             // parent subworkflow node resumes with its own child's outputs. The wait-COMPLETION path's CAS makes a
@@ -142,6 +143,39 @@ public sealed class SubworkflowService : ISubworkflowService, IScopedDependency
             _logger.LogError(ex, "Sub-workflow child {ChildRunId} is terminal but resuming parent {ParentRunId} failed", child.Id, child.ParentRunId);
             return false;
         }
+    }
+
+    /// <summary>
+    /// The provider failure the child's run ended on, read by the reader the child's own run page asks (so the parent can never be told a different
+    /// failure than the child shows), with the run it happened in. A failure the child itself carried up from a child of its own keeps the origin it
+    /// already has — run, node and the time that run recorded it — so one that passed through nested sub-workflows names the deepest run that met it, and
+    /// is judged from when it did. Null when the child ended on anything else, and
+    /// when the record cannot be read: resuming the parent never waits on it, and a parent resumed without it fails with the sentence it always had.
+    /// </summary>
+    private async Task<PersistedFailure?> ReadChildFailureAsync(WorkflowRun child, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var recorded = await _failures.ReadAsync(child.Id, child.TeamId, cancellationToken).ConfigureAwait(false);
+
+            return recorded is null ? null : recorded.Failure with { Origin = recorded.Failure.Origin ?? new FailureOrigin { RunId = child.Id, NodeId = recorded.NodeId, At = recorded.At } };
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(ex, "Could not read the failure sub-workflow child {ChildRunId} ended on; its parent resumes with the sentence alone", child.Id);
+
+            return null;
+        }
+    }
+
+    /// <summary>The resume payload the sub-workflow node maps: status, outputs and error as it always carried, plus the child's failure under the key a ledger record keeps one under — absent unless there is one, so a payload without a failure is byte-identical to what it was.</summary>
+    private static string BuildResumePayload(WorkflowRun child, WorkflowRunStatus status, string? error, PersistedFailure? failure)
+    {
+        var payload = new Dictionary<string, object?> { ["status"] = status.ToString(), ["outputs"] = JsonSafeParseObject(child.OutputsJson), ["error"] = error };
+
+        if (failure is not null) payload[PersistedFailureJson.PayloadKey] = PersistedFailureJson.ToElement(failure);
+
+        return JsonSerializer.Serialize(payload);
     }
 
     /// <summary>Parse a run's OutputsJson into a JsonElement object for the resume payload; an empty object on any trouble.</summary>

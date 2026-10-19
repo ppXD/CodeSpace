@@ -1,3 +1,4 @@
+using CodeSpace.Messages.Dtos.Credentials;
 using CodeSpace.Messages.Enums;
 
 namespace CodeSpace.Core.Services.Credentials.Remedy;
@@ -63,6 +64,9 @@ public sealed record RemedyFacts
 
     /// <summary>For a refused trigger delivery that could not read an author's standing: which of <see cref="CodeSpace.Messages.Constants.StandingLookupCauses"/> failed. Null for a row written before it was kept, which the sentence then words as either.</summary>
     public string? Lookup { get; init; }
+
+    /// <summary>The sub-workflow run the failure happened in, when it was carried up to the run the remedy is for; the sentence says where it happened. Null for a failure in the run itself.</summary>
+    public RemedyOrigin? Origin { get; init; }
 
     /// <summary>What the failure names works now.</summary>
     public bool Resolved { get; init; }

@@ -33,7 +33,7 @@ const remedy = (over: Partial<ProviderRemedy> = {}): ProviderRemedy => ({
 
 type Call = { method: string; url: string; body: unknown };
 
-function renderCard(r: ProviderRemedy, props: { onRerun?: () => void; rawDetail?: string } = {}, answers: Record<string, unknown> = {}) {
+function renderCard(r: ProviderRemedy, props: { onRerun?: () => void; rawDetail?: string; onOpenRun?: (runId: string) => void } = {}, answers: Record<string, unknown> = {}) {
   localStorage.setItem("codespace.jwt", "test-jwt");
   localStorage.setItem("codespace.activeTeamId", team.id);
 
@@ -104,6 +104,66 @@ describe("ProviderRemedyCard — what it says", () => {
     fireEvent.click(screen.getByRole("button", { name: /Show raw error/ }));
 
     expect(screen.getByText(/invalid_grant/)).toBeTruthy();
+  });
+});
+
+describe("ProviderRemedyCard — a failure that happened in a sub-workflow", () => {
+  const origin = { runId: "1a2b3c4d-0000-4000-8000-000000000000", workflowId: "w-child", workflowName: "Review the pull requests", nodeId: "list" };
+  const carried = (over: Partial<ProviderRemedy> = {}) => remedy({
+    cause: "This failed in the sub-workflow “Review the pull requests” (run 1a2b3c4d), at node 'list'. GitLab refused to renew the sign-in behind “GitLab · nacho”.",
+    origin,
+    ...over,
+  });
+
+  it("names the sub-workflow and its run, and opens that run from the link", () => {
+    const onOpenRun = vi.fn();
+
+    renderCard(carried(), { onRerun: vi.fn(), onOpenRun });
+
+    const link = screen.getByRole("button", { name: "In sub-workflow Review the pull requests (run 1a2b3c4d)" });
+
+    expect(link.getAttribute("title")).toBe("Open the sub-workflow run");
+
+    fireEvent.click(link);
+
+    expect(onOpenRun).toHaveBeenCalledTimes(1);
+    expect(onOpenRun).toHaveBeenCalledWith(origin.runId);
+  });
+
+  it("names the run as text, with no link, where no run can be opened", () => {
+    renderCard(carried());
+
+    expect(screen.getByText("In sub-workflow Review the pull requests (run 1a2b3c4d)")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /In sub-workflow/ })).toBeNull();
+  });
+
+  it("keeps the credential, the repository and every action exactly as the backend sent them, and Re-run is the card's own", () => {
+    const onRerun = vi.fn();
+    const onOpenRun = vi.fn();
+
+    renderCard(carried({ resolved: true, actions: [action("rerun"), action("reconnect"), action("open_providers")] }), { onRerun, onOpenRun });
+
+    expect(screen.getByText("GitLab · nacho")).toBeTruthy();
+    expect(screen.getByText("acme/api")).toBeTruthy();
+    expect(screen.getAllByRole("button").map((b) => b.textContent?.trim())).toEqual(["In sub-workflow Review the pull requests (run 1a2b3c4d)", "Re-run", "Reconnect GitLab", "Open Providers"]);   // the line that says where sits above the actions, which are the backend's list as sent
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-run" }));
+
+    expect(onRerun).toHaveBeenCalledTimes(1);
+    expect(onOpenRun).not.toHaveBeenCalled();   // re-running is the parent's: it never opens the child
+  });
+
+  it.each([undefined, null])("says nothing about a sub-workflow when the failure happened in the run itself (origin %s)", (value) => {
+    renderCard(remedy({ origin: value }), { onOpenRun: vi.fn() });
+
+    expect(screen.queryByText(/sub-workflow/i)).toBeNull();
+    expect(screen.getAllByRole("button").map((b) => b.textContent?.trim())).toEqual(["Reconnect GitLab", "Re-link repository", "Open Providers"]);
+  });
+
+  it("names a run whose workflow has no node recorded exactly the same way", () => {
+    renderCard(carried({ origin: { ...origin, nodeId: null } }));
+
+    expect(screen.getByText("In sub-workflow Review the pull requests (run 1a2b3c4d)")).toBeTruthy();
   });
 });
 

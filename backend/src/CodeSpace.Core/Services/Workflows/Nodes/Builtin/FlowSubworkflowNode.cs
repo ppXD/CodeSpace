@@ -1,6 +1,9 @@
 using System.Text.Json;
+using CodeSpace.Core.Failures;
+using CodeSpace.Core.Services.Workflows.Failures;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 
@@ -13,7 +16,10 @@ namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 /// node's <c>inputs</c> as the child's payload) and parks the parent. When the child reaches a
 /// terminal state the engine resumes the parent with the child's outcome, which the node maps:
 /// child Success → this node's outputs ARE the child's outputs; child Failure → this node fails,
-/// composing with the node's retry policy + <c>error</c> branch like any other failure.</para>
+/// composing with the node's retry policy + <c>error</c> branch like any other failure. A child that
+/// ended on a provider failure a person can repair (a disconnected credential, a revoked token) reaches
+/// the node on the same payload, and the node fails carrying it, so the parent's own record — and the
+/// remedy built from it — says what is wrong and which child run it happened in.</para>
 ///
 /// <para>The node itself is pure — it never touches the DB. The engine owns the cross-run
 /// orchestration (staging, the suspend wait, the deferred dispatch, the completion → resume hook),
@@ -69,7 +75,7 @@ public sealed class FlowSubworkflowNode : INodeRuntime
 
     public Task<NodeResult> RunAsync(NodeRunContext context, CancellationToken cancellationToken)
     {
-        // Resumed: the child finished. ResumePayload = { status, outputs, error } (stamped by the
+        // Resumed: the child finished. ResumePayload = { status, outputs, error, failure? } (stamped by the
         // engine's completion hook). Map it onto this node's result.
         if (context.ResumePayload.HasValue)
         {
@@ -78,7 +84,10 @@ public sealed class FlowSubworkflowNode : INodeRuntime
                 return Task.FromResult(NodeResult.Ok(ReadObjectBag(payload, "outputs")));
 
             var error = ReadString(payload, "error");
-            return Task.FromResult(NodeResult.Fail($"Sub-workflow run failed: {(string.IsNullOrEmpty(error) ? "see the child run" : error)}"));
+            var sentence = $"Sub-workflow run failed: {(string.IsNullOrEmpty(error) ? "see the child run" : error)}";
+
+            // The sentence is the node's own and stays as it was; the provider failure the child ended on, when it recorded one, rides beside it.
+            return Task.FromResult(ReadChildFailure(payload) is { } failure ? NodeResult.Fail(sentence, failure) : NodeResult.Fail(sentence));
         }
 
         // First pass: validate config + suspend with the spec. The engine stages + dispatches the
@@ -102,6 +111,10 @@ public sealed class FlowSubworkflowNode : INodeRuntime
             Payload = JsonSerializer.SerializeToElement(spec),
         }));
     }
+
+    /// <summary>The provider failure the child's run ended on, as the engine's completion hook read it off the child's own record — absent for a child that failed for any other reason, and for a payload stamped before children carried theirs.</summary>
+    private static PersistedFailure? ReadChildFailure(JsonElement payload) =>
+        payload.ValueKind == JsonValueKind.Object && payload.TryGetProperty(PersistedFailureJson.PayloadKey, out var failure) ? ProviderFailureCapture.OfRecord(PersistedFailureJson.ReadElement(failure)) : null;
 
     private static string ReadString(JsonElement bag, string key) =>
         bag.ValueKind == JsonValueKind.Object && bag.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String

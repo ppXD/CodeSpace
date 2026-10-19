@@ -2,6 +2,7 @@ using System.Linq.Expressions;
 using CodeSpace.Core.Authorization;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Authorization;
+using CodeSpace.Messages.Dtos.Credentials;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Failures;
 using Microsoft.EntityFrameworkCore;
@@ -12,6 +13,23 @@ public sealed partial class ProviderRemedyService
 {
     /// <summary>The most repositories one remedy names. A run launched against dozens still gets a card a person can read; the count it states is of what it names.</summary>
     private const int MaxRepositories = 10;
+
+    /// <summary>
+    /// The run a carried failure happened in, read under the asker's team: its workflow's name, the node that ended it and the repositories it was launched
+    /// against. A run that is not the team's, is gone, or is not an authored workflow's names nothing — a pointer in a record is never trusted to be the team's
+    /// own, so it is checked where it is read.
+    /// </summary>
+    private async Task<OriginRun?> ReadOriginAsync(FailureOrigin? origin, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (origin is null) return null;
+
+        var run = await _db.WorkflowRun.AsNoTracking()
+            .Where(r => r.Id == origin.RunId && r.TeamId == teamId && r.WorkflowId != null)
+            .Select(r => new { WorkflowId = r.WorkflowId!.Value, Name = r.Workflow!.Name, r.ScopeRepositoryIds })
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        return run is null ? null : new OriginRun(new RemedyOrigin { RunId = origin.RunId, WorkflowId = run.WorkflowId, WorkflowName = run.Name, NodeId = origin.NodeId }, run.ScopeRepositoryIds, origin.At);
+    }
 
     /// <summary>The repositories the failure was about: the one it names, else the ones the run was launched against, else — when it names a credential and nothing else — whatever still leans on that credential.</summary>
     private async Task LoadRepositoriesAsync(CancellationToken cancellationToken)
