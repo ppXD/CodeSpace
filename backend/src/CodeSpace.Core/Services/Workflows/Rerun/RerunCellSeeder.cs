@@ -2,9 +2,11 @@ using System.Text.Json;
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows.Failures;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using Microsoft.EntityFrameworkCore;
 
 namespace CodeSpace.Core.Services.Workflows.Rerun;
@@ -53,11 +55,13 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
 
     private readonly CodeSpaceDbContext _db;
     private readonly IRunRecordLogger _recordLogger;
+    private readonly ICellFailureReader _cellFailureReader;
 
-    public RerunCellSeeder(CodeSpaceDbContext db, IRunRecordLogger recordLogger)
+    public RerunCellSeeder(CodeSpaceDbContext db, IRunRecordLogger recordLogger, ICellFailureReader cellFailureReader)
     {
         _db = db;
         _recordLogger = recordLogger;
+        _cellFailureReader = cellFailureReader;
     }
 
     public async Task SeedKeptCellsAsync(Guid originalRunId, Guid newRunId, IReadOnlySet<string> keptNodeIds, bool writeEmptySnapshotSentinel, CancellationToken cancellationToken)
@@ -129,8 +133,11 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
                 // A re-emitted Failure cell is one of: a top-level kept failure (error-edge-handled); a map sibling's
                 // continue-mode abandon row; or a map sibling's TERMINATE-mode failed row (both: a failed body node
                 // with no error edge) — all round-trip faithfully: RehydrateFromLedger / TrySettleBranch re-settle
-                // each from the node.failed record (the terminate arm replays it as a preserved failure, no re-run).
-                await _recordLogger.NodeFailedAsync(newRunId, cell.NodeId, iterationKey, cell.Error ?? "(failed)", TimeSpan.Zero, cancellationToken).ConfigureAwait(false);
+                // each from the node.failed record (the terminate arm replays it as a preserved failure, no re-run). The failure the
+                // original recorded for the cell rides along, so a map the fork fails on that preserved branch answers as the original's did.
+                var failure = await ReadOriginalFailureAsync(originalRunId, cell, cancellationToken).ConfigureAwait(false);
+
+                await _recordLogger.NodeFailedAsync(newRunId, cell.NodeId, iterationKey, cell.Error ?? "(failed)", TimeSpan.Zero, failure, cancellationToken).ConfigureAwait(false);
                 break;
 
             default:
@@ -140,6 +147,19 @@ public sealed class RerunCellSeeder : IRerunCellSeeder, IScopedDependency
                 throw new InvalidOperationException(
                     $"Cannot re-emit reused cell '{cell.NodeId}' (iteration '{iterationKey}') from run {originalRunId}: unexpected non-terminal status {cell.Status}.");
         }
+    }
+
+    /// <summary>
+    /// What the original run says the cell failed on: its own <c>node.failed</c> record's failure, else the agent run that worked in it — read as the
+    /// engine reads any cell, so the account is the same wherever it is asked. The agent run belongs to the ORIGINAL run, so a fork that replays the
+    /// cell without carrying it would never find it: the cell's record on the fork is the only place the fork can hold it. Null when the cell recorded
+    /// none, so such a record is written exactly as it always was.
+    /// </summary>
+    private async Task<PersistedFailure?> ReadOriginalFailureAsync(Guid originalRunId, WorkflowRunNode cell, CancellationToken cancellationToken)
+    {
+        var teamId = await _db.WorkflowRun.AsNoTracking().Where(r => r.Id == originalRunId).Select(r => r.TeamId).SingleAsync(cancellationToken).ConfigureAwait(false);
+
+        return await _cellFailureReader.ReadAsync(originalRunId, teamId, cell.NodeId, cell.IterationKey, cancellationToken).ConfigureAwait(false);
     }
 
     private static IReadOnlyDictionary<string, JsonElement> ParseOutputs(string json)

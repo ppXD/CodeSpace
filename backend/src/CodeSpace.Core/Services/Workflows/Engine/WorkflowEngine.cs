@@ -12,6 +12,7 @@ using CodeSpace.Core.Services.Jobs;
 using CodeSpace.Core.Services.Variables;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.Artifacts;
+using CodeSpace.Core.Services.Workflows.Failures;
 using CodeSpace.Core.Services.Workflows.Lifecycle;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Budget;
@@ -21,6 +22,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using CodeSpace.Messages.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -68,6 +70,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     private readonly IAgentRunService _agentRunService;
     private readonly IAgentDefinitionResolver _agentDefinitionResolver;
     private readonly IRunCancellationRegistry _cancellationRegistry;
+    private readonly ICellFailureReader _cellFailureReader;
     // The run's lifetime scope — BeginLifetimeScope() per parallel node gives each its own DbContext +
     // record logger so concurrent nodes never share an EF change-tracker (see RunNodeInChildScopeAsync).
     private readonly ILifetimeScope _lifetimeScope;
@@ -92,7 +95,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     internal const int DefaultMaxParallelism = 8;
     internal const int MaxParallelismCeiling = 64;
 
-    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IWorkflowSensitivePayloadStore sensitivePayloadStore, IRunDataCompletenessWriter completenessWriter, IArtifactStore artifactStore, IArtifactOffloader offloader, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, IRunCancellationRegistry cancellationRegistry, ILifetimeScope lifetimeScope, Completion.ICompletionTerminalAuthority terminalAuthority)
+    public WorkflowEngine(CodeSpaceDbContext db, INodeRegistry nodeRegistry, IVariableService variableService, IRunRecordLogger recordLogger, IPayloadRedactor redactor, IWorkflowSensitivePayloadStore sensitivePayloadStore, IRunDataCompletenessWriter completenessWriter, IArtifactStore artifactStore, IArtifactOffloader offloader, ILogger<WorkflowEngine> logger, ILoggerFactory loggerFactory, ICodeSpaceBackgroundJobClient backgroundJobClient, ISubworkflowService subworkflowService, IWorkflowResumeService resumeService, IAgentRunService agentRunService, IAgentDefinitionResolver agentDefinitionResolver, IRunCancellationRegistry cancellationRegistry, ICellFailureReader cellFailureReader, ILifetimeScope lifetimeScope, Completion.ICompletionTerminalAuthority terminalAuthority)
     {
         _terminalAuthority = terminalAuthority;
         _db = db;
@@ -112,6 +115,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         _agentRunService = agentRunService;
         _agentDefinitionResolver = agentDefinitionResolver;
         _cancellationRegistry = cancellationRegistry;
+        _cellFailureReader = cellFailureReader;
         _lifetimeScope = lifetimeScope;
         _maxParallelism = ParseMaxParallelism(Environment.GetEnvironmentVariable(MaxParallelismEnvVar));
     }
@@ -1496,12 +1500,12 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// node with its own <c>error</c> edge is "handled" regardless of policy. Returns <c>true</c> ONLY
     /// for the continue-abandon case; otherwise releases the ready downstream and returns <c>false</c>.
     /// </summary>
-    private bool AdvanceBodyNodeOrAbandon(NodeDefinition node, NodeStatus status, WalkerState bodyState, LoopErrorHandling errorHandling)
+    private bool AdvanceBodyNodeOrAbandon(NodeDefinition node, NodeStatus status, WalkerState bodyState, LoopErrorHandling errorHandling, string iterationKey)
     {
         if (status == NodeStatus.Failure && !HasErrorEdge(node, bodyState))
         {
             if (errorHandling == LoopErrorHandling.Terminate)
-                throw new NodeFailureException($"Node '{node.Id}' failed.");
+                throw new NodeFailureException($"Node '{node.Id}' failed.", new FailedCell(node.Id, iterationKey));
 
             return true;   // continue: abandon the rest of this pass
         }
@@ -1673,10 +1677,23 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // A body failure (no error edge) or a tripped budget — expose it as the loop's `error`
             // output so the loop's own error edge can catch it, then write node.failed.
             scope.Nodes[loopNode.Id] = BuildErrorOutput(ex.Message, loopNode.Id);
-            await _recordLogger.NodeFailedAsync(run.Id, loopNode.Id, nodeIterationKey, RedactForPersistence(scope, ex.Message), DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+
+            var failure = await ReadEndingCellFailureAsync(run, ex, cancellationToken).ConfigureAwait(false);
+
+            await _recordLogger.NodeFailedAsync(run.Id, loopNode.Id, nodeIterationKey, RedactForPersistence(scope, ex.Message), DateTimeOffset.UtcNow - startedAt, failure, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Failure;
         }
     }
+
+    /// <summary>
+    /// The provider failure behind a container's failure, for the container's own <c>node.failed</c> record to carry beside its sentence: what
+    /// the cell whose unhandled failure ended it recorded (its own failure, else its agent run's), read as <see cref="ICellFailureReader"/>
+    /// reads any cell — so the run's remedy is the one a top-level node of the same failure gets. Null when the container failed on its own
+    /// (a tripped budget, a binding that is not an array) or the cell recorded no failure a person can repair. It reads only the cell that ended
+    /// the container, never a failure its body handled or a sibling branch met: the run's failure is the one the node that ENDED it recorded.
+    /// </summary>
+    private async Task<PersistedFailure?> ReadEndingCellFailureAsync(WorkflowRun run, NodeFailureException ended, CancellationToken cancellationToken) =>
+        ended.FailedCell is { } cell ? await _cellFailureReader.ReadAsync(run.Id, run.TeamId, cell.NodeId, cell.IterationKey, cancellationToken).ConfigureAwait(false) : null;
 
     /// <summary>
     /// Run a <c>flow.try</c> scope container: execute its body subgraph ONCE; if any body node fails
@@ -1794,7 +1811,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             // A non-array binding, a tripped ceiling, or (terminate mode) a branch failure — expose it as
             // the map's `error` output so the map's own error edge can catch it, then write node.failed.
             scope.Nodes[mapNode.Id] = BuildErrorOutput(ex.Message, mapNode.Id);
-            await _recordLogger.NodeFailedAsync(run.Id, mapNode.Id, nodeIterationKey, RedactForPersistence(scope, ex.Message), DateTimeOffset.UtcNow - startedAt, cancellationToken).ConfigureAwait(false);
+
+            var failure = await ReadEndingCellFailureAsync(run, ex, cancellationToken).ConfigureAwait(false);
+
+            await _recordLogger.NodeFailedAsync(run.Id, mapNode.Id, nodeIterationKey, RedactForPersistence(scope, ex.Message), DateTimeOffset.UtcNow - startedAt, failure, cancellationToken).ConfigureAwait(false);
             return NodeStatus.Failure;
         }
     }
@@ -1807,7 +1827,9 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// <paramref name="replay"/>) is NOT re-dispatched: its replayed result is slotted in directly, so a
     /// completed branch's side effect never re-fires on a sibling-triggered re-walk (the exactly-once-per-
     /// branch guarantee). A branch failure is honoured per the map's error policy: <c>terminate</c> rethrows
-    /// the first branch's failure to fail the map; <c>continue</c> stores a failure marker at that index +
+    /// the first branch's failure to fail the map — "first" is by ELEMENT ORDER, never by which branch finished
+    /// first, and the map's sentence and the cell its <c>node.failed</c> record reads its failure from
+    /// (<see cref="FailedCell"/>) are both that branch's; <c>continue</c> stores a failure marker at that index +
     /// counts it. A branch SUSPEND parks that branch's wait (PR2) and is counted in the returned suspended
     /// total — the caller suspends the whole map when it is &gt; 0. Returns the ordered results, the
     /// failed-branch count, and the suspended-branch count.
@@ -1836,12 +1858,16 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         var failed = 0;
         var suspended = 0;
         string? terminateFailure = null;
+        FailedCell? terminatedAt = null;
         foreach (var outcome in outcomes)
         {
             results[outcome.Index] = outcome.Result;
             if (outcome.Failed) failed++;
             if (outcome.Suspended) suspended++;
-            terminateFailure ??= outcome.TerminateFailure;
+
+            // The branch that fails the map is the FIRST one by element order that terminated it — never whichever finished first — so the sentence, and
+            // the failure the map's record carries, always name the same branch and a re-walk answers the same.
+            if (terminateFailure is null && outcome.TerminateFailure is not null) (terminateFailure, terminatedAt) = (outcome.TerminateFailure, outcome.TerminatedAt);
         }
 
         // A terminate-mode failure yields to a suspended sibling: re-suspend the map (its durable waits live,
@@ -1849,7 +1875,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         // that branch's Pending wait + leak its dispatched child/agent run. The terminate failure re-surfaces
         // on a later re-walk once no branch is parked. With no suspended branch it fails the map now.
         if (suspended == 0 && terminateFailure != null)
-            throw new NodeFailureException(terminateFailure);
+            throw new NodeFailureException(terminateFailure, terminatedAt);
 
         return (results, failed, suspended);
     }
@@ -1910,9 +1936,11 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// barrier on EVERY branch: if any sibling suspended, the map re-suspends (its durable waits live, to be
     /// resumed) and the terminate failure is deferred to a later re-walk — never leaking a sibling's wait by
     /// failing the map out from under it. A suspended branch carries an empty result placeholder; the map
-    /// re-suspends rather than reducing, so the placeholder is never emitted.
+    /// re-suspends rather than reducing, so the placeholder is never emitted. <c>TerminatedAt</c> is the cell
+    /// whose failure ended the branch (set with <c>TerminateFailure</c>): where the map reads the failure its own
+    /// <c>node.failed</c> record carries.
     /// </summary>
-    private readonly record struct MapBranchOutcome(int Index, JsonElement Result, bool Failed, bool Suspended = false, string? TerminateFailure = null, Guid? SourceRecordId = null, Guid? SourceRunId = null);
+    private readonly record struct MapBranchOutcome(int Index, JsonElement Result, bool Failed, bool Suspended = false, string? TerminateFailure = null, Guid? SourceRecordId = null, Guid? SourceRunId = null, FailedCell? TerminatedAt = null);
 
     /// <summary>
     /// Run a map body subgraph for ONE element as a parallel WAVE — the same model as the loop body
@@ -1983,7 +2011,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
                     var step = AdvanceMapBranchNodeOrAbandon(mapNode, regular[i], outcomes[i].Status, bodyState, plan.ErrorHandling, out var marker);
                     if (step == MapBranchStep.Abandon) return new MapBranchOutcome(index, marker, Failed: true);
-                    if (step == MapBranchStep.Terminate) return TerminateOutcome(index, mapNode, regular[i]);
+                    if (step == MapBranchStep.Terminate) return TerminateOutcome(index, mapNode, regular[i], branchKey);
                 }
 
                 // A nested container (loop / try / map) recurses under THIS branch's key; it writes its own
@@ -1995,7 +2023,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
 
                     var step = AdvanceMapBranchNodeOrAbandon(mapNode, container, status, bodyState, plan.ErrorHandling, out var marker);
                     if (step == MapBranchStep.Abandon) return new MapBranchOutcome(index, marker, Failed: true);
-                    if (step == MapBranchStep.Terminate) return TerminateOutcome(index, mapNode, container);
+                    if (step == MapBranchStep.Terminate) return TerminateOutcome(index, mapNode, container, branchKey);
                 }
             }
         }
@@ -2018,8 +2046,8 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// <summary>A terminate-mode unhandled branch failure, carried back as an outcome (not thrown) so the
     /// fan-out can barrier on every branch first — if any sibling SUSPENDED, the map re-suspends and this
     /// failure is deferred, never orphaning the sibling's durable wait.</summary>
-    private static MapBranchOutcome TerminateOutcome(int index, NodeDefinition mapNode, NodeDefinition node) =>
-        new(index, EmptyJsonObject(), Failed: true, TerminateFailure: $"Node '{node.Id}' in map '{mapNode.Id}' failed.");
+    private static MapBranchOutcome TerminateOutcome(int index, NodeDefinition mapNode, NodeDefinition node, string branchKey) =>
+        new(index, EmptyJsonObject(), Failed: true, TerminateFailure: $"Node '{node.Id}' in map '{mapNode.Id}' failed.", TerminatedAt: new FailedCell(node.Id, branchKey));
 
     /// <summary>The disposition of one map body node after it ran: keep walking the branch, ABANDON it with a
     /// continue-mode failure marker, or TERMINATE the whole map with an unhandled failure.</summary>
@@ -2370,7 +2398,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             var terminateRow = ownRows.FirstOrDefault(r => r.Status == NodeStatus.Failure && !HasErrorEdgeInDefinition(body, r.NodeId));
             if (terminateRow != null)
             {
-                outcome = new MapBranchOutcome(index, EmptyJsonObject(), Failed: true, TerminateFailure: $"Node '{terminateRow.NodeId}' in map '{mapNodeId}' failed.");
+                outcome = new MapBranchOutcome(index, EmptyJsonObject(), Failed: true, TerminateFailure: $"Node '{terminateRow.NodeId}' in map '{mapNodeId}' failed.", TerminatedAt: new FailedCell(terminateRow.NodeId, branchKey));
                 return true;
             }
         }
@@ -2636,7 +2664,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             for (var i = 0; i < regular.Count; i++)
             {
                 MergeNodeOutcome(regular[i], outcomes[i], iterScope, bodyState);
-                if (AdvanceBodyNodeOrAbandon(regular[i], outcomes[i].Status, bodyState, errorHandling))
+                if (AdvanceBodyNodeOrAbandon(regular[i], outcomes[i].Status, bodyState, errorHandling, iterationKey))
                     return new LoopBodyOutcome(executed, Failed: true);
             }
 
@@ -2648,7 +2676,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 executed++;
                 var status = await ExecuteContainerAsync(run, definition, container, iterScope, bodyState, cancellationToken, iterationKey).ConfigureAwait(false);
                 bodyState.Statuses[container.Id] = status;
-                if (AdvanceBodyNodeOrAbandon(container, status, bodyState, errorHandling))
+                if (AdvanceBodyNodeOrAbandon(container, status, bodyState, errorHandling, iterationKey))
                     return new LoopBodyOutcome(executed, Failed: true);
             }
         }
@@ -3949,7 +3977,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     {
         public NodeFailureException(string message) : base(message) { }
         public NodeFailureException(string message, Exception innerException) : base(message, innerException) { }
+        public NodeFailureException(string message, FailedCell? failedCell) : base(message) { FailedCell = failedCell; }
+
+        /// <summary>The cell whose unhandled failure ended the container this ended, when a body node did — what the container reads its failure from. Null for a container that failed on its own (a budget, a binding that is not an array).</summary>
+        public FailedCell? FailedCell { get; }
     }
+
+    /// <summary>A node at an iteration key: the cell a container's failure is traced back to.</summary>
+    private sealed record FailedCell(string NodeId, string IterationKey);
 
     /// <summary>Thrown to abort the walk when a node parks the run. Caught in RunAfterClaimAsync, which sets Suspended.</summary>
     private sealed class RunSuspendedException : Exception

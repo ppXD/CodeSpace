@@ -17,7 +17,9 @@ namespace CodeSpace.Core.Services.Workflows.Failures;
 /// <para>It answers for the node that ENDED the run, and for nothing earlier. A run walks past failures it handles (an error
 /// edge), so an older record that names a provider failure says only that the run once met one; the run's own error names the node
 /// that failed it (<c>Node 'x' failed.</c>), and that node's record decides — a failure carried there, else the agent run it spawned.
-/// A node that failed for another reason, or a run ended by the reconciler, answers null rather than the first failure found.</para>
+/// A node that failed for another reason, or a run ended by the reconciler, answers null rather than the first failure found.
+/// When the node that ended the run is a container (a map, a loop), its own record carries the failure of the cell that ended IT —
+/// the engine writes it there from <see cref="ICellFailureReader"/> — so this reads a container exactly as it reads any node.</para>
 /// </summary>
 public sealed class RunFailureReader : IRunFailureReader, IScopedDependency
 {
