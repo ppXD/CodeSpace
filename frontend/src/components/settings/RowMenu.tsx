@@ -13,7 +13,7 @@ import { createPortal } from "react-dom";
  * above the trigger when there is no room below, so the last row of a list opens upward instead of
  * off-screen.</p>
  */
-export function RowMenu({ label, children }: { label: string; children: (close: () => void) => ReactNode }) {
+export function RowMenu({ label, triggerClassName = "btn btn-icon", children }: { label: string; /** The ⋯ button's classes: a row that already carries buttons of its own wants it quieter than the list default. */ triggerClassName?: string; children: (close: () => void) => ReactNode }) {
   const trigger = useRef<HTMLButtonElement>(null);
   const [at, setAt] = useState<{ top: number; right: number; flip: boolean } | null>(null);
 
@@ -47,7 +47,7 @@ export function RowMenu({ label, children }: { label: string; children: (close: 
 
   return (
     <>
-      <button ref={trigger} className="btn btn-icon" aria-label={label} aria-haspopup="menu" aria-expanded={at != null} onClick={() => (at ? close() : open())}>⋯</button>
+      <button ref={trigger} className={triggerClassName} aria-label={label} aria-haspopup="menu" aria-expanded={at != null} onClick={() => (at ? close() : open())}>⋯</button>
 
       {at != null && createPortal(
         <>

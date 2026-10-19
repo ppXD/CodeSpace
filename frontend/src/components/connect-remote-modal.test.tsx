@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import type { MeResponse, MeTeam, ProviderInstanceSummary } from "@/api/types";
@@ -183,13 +183,19 @@ describe("connect remote modal re-authorizing a credential in place", () => {
 
   afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
 
+  /** A working sign-in keeps no Reconnect button of its own: re-authorizing it is in its row's overflow menu. */
+  async function reauthorizeFromTheMenu() {
+    await waitFor(() => expect(screen.getByRole("button", { name: /More actions for/ })).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: /More actions for/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Re-authorize" }));
+  }
+
   it("starts the OAuth flow naming the credential, under the credential's own name", async () => {
     // A blocked popup ends the flow right after the init request, which is the request under test.
     vi.spyOn(window, "open").mockReturnValue(null);
     const calls = renderAs(admin, [credential("oauth-1", "OAuth")], { "/api/credentials/oauth/init": { authorizeUrl: "https://gitlab.test/oauth/authorize", state: "s" } });
 
-    await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
-    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    await reauthorizeFromTheMenu();
 
     await waitFor(() => expect(calls.some((c) => c.url.endsWith("/api/credentials/oauth/init"))).toBe(true));
     const init = calls.find((c) => c.url.endsWith("/api/credentials/oauth/init"))!;
@@ -213,14 +219,15 @@ describe("connect remote modal re-authorizing a credential in place", () => {
   it.each([
     ["Member", member],
     ["Viewer", { ...admin, role: "Viewer", permissions: [] } as MeTeam],
-  ] as const)("offers a %s Reconnect on their own sign-in and Replace token on their own token: the credential's own person passes on membership", async (_role, asker) => {
+  ] as const)("offers a %s Re-authorize on their own sign-in and Replace token on their own token: the credential's own person passes on membership", async (_role, asker) => {
     vi.spyOn(window, "open").mockReturnValue(null);
     const calls = renderAs(asker, [credential("oauth-1", "OAuth"), credential("pat-1", "Pat")], { "/api/credentials/oauth/init": { authorizeUrl: "https://gitlab.test/oauth/authorize", state: "s" } });
 
     await waitFor(() => expect(screen.getAllByRole("button", { name: "Disconnect" })).toHaveLength(2));
 
     expect(screen.getAllByRole("button", { name: "Replace token" })).toHaveLength(1);
-    fireEvent.click(screen.getByRole("button", { name: "Reconnect" }));
+    expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();   // a working sign-in is re-authorized from its menu
+    await reauthorizeFromTheMenu();
 
     await waitFor(() => expect(calls.some((c) => c.url.endsWith("/api/credentials/oauth/init"))).toBe(true));
     expect(calls.find((c) => c.url.endsWith("/api/credentials/oauth/init"))!.body).toMatchObject({ providerInstanceId: "pi1", replaceCredentialId: "oauth-1" });
@@ -268,7 +275,7 @@ describe("connect remote modal re-authorizing a credential in place", () => {
 
     await waitFor(() => expect(screen.getAllByText("disconnected")).toHaveLength(2));
 
-    expect(screen.getAllByTestId("bound-repositories").map((e) => e.textContent)).toEqual(["3 repositories bound", "1 repository bound"]);
+    expect(screen.getAllByTestId("credential-dependents").map((e) => e.textContent)).toEqual(["3 repositories still use it", "1 repository still uses it"]);
     expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy();
     expect(screen.queryByRole("button", { name: "Disconnect" })).toBeNull();
@@ -280,8 +287,8 @@ describe("connect remote modal re-authorizing a credential in place", () => {
 
     await waitFor(() => expect(screen.getByText("needs reconnect")).toBeTruthy());
 
-    const rows = screen.getAllByTestId("bound-repositories").map((e) => e.textContent);
-    expect(rows).toEqual(["5 repositories bound", "2 repositories bound"]);   // the refused one leads although it is older
+    const rows = screen.getAllByTestId("credential-dependents").map((e) => e.textContent);
+    expect(rows).toEqual(["5 repositories still use it", "2 repositories bound"]);   // the refused one leads although it is older
   });
 
   it("marks a token whose expiry has passed as needing a new one although nothing has marked the row yet", async () => {
@@ -351,6 +358,673 @@ describe("connect remote modal re-authorizing a credential in place", () => {
     await waitFor(() => expect(screen.getByText("Acme group token")).toBeTruthy());
 
     expect(screen.queryByRole("button", { name: "Replace token" })).toBeNull();
+  });
+});
+
+/**
+ * A Providers dialog that says what it did and does not pile up history. Every Disconnect leaves a dead row, so a person who reconnected a few times saw four
+ * rows for one account and a Reconnect that, on the working one, re-authorized in place and changed nothing they could see. Now: dead rows with nothing leaning
+ * on them fold into one quiet line (and can be removed), a dead row that still has repositories says so and leads with moving them to the person's working
+ * connection, every row says when the provider last confirmed it, a working sign-in is re-authorized from its menu, and each Reconnect / Replace token that lands
+ * is confirmed in words.
+ */
+describe("connect remote modal — dead rows folded, repositories moved, actions confirmed", () => {
+  const DAY = 86_400_000;
+  const ago = (ms: number) => new Date(Date.now() - ms).toISOString();
+
+  const admin: MeTeam = {
+    id: "t1", slug: "acme", name: "Acme", kind: "Workspace", role: "Admin", permissions: ["repos.manage", "credentials.manage", "members.manage"],
+    memberCount: 3, repositoryCount: 0, projectCount: 1, workflowCount: 0,
+  };
+  const member: MeTeam = { ...admin, role: "Member", permissions: ["workflows.write"] };
+
+  const instance: ProviderInstanceSummary = { id: "pi1", teamId: "t1", provider: "GitLab", displayName: "GitLab_TED", baseUrl: "https://gitlab.sjfood.us", createdDate: "2026-01-01T00:00:00Z", oauthEnabled: true };
+
+  type Row = Record<string, unknown> & { id: string };
+  const credential = (id: string, authType: string, extra: Record<string, unknown> = {}): Row => ({ id, teamId: "t1", providerInstanceId: "pi1", ownerUserId: "u1", ownerUserName: "Maya", ownership: "Personal", authType, displayName: `Maya's ${id}`, status: "Active", createdDate: ago(30 * DAY), ...extra });
+  const dead = (id: string, extra: Record<string, unknown> = {}) => credential(id, "OAuth", { status: "Revoked", dependentCount: 0, boundRepositoryCount: 0, ...extra });
+  const teamToken = (id: string, extra: Record<string, unknown> = {}) => credential(id, "GroupAccessToken", { ownerUserId: null, ownerUserName: null, ownership: "TeamService", displayName: "Acme group token", ...extra });
+
+  type Call = { method: string; url: string; path: string; body: unknown };
+  type Reply = { status?: number; body?: unknown };
+  type Respond = (call: Call, state: { credentials: Row[] }) => Reply | undefined;
+
+  /** The dialog over a fake API whose credential list is `state.credentials`, which a responder may change as the server would. `respond` answers first. */
+  function renderDialog(team: MeTeam, held: Row[], respond: Respond = () => undefined, providerOver: Partial<ProviderInstanceSummary> = {}) {
+    localStorage.setItem("codespace.jwt", "test-jwt");
+    localStorage.setItem("codespace.activeTeamId", team.id);
+
+    const state = { credentials: held };
+    const calls: Call[] = [];
+
+    const defaults = (call: Call): Reply => {
+      if (call.path === "/api/users/me") return { body: { id: "u1", email: "u@test.local", name: "Maya", teams: [team], permissions: [], passwordMustChange: false } };
+      if (call.path === "/api/provider-instances") return { body: [{ ...instance, ...providerOver }] };
+      if (call.path === "/api/credentials") return { body: state.credentials };
+      if (call.path.endsWith("/capabilities")) return { body: { credentialId: "any", grantedScopes: [], capabilities: [] } };
+
+      return {};
+    };
+
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = typeof input === "string" ? input : input.toString();
+      const call: Call = { method: init?.method ?? "GET", url, path: new URL(url, "http://localhost").pathname, body: init?.body ? JSON.parse(String(init.body)) : undefined };
+
+      calls.push(call);
+
+      const reply = respond(call, state) ?? defaults(call);
+
+      return new Response(reply.body === undefined ? "" : JSON.stringify(reply.body), { status: reply.status ?? (reply.body === undefined ? 404 : 200), headers: { "Content-Type": "application/json" } });
+    }));
+
+    const client = new QueryClient({ defaultOptions: { queries: { retry: false, gcTime: 0 } } });
+
+    render(
+      <QueryClientProvider client={client}>
+        <DialogProvider><ConnectRemoteModal onClose={() => {}} /></DialogProvider>
+      </QueryClientProvider>,
+    );
+
+    return { calls, state, client };
+  }
+
+  afterEach(() => { localStorage.clear(); vi.unstubAllGlobals(); vi.restoreAllMocks(); });
+
+  /** Pop the provider's window and have it answer, as /oauth-callback does through window.opener. */
+  function answerPopup(message: Record<string, unknown>) {
+    vi.spyOn(window, "open").mockReturnValue({ closed: false, close: vi.fn() } as unknown as Window);
+
+    return () => window.dispatchEvent(new MessageEvent("message", { origin: window.location.origin, data: { type: "codespace:oauth-result", ...message } }));
+  }
+
+  const init: Respond = (call) => call.path === "/api/credentials/oauth/init" ? { body: { authorizeUrl: "https://gitlab.sjfood.us/oauth/authorize", state: "s" } } : undefined;
+
+  const earlier = (count: number) => new RegExp(`${count} earlier connections? — disconnected`);
+
+  describe("folding the history", () => {
+    it("folds the disconnected credentials nothing leans on into one quiet line, and lists the one that works", async () => {
+      renderDialog(admin, [credential("oauth-live", "OAuth", { lastValidatedDate: ago(60_000) }), dead("old-1", { createdDate: ago(2 * DAY) }), dead("old-2", { createdDate: ago(10 * DAY) }), dead("old-3", { createdDate: ago(21 * DAY) })]);
+
+      const line = await screen.findByRole("button", { name: earlier(3) });
+
+      expect(screen.getAllByRole("button", { name: "Disconnect" })).toHaveLength(1);   // the working one is the only row
+      expect(screen.queryByText("disconnected")).toBeNull();                          // no dead row wears its chip
+      expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();            // and nothing is removable until the line is opened
+      expect(line.getAttribute("aria-expanded")).toBe("false");
+
+      fireEvent.click(line);
+
+      expect(line.getAttribute("aria-expanded")).toBe("true");
+      expect(screen.getAllByRole("button", { name: "Remove" })).toHaveLength(3);
+      expect(screen.getByText("connected 21 d ago")).toBeTruthy();                    // each says when it was connected, so which is which
+    });
+
+    it("says 'earlier connection' for one", async () => {
+      renderDialog(admin, [dead("old-1")]);
+
+      expect(await screen.findByRole("button", { name: earlier(1) })).toBeTruthy();
+    });
+
+    it("keeps a disconnected credential something still leans on as a row, and folds only the rest", async () => {
+      renderDialog(admin, [dead("busy", { dependentCount: 2, boundRepositoryCount: 2 }), dead("quiet")]);
+
+      await screen.findByRole("button", { name: earlier(1) });
+
+      expect(screen.getAllByText("disconnected")).toHaveLength(1);                    // the busy one, still a row, with its chip
+      expect(screen.getByTestId("credential-dependents").textContent).toBe("2 repositories still use it");
+    });
+
+    it("keeps a disconnected credential only a group hook leans on a row, and says what holds it: the count covers more than repositories", async () => {
+      renderDialog(admin, [dead("hooked", { dependentCount: 1, boundRepositoryCount: 0, boundConnectionWebhookCount: 1 })]);
+
+      await waitFor(() => expect(screen.getByText("disconnected")).toBeTruthy());
+
+      expect(screen.getByTestId("credential-dependents").textContent).toBe("1 group hook still uses it");
+      expect(screen.queryByRole("button", { name: /earlier connection/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+    });
+
+    it("names an act-as identity that holds a disconnected credential too", async () => {
+      renderDialog(admin, [dead("identified", { dependentCount: 1, boundRepositoryCount: 0, actAsIdentityCount: 1 })]);
+
+      await waitFor(() => expect(screen.getByText("disconnected")).toBeTruthy());
+
+      expect(screen.getByTestId("credential-dependents").textContent).toBe("1 act-as identity still uses it");
+      expect(screen.queryByRole("button", { name: /earlier connection/ })).toBeNull();
+    });
+
+    it("lists every credential as it always did when the server sends no count — and offers no removal it could not do", async () => {
+      renderDialog(admin, [credential("oauth-live", "OAuth"), dead("old-1", { dependentCount: undefined }), dead("old-2", { dependentCount: undefined })]);
+
+      await waitFor(() => expect(screen.getAllByText("disconnected")).toHaveLength(2));
+
+      expect(screen.queryByRole("button", { name: /earlier connection/ })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+    });
+
+    it("never folds a credential the provider refused or one that works", async () => {
+      renderDialog(admin, [credential("oauth-refused", "OAuth", { status: "Error", dependentCount: 0 }), credential("pat-ok", "Pat", { dependentCount: 0 })]);
+
+      await waitFor(() => expect(screen.getByText("needs reconnect")).toBeTruthy());
+
+      expect(screen.queryByRole("button", { name: /earlier connection/ })).toBeNull();
+    });
+  });
+
+  describe("removing a row", () => {
+    const removalOf = (path: string, state: { credentials: Row[] }) => {
+      const id = path.split("/").pop()!;
+
+      state.credentials = state.credentials.filter((c) => c.id !== id);
+
+      return { body: { credentialId: id } };
+    };
+
+    it("removes the row through the API and the line counts one fewer", async () => {
+      const { calls } = renderDialog(admin, [dead("old-1"), dead("old-2"), dead("old-3")], (call, state) => call.method === "DELETE" ? removalOf(call.path, state) : undefined);
+
+      fireEvent.click(await screen.findByRole("button", { name: earlier(3) }));
+      fireEvent.click(screen.getAllByRole("button", { name: "Remove" })[0]);
+
+      await waitFor(() => expect(screen.getByRole("button", { name: earlier(2) })).toBeTruthy());
+
+      const deletes = calls.filter((c) => c.method === "DELETE");
+
+      expect(deletes).toHaveLength(1);
+      expect(deletes[0].path).toMatch(/^\/api\/credentials\/old-[123]$/);
+      expect(screen.getAllByRole("button", { name: "Remove" })).toHaveLength(2);       // the line stays open as rows leave it
+    });
+
+    it("shows the server's refusal beside the row and keeps the row", async () => {
+      const refusal = "Credential 'Maya's old-1' still has 1 repository leaning on it. Move or unlink them first.";
+
+      renderDialog(admin, [dead("old-1")], (call) => call.method === "DELETE" ? { status: 400, body: { code: "invalid_request", message: refusal } } : undefined);
+
+      fireEvent.click(await screen.findByRole("button", { name: earlier(1) }));
+      fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+      expect((await screen.findByRole("alert")).textContent).toContain(refusal);
+      expect(screen.getByRole("button", { name: earlier(1) })).toBeTruthy();
+    });
+
+    it("reads the list again when the server refuses, so a row that changed under the person stops reading as history", async () => {
+      const refusal = "Credential 'Maya's old-1' was reconnected or changed while it was being removed, so nothing was removed. Look at it again.";
+      const listReads = (calls: Call[]) => calls.filter((c) => c.method === "GET" && c.path === "/api/credentials").length;
+
+      const { calls } = renderDialog(admin, [dead("old-1")], (call, state) => {
+        if (call.method !== "DELETE") return undefined;
+
+        state.credentials = state.credentials.map((c) => ({ ...c, status: "Active", lastValidatedDate: new Date().toISOString() }));   // the reconnect that won the race
+
+        return { status: 400, body: { code: "invalid_request", message: refusal } };
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: earlier(1) }));
+      expect(listReads(calls)).toBe(1);
+      fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+      expect((await screen.findByRole("alert")).textContent).toContain(refusal);                  // the refusal is still said, on the row it was for
+      await waitFor(() => expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy());   // which is now a working row, not a line in the fold
+      expect(screen.queryByRole("button", { name: /earlier connection/ })).toBeNull();
+      expect(listReads(calls)).toBeGreaterThan(1);
+    });
+
+    it("lets a member remove their own history but gives them no Remove on a team token", async () => {
+      renderDialog(member, [dead("old-1"), teamToken("team-old", { status: "Revoked", dependentCount: 0, boundRepositoryCount: 0 })]);
+
+      fireEvent.click(await screen.findByRole("button", { name: earlier(1) }));
+      expect(screen.getAllByRole("button", { name: "Remove" })).toHaveLength(1);
+
+      fireEvent.click(screen.getByRole("tab", { name: "Team" }));
+      fireEvent.click(await screen.findByRole("button", { name: earlier(1) }));
+
+      expect(screen.queryByRole("button", { name: "Remove" })).toBeNull();
+    });
+
+    it("gives an admin Remove on a disconnected team token nothing leans on, which is not also listed as a token", async () => {
+      const held = [teamToken("team-live", { displayName: "Acme live token" }), teamToken("team-old", { displayName: "Acme old token", status: "Revoked", dependentCount: 0, boundRepositoryCount: 0 })];
+      const { calls } = renderDialog(admin, held, (call, state) => call.method === "DELETE" ? removalOf(call.path, state) : undefined);
+
+      fireEvent.click(await screen.findByRole("tab", { name: "Team" }));
+      const line = await screen.findByRole("button", { name: earlier(1) });
+
+      expect(screen.getByText("Acme live token")).toBeTruthy();
+      expect(screen.queryByText("Acme old token")).toBeNull();                       // folded, not a row beside the live token
+      expect(document.querySelectorAll(".cn-tg-cred")).toHaveLength(1);
+
+      fireEvent.click(line);
+      expect(screen.queryByText("Acme old token")).toBeNull();                       // and still not one once the line is open
+      expect(document.querySelectorAll(".cn-tg-cred")).toHaveLength(1);
+      fireEvent.click(screen.getByRole("button", { name: "Remove" }));
+
+      await waitFor(() => expect(calls.some((c) => c.method === "DELETE" && c.path === "/api/credentials/team-old")).toBe(true));
+    });
+  });
+
+  describe("moving what a dead credential still holds", () => {
+    const mine = (over: Record<string, unknown> = {}) => ({ credentialId: "oauth-live", displayName: "Maya's GitLab", authType: "OAuth", ownership: "Personal", kind: "YourConnection", createdDate: ago(DAY), connectedBeforeDisconnect: true, ...over });
+    const suggestingTo = (...suggestions: unknown[]): Respond => (call) => call.path.endsWith("/relink-suggestions") ? { body: suggestions } : undefined;
+
+    const holder = (extra: Record<string, unknown> = {}) => dead("old-1", { dependentCount: 3, boundRepositoryCount: 3, ...extra });
+    const live = () => credential("oauth-live", "OAuth", { displayName: "Maya's GitLab", lastValidatedDate: ago(60_000) });
+
+    /**
+     * The suggestions for a credential have been read and applied to its row. A negative assertion ("no Move") means something only after this: Reconnect, which
+     * the row shows from the credential list alone, appears before the suggestions are back.
+     */
+    async function suggestionsRead(client: QueryClient, credentialId: string) {
+      await waitFor(() => expect(client.getQueryState(["relink-suggestions", credentialId])?.status).toBe("success"));
+      await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });   // the row renders what the cache now holds
+    }
+
+    const rowOf = (connected: string) => screen.getByText(connected).closest(".cn-cred") as HTMLElement;
+
+    it("leads with moving the repositories to the person's own working connection, and keeps Reconnect as the other way", async () => {
+      renderDialog(admin, [holder(), live()], suggestingTo(mine()));
+
+      const move = await screen.findByRole("button", { name: "Move them to Maya's GitLab" });
+      const reconnect = screen.getByRole("button", { name: "Reconnect" });
+
+      expect(screen.getByTestId("credential-dependents").textContent).toBe("3 repositories still use it");
+      expect(move.className).toContain("btn-primary");
+      expect(reconnect.className).not.toContain("btn-primary");
+      expect(move.compareDocumentPosition(reconnect) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();   // primary first
+    });
+
+    it("moves them in one request, says what moved, and the emptied row folds away", async () => {
+      const { calls } = renderDialog(admin, [holder(), live()], (call, state) => {
+        if (call.path.endsWith("/relink-suggestions")) return { body: [mine()] };
+        if (call.method !== "POST" || !call.path.endsWith("/relink-bindings")) return undefined;
+
+        state.credentials = state.credentials.map((c) => c.id === "old-1" ? { ...c, dependentCount: 0, boundRepositoryCount: 0 } : c);
+
+        return { body: { fromCredentialId: "old-1", toCredentialId: "oauth-live", movedRepositoryCount: 3, movedConnectionWebhookCount: 0 } };
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Move them to Maya's GitLab" }));
+
+      expect((await screen.findByText(/Moved 3 repositories to Maya's GitLab/)).closest("[role=status]")).toBeTruthy();   // said where it stays: the row it came from has folded
+      await waitFor(() => expect(screen.getByRole("button", { name: earlier(1) })).toBeTruthy());
+
+      const post = calls.find((c) => c.method === "POST" && c.path.endsWith("/relink-bindings"))!;
+
+      expect(post.path).toBe("/api/credentials/old-1/relink-bindings");
+      expect(post.body).toEqual({ toCredentialId: "oauth-live" });
+    });
+
+    it("also counts the group hooks it moved", async () => {
+      renderDialog(admin, [holder(), live()], (call) => {
+        if (call.path.endsWith("/relink-suggestions")) return { body: [mine()] };
+        if (call.method === "POST" && call.path.endsWith("/relink-bindings")) return { body: { fromCredentialId: "old-1", toCredentialId: "oauth-live", movedRepositoryCount: 1, movedConnectionWebhookCount: 2 } };
+
+        return undefined;
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Move them to Maya's GitLab" }));
+
+      expect(await screen.findByText(/Moved 1 repository and 2 group hooks to Maya's GitLab/)).toBeTruthy();
+    });
+
+    it("shows the server's refusal and leaves the row as it was", async () => {
+      const refusal = "Credential 'Maya's GitLab' cannot read acme/app. Nothing was moved.";
+
+      renderDialog(admin, [holder(), live()], (call) => {
+        if (call.path.endsWith("/relink-suggestions")) return { body: [mine()] };
+        if (call.method === "POST" && call.path.endsWith("/relink-bindings")) return { status: 400, body: { code: "invalid_request", message: refusal } };
+
+        return undefined;
+      });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Move them to Maya's GitLab" }));
+
+      expect((await screen.findByRole("alert")).textContent).toContain(refusal);
+      expect(screen.getByRole("button", { name: "Move them to Maya's GitLab" })).toBeTruthy();
+      expect(screen.getByTestId("credential-dependents").textContent).toBe("3 repositories still use it");
+    });
+
+    it("offers it for a credential the provider refused, which relink-bindings also takes bindings from", async () => {
+      renderDialog(admin, [credential("oauth-refused", "OAuth", { status: "Error", dependentCount: 2, boundRepositoryCount: 2 }), live()], suggestingTo(mine()));
+
+      expect(await screen.findByRole("button", { name: "Move them to Maya's GitLab" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy();
+      expect(screen.getByTestId("credential-dependents").textContent).toBe("2 repositories still use it");
+    });
+
+    it.each([
+      ["has no other working connection", [] as unknown[]],
+      ["has only a team token to offer", [mine({ credentialId: "team-1", displayName: "Acme group token", kind: "TeamServiceToken", ownership: "TeamService" })]],
+    ])("offers no move when the person %s, and Reconnect stays the way back", async (_why, suggestions) => {
+      const { client } = renderDialog(admin, [holder()], suggestingTo(...suggestions));
+
+      await suggestionsRead(client, "old-1");
+      await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
+
+      expect(screen.queryByRole("button", { name: /Move them to/ })).toBeNull();
+    });
+
+    it("reads each dead credential's own suggestions: two rows with different candidates offer different moves", async () => {
+      const own = (id: string) => (call: Call) => call.path === `/api/credentials/${id}/relink-suggestions`;
+      const first = holder({ createdDate: ago(5 * DAY) });
+      const second = dead("old-2", { dependentCount: 1, boundRepositoryCount: 1, createdDate: ago(9 * DAY) });
+
+      const { calls, client } = renderDialog(admin, [first, second, live()], (call) => {
+        if (own("old-1")(call)) return { body: [mine({ credentialId: "oauth-live", displayName: "Maya's GitLab" })] };
+        if (own("old-2")(call)) return { body: [] };   // nothing to move this one to
+
+        return undefined;
+      });
+
+      await suggestionsRead(client, "old-1");
+      await suggestionsRead(client, "old-2");
+
+      expect(within(rowOf("connected 5 d ago")).getByRole("button", { name: "Move them to Maya's GitLab" })).toBeTruthy();
+      expect(within(rowOf("connected 9 d ago")).queryByRole("button", { name: /Move them to/ })).toBeNull();
+      expect(calls.filter((c) => c.path.endsWith("/relink-suggestions")).map((c) => c.path).sort()).toEqual(["/api/credentials/old-1/relink-suggestions", "/api/credentials/old-2/relink-suggestions"]);
+    });
+
+    it("reads the suggestions of the rows that remain again after a move, which changes what they can be offered", async () => {
+      const first = holder({ createdDate: ago(5 * DAY) });
+      const second = dead("old-2", { dependentCount: 1, boundRepositoryCount: 1, createdDate: ago(9 * DAY) });
+      const readsOf = (calls: Call[], id: string) => calls.filter((c) => c.method === "GET" && c.path === `/api/credentials/${id}/relink-suggestions`).length;
+
+      const { calls, client } = renderDialog(admin, [first, second, live()], (call) => {
+        if (call.path.endsWith("/relink-suggestions")) return { body: [mine()] };
+        if (call.method === "POST" && call.path.endsWith("/relink-bindings")) return { body: { fromCredentialId: "old-1", toCredentialId: "oauth-live", movedRepositoryCount: 3, movedConnectionWebhookCount: 0 } };
+
+        return undefined;
+      });
+
+      await suggestionsRead(client, "old-2");
+      expect(readsOf(calls, "old-2")).toBe(1);
+
+      fireEvent.click(within(rowOf("connected 5 d ago")).getByRole("button", { name: "Move them to Maya's GitLab" }));
+
+      await waitFor(() => expect(readsOf(calls, "old-2")).toBe(2));
+    });
+
+    it("offers to move the group hooks of a dead credential that holds no repository, and says what moved", async () => {
+      const hooked = dead("hooked", { dependentCount: 2, boundRepositoryCount: 0, boundConnectionWebhookCount: 2 });
+
+      const { calls } = renderDialog(admin, [hooked, live()], (call) => {
+        if (call.path.endsWith("/relink-suggestions")) return { body: [mine()] };
+        if (call.method === "POST" && call.path.endsWith("/relink-bindings")) return { body: { fromCredentialId: "hooked", toCredentialId: "oauth-live", movedRepositoryCount: 0, movedConnectionWebhookCount: 2 } };
+
+        return undefined;
+      });
+
+      expect((await screen.findByTestId("credential-dependents")).textContent).toBe("2 group hooks still use it");
+      fireEvent.click(await screen.findByRole("button", { name: "Move them to Maya's GitLab" }));
+
+      expect(await screen.findByText(/Moved 2 group hooks to Maya's GitLab/)).toBeTruthy();
+      expect(calls.find((c) => c.method === "POST" && c.path.endsWith("/relink-bindings"))!.path).toBe("/api/credentials/hooked/relink-bindings");
+    });
+
+    it("offers no move for a dead credential held only by an act-as identity, which a move leaves where it is", async () => {
+      const { calls } = renderDialog(admin, [dead("identified", { dependentCount: 1, boundRepositoryCount: 0, actAsIdentityCount: 1 }), live()], suggestingTo(mine()));
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
+
+      expect(screen.queryByRole("button", { name: /Move them to/ })).toBeNull();
+      expect(calls.some((c) => c.path.endsWith("/relink-suggestions"))).toBe(false);
+    });
+
+    it("does not ask for suggestions, nor offer a move, to someone who may not relink: it needs repos.manage and credentials.manage", async () => {
+      const { calls } = renderDialog(member, [holder(), live()], suggestingTo(mine()));
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
+
+      expect(screen.queryByRole("button", { name: /Move them to/ })).toBeNull();
+      expect(calls.some((c) => c.path.endsWith("/relink-suggestions"))).toBe(false);
+    });
+
+    it("does not offer a move off a credential still in service, however it reads — the server accepts only a dead source", async () => {
+      const { calls } = renderDialog(admin, [credential("pat-lapsed", "Pat", { status: "Active", health: "rejected", boundRepositoryCount: 2, dependentCount: 2 }), live()], suggestingTo(mine()));
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Replace token" })).toBeTruthy());
+
+      expect(screen.queryByRole("button", { name: /Move them to/ })).toBeNull();
+      expect(calls.some((c) => c.path.endsWith("/relink-suggestions"))).toBe(false);
+    });
+  });
+
+  describe("authorized time", () => {
+    it("says when the provider last confirmed the authorization, and keeps when it was connected in the tooltip", async () => {
+      renderDialog(admin, [credential("oauth-1", "OAuth", { createdDate: ago(21 * DAY), lastValidatedDate: ago(5 * 60_000) })]);
+
+      const since = await screen.findByText("authorized 5 min ago");
+
+      expect(since.getAttribute("title")).toMatch(/^Connected /);
+      expect(screen.queryByText(/^connected \d+ d ago$/)).toBeNull();
+    });
+
+    it("says when it was connected for a row nothing has confirmed, and for a server that sends no confirmation time", async () => {
+      renderDialog(admin, [credential("pat-1", "Pat", { createdDate: ago(3 * DAY) })]);
+
+      expect(await screen.findByText("connected 3 d ago")).toBeTruthy();
+      expect(screen.queryByText(/^authorized/)).toBeNull();
+    });
+  });
+
+  describe("re-authorizing in place", () => {
+    it("keeps Reconnect as a visible action for a credential the provider refused, and has no menu for it", async () => {
+      renderDialog(admin, [credential("oauth-refused", "OAuth", { status: "Error" })]);
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
+
+      expect(screen.queryByRole("button", { name: /More actions for/ })).toBeNull();
+    });
+
+    it("keeps Reconnect visible on a disconnected credential that still holds repositories", async () => {
+      renderDialog(admin, [dead("old-1", { dependentCount: 2, boundRepositoryCount: 2 })]);
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Reconnect" })).toBeTruthy());
+    });
+
+    it("keeps Reconnect on a folded sign-in for a member, whose only way back it is: a plain Connect with OAuth takes credentials.manage", async () => {
+      vi.spyOn(window, "open").mockReturnValue(null);
+      const { calls } = renderDialog(member, [dead("old-1")], init);
+
+      fireEvent.click(await screen.findByRole("button", { name: earlier(1) }));
+
+      expect(screen.queryByRole("button", { name: /Connect with OAuth/ })).toBeNull();
+      fireEvent.click(await screen.findByRole("button", { name: "Reconnect" }));
+
+      await waitFor(() => expect(calls.some((c) => c.path === "/api/credentials/oauth/init")).toBe(true));
+      expect(calls.find((c) => c.path === "/api/credentials/oauth/init")!.body).toMatchObject({ providerInstanceId: "pi1", replaceCredentialId: "old-1" });
+    });
+
+    it("offers Reconnect on a folded sign-in to an admin as well, beside the plain connect that would mint another row", async () => {
+      renderDialog(admin, [dead("old-1")]);
+
+      fireEvent.click(await screen.findByRole("button", { name: earlier(1) }));
+
+      expect(await screen.findByRole("button", { name: "Reconnect" })).toBeTruthy();
+      expect(screen.getByRole("button", { name: /Connect with OAuth/ })).toBeTruthy();
+    });
+
+    it("offers no Reconnect on a folded token", async () => {
+      const oldToken = credential("pat-old", "Pat", { status: "Revoked", dependentCount: 0, boundRepositoryCount: 0 });
+
+      renderDialog(admin, [oldToken]);
+      fireEvent.click(await screen.findByRole("button", { name: earlier(1) }));
+      expect(screen.getByRole("button", { name: "Remove" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    });
+
+    it("offers no Reconnect on a folded sign-in of a provider with no OAuth app", async () => {
+      renderDialog(admin, [dead("old-1")], () => undefined, { oauthEnabled: false });
+
+      fireEvent.click(await screen.findByRole("button", { name: earlier(1) }));
+
+      expect(screen.getByRole("button", { name: "Remove" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+    });
+
+    it("confirms a Reconnect from the fold: the row comes back as a working connection and leaves the line", async () => {
+      const { calls, state } = renderDialog(admin, [dead("old-1"), dead("old-2", { createdDate: ago(40 * DAY) })], init);
+      const answer = answerPopup({ status: "success", credentialId: "old-1" });
+
+      fireEvent.click(await screen.findByRole("button", { name: earlier(2) }));
+      fireEvent.click((await screen.findAllByRole("button", { name: "Reconnect" }))[0]);
+      await waitFor(() => expect(calls.some((c) => c.path === "/api/credentials/oauth/init")).toBe(true));
+
+      state.credentials = state.credentials.map((c) => c.id === "old-1" ? { ...c, status: "Active", lastValidatedDate: new Date().toISOString() } : c);
+      answer();
+
+      expect((await screen.findByRole("status")).textContent).toContain("Reconnected — GitLab authorized Maya's old-1 just now");
+      await waitFor(() => expect(screen.getByRole("button", { name: earlier(1) })).toBeTruthy());
+      expect(screen.getAllByRole("button", { name: "Disconnect" })).toHaveLength(1);
+    });
+
+    it("shows a refused Reconnect's own sentence on the folded row it was for", async () => {
+      const sentence = "That sign-in is a different GitLab account than the one this credential was connected as.";
+      const { calls } = renderDialog(member, [dead("old-1")], init);
+      const answer = answerPopup({ status: "error", error: "credential_account_mismatch", description: sentence });
+
+      fireEvent.click(await screen.findByRole("button", { name: earlier(1) }));
+      fireEvent.click(await screen.findByRole("button", { name: "Reconnect" }));
+      await waitFor(() => expect(calls.some((c) => c.path === "/api/credentials/oauth/init")).toBe(true));
+      answer();
+
+      expect((await screen.findByRole("alert")).textContent).toBe(sentence);
+      expect(screen.getByRole("button", { name: earlier(1) }).getAttribute("aria-expanded")).toBe("true");   // still folded, still there to try again
+    });
+
+    it("puts a working sign-in's Re-authorize in its menu, beside a Disconnect that stays where it was", async () => {
+      renderDialog(admin, [credential("oauth-live", "OAuth")]);
+
+      await waitFor(() => expect(screen.getByRole("button", { name: "Disconnect" })).toBeTruthy());
+
+      expect(screen.queryByRole("button", { name: "Reconnect" })).toBeNull();
+      expect(screen.queryByRole("button", { name: "Re-authorize" })).toBeNull();   // not until the menu is opened
+
+      fireEvent.click(screen.getByRole("button", { name: /More actions for/ }));
+
+      expect(await screen.findByRole("button", { name: "Re-authorize" })).toBeTruthy();
+    });
+  });
+
+  describe("saying what a reconnect or a replaced token did", () => {
+    async function reauthorize(calls: Call[]) {
+      fireEvent.click(await screen.findByRole("button", { name: /More actions for/ }));
+      fireEvent.click(await screen.findByRole("button", { name: "Re-authorize" }));
+      await waitFor(() => expect(calls.some((c) => c.path === "/api/credentials/oauth/init")).toBe(true));
+    }
+
+    it("confirms a Reconnect that landed, and the row's authorized time follows", async () => {
+      const { calls, state } = renderDialog(admin, [credential("oauth-1", "OAuth", { lastValidatedDate: ago(2 * DAY) })], init);
+      const answer = answerPopup({ status: "success", credentialId: "oauth-1" });
+
+      await screen.findByText("authorized 2 d ago");
+      await reauthorize(calls);
+
+      state.credentials = state.credentials.map((c) => ({ ...c, lastValidatedDate: new Date().toISOString() }));
+      answer();
+
+      const confirmation = await screen.findByRole("status");
+
+      expect(confirmation.textContent).toContain("Reconnected — GitLab authorized Maya's oauth-1 just now");
+      expect(within(confirmation.closest(".cn-cred") as HTMLElement).getByText("authorized just now")).toBeTruthy();   // said on the credential it was for
+    });
+
+    it("shows a refused Reconnect's own sentence on the credential it was for", async () => {
+      const sentence = "That sign-in is a different GitLab account than the one this credential was connected as.";
+      const { calls } = renderDialog(admin, [credential("oauth-1", "OAuth"), credential("oauth-2", "OAuth", { createdDate: ago(40 * DAY) })], init);
+      const answer = answerPopup({ status: "error", error: "credential_account_mismatch", description: sentence });
+
+      fireEvent.click((await screen.findAllByRole("button", { name: /More actions for/ }))[0]);
+      fireEvent.click(await screen.findByRole("button", { name: "Re-authorize" }));
+      await waitFor(() => expect(calls.some((c) => c.path === "/api/credentials/oauth/init")).toBe(true));
+      answer();
+
+      const refusal = await screen.findByRole("alert");
+
+      expect(refusal.textContent).toBe(sentence);
+      expect(screen.queryByRole("status")).toBeNull();
+    });
+
+    it("confirms a replaced token the same way", async () => {
+      const { state } = renderDialog(member, [credential("pat-1", "Pat", { lastValidatedDate: ago(2 * DAY) })], (call) => call.method === "PUT" ? { body: { credentialId: "pat-1", providerUsername: "maya" } } : undefined);
+
+      await screen.findByText("authorized 2 d ago");
+      fireEvent.click(screen.getByRole("button", { name: "Replace token" }));
+
+      const dialog = await screen.findByRole("dialog", { name: "Replace token" });
+
+      fireEvent.change(within(dialog).getByPlaceholderText(/glpat/i), { target: { value: "glpat-fresh" } });
+      state.credentials = state.credentials.map((c) => ({ ...c, lastValidatedDate: new Date().toISOString() }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Replace token" }));
+
+      const confirmation = await screen.findByRole("status");
+
+      expect(confirmation.textContent).toContain("Token replaced — GitLab authorized Maya's pat-1 just now");
+      await waitFor(() => expect(screen.getByText("authorized just now")).toBeTruthy());
+    });
+
+    it("drops the confirmation when the credential is disconnected afterwards: the row no longer reads as freshly authorized", async () => {
+      const held = credential("oauth-1", "OAuth", { lastValidatedDate: ago(2 * DAY), boundRepositoryCount: 2, dependentCount: 2 });
+
+      const { calls, state } = renderDialog(admin, [held], (call, st) => {
+        if (call.method === "POST" && call.path === "/api/credentials/oauth-1/revoke") {
+          st.credentials = st.credentials.map((c) => ({ ...c, status: "Revoked" }));
+
+          return { body: { credentialId: "oauth-1" } };
+        }
+
+        return init(call, st);
+      });
+      const answer = answerPopup({ status: "success", credentialId: "oauth-1" });
+
+      await screen.findByText("authorized 2 d ago");
+      await reauthorize(calls);
+      state.credentials = state.credentials.map((c) => ({ ...c, lastValidatedDate: new Date().toISOString() }));
+      answer();
+      await screen.findByRole("status");
+
+      fireEvent.click(screen.getByRole("button", { name: "Disconnect" }));
+      fireEvent.click(within(await screen.findByRole("alertdialog")).getByRole("button", { name: "Disconnect" }));
+
+      await waitFor(() => expect(screen.getByText("disconnected")).toBeTruthy());
+
+      expect(screen.queryByRole("status")).toBeNull();
+    });
+
+    it("drops the confirmation of a replaced token when its replacement is opened again", async () => {
+      const { state } = renderDialog(member, [credential("pat-1", "Pat", { lastValidatedDate: ago(2 * DAY) })], (call) => call.method === "PUT" ? { body: { credentialId: "pat-1", providerUsername: "maya" } } : undefined);
+
+      const replace = async () => {
+        fireEvent.click(screen.getByRole("button", { name: "Replace token" }));
+
+        const dialog = await screen.findByRole("dialog", { name: "Replace token" });
+
+        fireEvent.change(within(dialog).getByPlaceholderText(/glpat/i), { target: { value: "glpat-fresh" } });
+        state.credentials = state.credentials.map((c) => ({ ...c, lastValidatedDate: new Date().toISOString() }));
+        fireEvent.click(within(dialog).getByRole("button", { name: "Replace token" }));
+      };
+
+      await screen.findByText("authorized 2 d ago");
+      await replace();
+      await screen.findByRole("status");
+
+      fireEvent.click(screen.getByRole("button", { name: "Replace token" }));
+
+      await screen.findByRole("dialog", { name: "Replace token" });
+      expect(screen.queryByRole("status")).toBeNull();
+    });
+
+    it("confirms a Reconnect of a dead row that still holds repositories, which comes back to life in place", async () => {
+      const { calls, state } = renderDialog(admin, [dead("old-1", { dependentCount: 2, boundRepositoryCount: 2 })], init);
+      const answer = answerPopup({ status: "success", credentialId: "old-1" });
+
+      fireEvent.click(await screen.findByRole("button", { name: "Reconnect" }));
+      await waitFor(() => expect(calls.some((c) => c.path === "/api/credentials/oauth/init")).toBe(true));
+
+      state.credentials = state.credentials.map((c) => ({ ...c, status: "Active", lastValidatedDate: new Date().toISOString() }));
+      answer();
+
+      expect((await screen.findByRole("status")).textContent).toContain("Reconnected — GitLab authorized Maya's old-1 just now");
+      await waitFor(() => expect(screen.getByText("2 repositories bound")).toBeTruthy());
+    });
   });
 });
 
