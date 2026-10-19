@@ -3,7 +3,7 @@ using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Identity;
-using CodeSpace.Core.Services.Providers.Capabilities;
+using CodeSpace.Core.Services.Providers.Identity;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Commands.Credentials;
 using CodeSpace.Messages.Constants;
@@ -25,19 +25,23 @@ public sealed partial class CredentialRelinkService : ICredentialRelinkService, 
     private readonly ICurrentUser _currentUser;
     private readonly TeamMembershipResolver _membership;
     private readonly ICredentialSuccessionService _succession;
-    private readonly IProviderRegistry _registry;
+    private readonly IRepositoryReadProbe _probe;
+    private readonly IActorIdentityResolver _actors;
+    private readonly TimeProvider _clock;
     private readonly ILogger<CredentialRelinkService> _logger;
 
     private RelinkContext _ctx = new();
 
-    public CredentialRelinkService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, TeamMembershipResolver membership, ICredentialSuccessionService succession, IProviderRegistry registry, ILogger<CredentialRelinkService> logger)
+    public CredentialRelinkService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, TeamMembershipResolver membership, ICredentialSuccessionService succession, IRepositoryReadProbe probe, IActorIdentityResolver actors, TimeProvider clock, ILogger<CredentialRelinkService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
         _currentUser = currentUser;
         _membership = membership;
         _succession = succession;
-        _registry = registry;
+        _probe = probe;
+        _actors = actors;
+        _clock = clock;
         _logger = logger;
     }
 

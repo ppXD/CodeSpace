@@ -65,6 +65,37 @@ public class CredentialUrlTests
     public void SameEndpoint_compares_scheme_host_and_port(string? stored, string? next, bool expected) => CredentialUrl.SameEndpoint(stored, next).ShouldBe(expected);
 
     [Theory]
+    [InlineData("https://gitlab.acme.test", "https://gitlab.acme.test", true)]
+    [InlineData("https://gitlab.acme.test", "https://gitlab.acme.test/", true)]                  // a trailing slash is not a path
+    [InlineData("https://gitlab.acme.test/gitlab", "https://gitlab.acme.test/gitlab/", true)]
+    [InlineData("https://GITLAB.acme.test:443/gitlab", "https://gitlab.acme.test/gitlab", true)] // host case and the default port, as SameEndpoint reads them
+    [InlineData("https://a:b@gitlab.acme.test/gitlab", "https://gitlab.acme.test/gitlab?x=1", true)] // userinfo and query are not part of the root
+    [InlineData(null, null, true)]
+    [InlineData("https://gitlab.acme.test", "https://gitlab.acme.test/gitlab", false)]          // a GitLab under /gitlab is not the one at the root
+    [InlineData("https://gitlab.acme.test/gitlab", "https://gitlab.acme.test/other", false)]
+    [InlineData("https://gitlab.acme.test/GitLab", "https://gitlab.acme.test/gitlab", false)]    // a path is case-sensitive
+    [InlineData("https://gitlab.acme.test", "https://gitlab.acme.test:8443", false)]             // everything SameEndpoint refuses, SameRoot refuses
+    [InlineData("https://gitlab.acme.test", "http://gitlab.acme.test", false)]
+    [InlineData("https://gitlab.acme.test", "https://attacker.test", false)]
+    [InlineData("https://gitlab.acme.test", null, false)]
+    [InlineData("gitlab.acme.test:4000", "gitlab.acme.test:4000", true)]                        // not an absolute http(s) URL: it only matches itself
+    [InlineData("gitlab.acme.test:4000", "gitlab.acme.test:5000", false)]
+    public void SameRoot_is_the_same_endpoint_and_the_same_path(string? a, string? b, bool expected)
+    {
+        CredentialUrl.SameRoot(a, b).ShouldBe(expected);
+        CredentialUrl.SameRoot(b, a).ShouldBe(expected, "symmetric");
+    }
+
+    [Theory]
+    [InlineData("https://gitlab.acme.test/api/v4", "https://gitlab.acme.test:443/api/v4/")]
+    [InlineData("https://gitlab.acme.test", "https://gitlab.acme.test/")]
+    public void SameRoot_agrees_with_SameEndpoint_wherever_the_endpoint_is_the_same_and_the_path_is_(string a, string b)
+    {
+        CredentialUrl.SameEndpoint(a, b).ShouldBeTrue("fixture check: the endpoint is the same");
+        CredentialUrl.SameRoot(a, b).ShouldBeTrue();
+    }
+
+    [Theory]
     [InlineData("http://gw.example", "https://gw.example", true)]                       // the default ports, 80 to 443
     [InlineData("http://gw.example:80", "https://gw.example:443", true)]                // spelled out
     [InlineData("http://gw.example:8080", "https://gw.example:8080", true)]             // the same explicit port

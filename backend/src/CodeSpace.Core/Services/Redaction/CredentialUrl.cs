@@ -63,6 +63,17 @@ public static class CredentialUrl
     }
 
     /// <summary>
+    /// Whether two API roots are the same service: <see cref="SameEndpoint"/> (scheme, host, port) and the same path, a trailing
+    /// slash aside. A GitLab served under <c>/gitlab</c> is not the GitLab at the host's root, which an endpoint alone cannot tell.
+    /// The one definition of "the same host" for provider connections (<c>ProviderInstanceHost</c>): two connections whose roots
+    /// are the same reach the same repositories, whatever OAuth application each signs in through.
+    /// </summary>
+    public static bool SameRoot(string? a, string? b) => SameEndpoint(a, b) && string.Equals(PathOf(a), PathOf(b), StringComparison.Ordinal);
+
+    /// <summary>The path of an http(s) URL without its trailing slashes; empty for a blank or non-http value, whose identity <see cref="SameEndpoint"/> has already compared whole.</summary>
+    private static string PathOf(string? url) => HttpUri(url)?.AbsolutePath.TrimEnd('/') ?? string.Empty;
+
+    /// <summary>
     /// Whether <paramref name="next"/> is the same endpoint as <paramref name="stored"/> with its scheme moved from http to
     /// https and nothing else: the same host (case aside) and the same port — each scheme's own default (80 then 443), or one
     /// explicit port both spell. The one change of endpoint that sends a key nowhere new: to the same host, over TLS. Another

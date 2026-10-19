@@ -14,8 +14,8 @@ export const ACCESSIBLE_REPOS_PAGE_SIZE = 30;
  *  both GitHub and GitLab; bigger pages = fewer round-trips to load everything. */
 const EAGER_FETCH_NETWORK_PAGE_SIZE = 100;
 
-export function useCredentials() {
-  return useQuery({ queryKey: ["credentials"], queryFn: () => oauthApi.listCredentials() });
+export function useCredentials(enabled = true) {
+  return useQuery({ queryKey: ["credentials"], queryFn: () => oauthApi.listCredentials(), enabled });
 }
 
 export function useProviderInstances() {
@@ -291,6 +291,20 @@ export function useRelinkSuggestions(credentialId: string | null, enabled = true
     queryKey: ["relink-suggestions", credentialId],
     queryFn: () => oauthApi.getRelinkSuggestions(credentialId!),
     enabled: enabled && credentialId != null,
+    staleTime: 0,
+  });
+}
+
+/**
+ * What a Re-link dialog offers for a repository on a provider connection, from the backend: the caller's own and the team's credentials on that
+ * connection and on any other connection to the same host, best first. `data` is null when the API predates it, which the dialog answers by
+ * filtering the credential list itself. Asked only when the dialog is open, for the reason the suggestions are.
+ */
+export function useRelinkCandidates(providerInstanceId: string | null, fromCredentialId: string | null) {
+  return useQuery({
+    queryKey: ["relink-candidates", providerInstanceId, fromCredentialId],
+    queryFn: () => oauthApi.getRelinkCandidates(providerInstanceId!, fromCredentialId),
+    enabled: providerInstanceId != null,
     staleTime: 0,
   });
 }

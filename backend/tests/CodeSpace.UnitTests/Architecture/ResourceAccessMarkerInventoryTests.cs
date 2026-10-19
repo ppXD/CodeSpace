@@ -71,6 +71,7 @@ public class ResourceAccessMarkerInventoryTests
         ["LinkProviderIdentityByPatCommand.ProviderInstanceId"] = "UserProviderIdentityService.LoadInstanceAsync loads the instance by (id, header team).",
         ["UpdateProviderInstanceCommand.ProviderInstanceId"] = "ProviderInstanceService.LoadOwnedInstanceAsync refuses an instance outside the header team.",
         ["DeleteProviderInstanceCommand.ProviderInstanceId"] = "ProviderInstanceService.LoadOwnedInstanceAsync refuses an instance outside the header team.",
+        ["GetRelinkCandidatesQuery.ProviderInstanceId"] = "CredentialRelinkService.LoadTeamInstanceAsync loads the instance by (id, header team) and reads another team's as not found; every credential it lists is the header team's.",
         ["GetProviderInstanceUsageQuery.ProviderInstanceId"] = "ProviderInstanceService.GetUsageAsync counts only repositories and credentials of the header team.",
         ["ListRepositoriesQuery.ProviderInstanceId"] = "an optional filter over a list RepositoryService already restricts to the header team.",
         ["ListCredentialsQuery.ProviderInstanceId"] = "an optional filter over a list CredentialService already restricts to the header team.",

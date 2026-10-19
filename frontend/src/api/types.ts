@@ -178,6 +178,11 @@ export interface RelinkSuggestion {
   kind: "YourConnection" | "TeamServiceToken" | "OwnersOtherConnection";
   createdDate: string;
   connectedBeforeDisconnect: boolean;
+  /** The provider connection the credential belongs to — the repository's own, or another connection to the same host, where picking it also moves the repository. Absent from an API that predates it. */
+  providerInstanceId?: string;
+  providerInstanceName?: string;
+  /** Names of the teammates whose acting-as on the repository's connection stops working if this credential is picked: they can act as themselves there and not on this credential's connection. Empty for a credential on the repository's own connection; absent from an API that predates it. */
+  strandedActAs?: string[];
 }
 
 export interface ReplaceCredentialTokenResponse {

@@ -126,6 +126,31 @@ public sealed class GitLabDoorkeeperStubTests : IDisposable
     }
 
     [Fact]
+    public async Task A_project_lookup_answers_the_project_for_an_added_id_and_a_404_for_any_other_but_only_once_a_project_was_added()
+    {
+        _gitlab.Seed("app1", "nacho", "at-0", "rt-0");
+
+        var before = await GetAsync("/api/v4/projects/4242", ("Authorization", "Bearer at-0")).ConfigureAwait(false);
+
+        _gitlab.AddProject(4242, "acme/platform/api");
+
+        var known = await GetAsync("/api/v4/projects/4242", ("Authorization", "Bearer at-0")).ConfigureAwait(false);
+        var unknown = await GetAsync("/api/v4/projects/9", ("Authorization", "Bearer at-0")).ConfigureAwait(false);
+        var withoutToken = await GetAsync("/api/v4/projects/4242").ConfigureAwait(false);
+        var members = await GetAsync("/api/v4/projects/4242/members/all/51", ("Authorization", "Bearer at-0")).ConfigureAwait(false);
+
+        before.Status.ShouldBe(HttpStatusCode.OK);
+        before.Json.ValueKind.ShouldBe(JsonValueKind.Array, "with no project added the call answers what it always did (the empty list), so a test that never added one is unchanged");
+        known.Status.ShouldBe(HttpStatusCode.OK);
+        known.Json.GetProperty("id").GetInt64().ShouldBe(4242);
+        known.Json.GetProperty("path_with_namespace").GetString().ShouldBe("acme/platform/api");
+        known.Json.GetProperty("namespace").GetProperty("full_path").GetString().ShouldBe("acme/platform");
+        unknown.Status.ShouldBe(HttpStatusCode.NotFound);
+        withoutToken.Status.ShouldBe(HttpStatusCode.Unauthorized, "a project is for a live token only");
+        members.Json.GetProperty("access_level").GetInt32().ShouldBe(30, "the members lookup is a different route and is untouched");
+    }
+
+    [Fact]
     public async Task The_api_honours_an_oauth_token_only_as_a_bearer_and_answers_the_members_lookup_for_the_user_asked_about()
     {
         _gitlab.MemberAccessLevel = 40;

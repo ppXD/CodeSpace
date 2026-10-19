@@ -11,7 +11,7 @@ public sealed partial class CredentialSuccessionService : ICredentialBindingRevi
     {
         var own = new List<Guid> { credential.Id };
 
-        var repositories = await LoadBoundRepositoriesAsync(credential, own, cancellationToken).ConfigureAwait(false);
+        var repositories = await LoadBoundRepositoriesAsync(credential.TeamId, new[] { credential.ProviderInstanceId }, own, cancellationToken).ConfigureAwait(false);
         var hooks = await LoadBoundConnectionWebhooksAsync(credential, own, cancellationToken).ConfigureAwait(false);
 
         var revived = new BindingsRevived { RepositoryCount = repositories.Count(r => r.Status == RepositoryStatus.Error), ConnectionWebhookCount = hooks.Count(h => Revivable.Contains(h.RegistrationStatus)) };

@@ -781,6 +781,7 @@ public sealed class CredentialRelinkFlowTests
         private readonly string? _refuseFor;
         private readonly Func<Exception>? _failure;
         private readonly List<(Guid Credential, string ExternalId)> _reads = new();
+        private readonly List<(Guid Credential, string HookExternalId)> _deletions = new();
 
         /// <param name="refuseFor">Refuse the repositories whose external id ends with it; the empty string refuses them all, null none.</param>
         /// <param name="failure">What the provider throws when it refuses; a 404 when left out.</param>
@@ -792,8 +793,13 @@ public sealed class CredentialRelinkFlowTests
 
         public IReadOnlyList<(Guid Credential, string ExternalId)> Reads => _reads;
 
+        /// <summary>The hooks the provider was asked to delete, and as which credential — what a repository that changed connection leaves behind at the provider.</summary>
+        public IReadOnlyList<(Guid Credential, string HookExternalId)> Deletions => _deletions;
+
         public void Install(ContainerBuilder builder) =>
             builder.Register<IProviderRegistry>(c => new RecordingRegistry(new BindingMoveKit.GitTestProviderRegistry(new ProviderRegistry(c.Resolve<IEnumerable<IProviderCapability>>())), this)).InstancePerLifetimeScope();
+
+        private void Deleted(ProviderContext context, string hookExternalId) => _deletions.Add((context.Credential.Id, hookExternalId));
 
         private void Read(ProviderContext context, string externalId)
         {
@@ -815,11 +821,46 @@ public sealed class CredentialRelinkFlowTests
             }
 
             public TCapability Require<TCapability>(ProviderKind kind) where TCapability : IProviderCapability =>
-                typeof(TCapability) == typeof(IRepositoryCatalogCapability) ? (TCapability)CatalogProxy.Create(_inner.Require<IRepositoryCatalogCapability>(kind), _recorder) : _inner.Require<TCapability>(kind);
+                typeof(TCapability) == typeof(IRepositoryCatalogCapability) ? (TCapability)CatalogProxy.Create(_inner.Require<IRepositoryCatalogCapability>(kind), _recorder)
+                : typeof(TCapability) == typeof(IWebhookRegistrationCapability) ? (TCapability)WebhookProxy.Create(_inner.Require<IWebhookRegistrationCapability>(kind), _recorder)
+                : _inner.Require<TCapability>(kind);
 
-            public bool TryGet<TCapability>(ProviderKind kind, out TCapability? capability) where TCapability : class, IProviderCapability => _inner.TryGet(kind, out capability);
+            public bool TryGet<TCapability>(ProviderKind kind, out TCapability? capability) where TCapability : class, IProviderCapability
+            {
+                var found = _inner.TryGet(kind, out capability);
+
+                if (found && capability is IWebhookRegistrationCapability hooks && typeof(TCapability) == typeof(IWebhookRegistrationCapability)) capability = (TCapability)WebhookProxy.Create(hooks, _recorder);
+
+                return found;
+            }
 
             public IReadOnlyList<Type> GetCapabilities(ProviderKind kind) => _inner.GetCapabilities(kind);
+        }
+
+        /// <summary>Remembers each hook the provider is asked to delete — the call a repository's old hooks end in once it has moved to another connection.</summary>
+        public class WebhookProxy : System.Reflection.DispatchProxy
+        {
+            private IWebhookRegistrationCapability _inner = default!;
+            private ProbeRecorder _recorder = default!;
+
+            public static object Create(IWebhookRegistrationCapability inner, ProbeRecorder recorder)
+            {
+                var proxy = Create<IWebhookRegistrationCapability, WebhookProxy>();
+                var self = (WebhookProxy)(object)proxy;
+
+                self._inner = inner;
+                self._recorder = recorder;
+
+                return proxy;
+            }
+
+            protected override object? Invoke(System.Reflection.MethodInfo? targetMethod, object?[]? args)
+            {
+                if (targetMethod!.Name == nameof(IWebhookRegistrationCapability.DeleteWebhookAsync)) _recorder.Deleted((ProviderContext)args![0]!, (string)args[2]!);
+
+                try { return targetMethod.Invoke(_inner, args); }
+                catch (System.Reflection.TargetInvocationException e) { System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(e.InnerException!).Throw(); throw; }
+            }
         }
 
         public class CatalogProxy : System.Reflection.DispatchProxy

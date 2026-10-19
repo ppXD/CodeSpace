@@ -14,12 +14,16 @@ public interface ICredentialRelinkService
     /// <summary>Every repository (with its projects), group hook, act-as identity and workflow trigger that leans on the credential. A credential outside the caller's team reads as not found.</summary>
     Task<CredentialDependents> GetDependentsAsync(Guid credentialId, CancellationToken cancellationToken);
 
-    /// <summary>The credentials the caller could move this one's bindings onto — their own live connections first, then the team's service tokens — each a candidate <see cref="RelinkAllAsync"/> would accept.</summary>
+    /// <summary>The credentials the caller could move this one's bindings onto — their own live connections first, then the team's service tokens, the same connection's before another connection's to the same host — each a candidate <see cref="RelinkAllAsync"/> would accept.</summary>
     Task<IReadOnlyList<RelinkSuggestion>> GetSuggestionsAsync(Guid credentialId, CancellationToken cancellationToken);
+
+    /// <summary>The credentials a Re-link dialog offers for a repository on a provider connection — see <see cref="Messages.Queries.Credentials.GetRelinkCandidatesQuery"/>. The connection reads as not found outside the caller's team.</summary>
+    Task<IReadOnlyList<RelinkSuggestion>> GetCandidatesAsync(Guid providerInstanceId, Guid? leavingCredentialId, CancellationToken cancellationToken);
 
     /// <summary>
     /// Move every live repository and in-service group hook bound through a dead credential onto another credential, after
-    /// the target has been asked to read each repository. Needs <c>repos.manage</c> (the command's marker) and
+    /// the target has been asked to read each repository. A target on another connection to the same host takes the repositories to
+    /// its connection (<see cref="RepositoryBinding.IRepositoryRehoming"/>), and they must be found at the path CodeSpace has; a group hook stays with its connection. Needs <c>repos.manage</c> (the command's marker) and
     /// <c>credentials.manage</c> (asserted here). Tracked changes only — the caller's unit of work saves them.
     /// </summary>
     Task<RelinkCredentialBindingsResult> RelinkAllAsync(Guid fromCredentialId, Guid toCredentialId, CancellationToken cancellationToken);

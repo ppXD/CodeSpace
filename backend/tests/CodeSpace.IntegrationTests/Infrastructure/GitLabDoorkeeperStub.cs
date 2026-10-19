@@ -59,7 +59,9 @@ public enum StubEvent
 /// resolves an OAuth token from <c>Authorization: Bearer</c> and looks <c>PRIVATE-TOKEN</c> up as a personal access
 /// token; an access token is read as <c>PRIVATE-TOKEN</c> alone, see above), <c>GET /api/v4/personal_access_tokens/self</c>
 /// (an access token's own scopes and expiry), any other <c>GET /api/v4/**</c> as an empty list, and git smart-HTTP
-/// <c>GET **/info/refs</c> for both services. Every user has an id of their own, stable for the stub's life
+/// <c>GET **/info/refs</c> for both services. Once a project has been added (<see cref="AddProject"/>), <c>GET /api/v4/projects/:id</c> answers the
+/// project the way GitLab does — 200 and the project for an id it was given, 404 for any other — to a live token; with none added that call is
+/// the empty list it always was. Every user has an id of their own, stable for the stub's life
 /// (<see cref="UserIdOf"/>), so a test can tell two accounts apart the way a provider does.
 /// The git endpoint takes an OAuth access token as HTTP Basic with login <c>oauth2</c> — what GitLab through 17.x
 /// requires of an OAuth token — or as <c>Authorization: Bearer</c>; anything else is a 401 with the
@@ -89,6 +91,7 @@ public sealed class GitLabDoorkeeperStub : IDisposable
     private readonly Dictionary<string, string> _applications = new() { [DefaultClientId] = DefaultClientSecret };
     private readonly Dictionary<string, AccessToken> _accessTokens = new();
     private readonly Dictionary<string, int> _userIds = new();
+    private readonly Dictionary<long, string> _projects = new();
     private int _sequence;
     private int _membersFailureStatus;
     private int _membersFailuresLeft;
@@ -155,6 +158,12 @@ public sealed class GitLabDoorkeeperStub : IDisposable
             _membersFailureStatus = status;
             _membersFailuresLeft = times;
         }
+    }
+
+    /// <summary>A project this GitLab knows, by id and full path: what <c>GET /api/v4/projects/:id</c> answers a live token once any project has been added, and a 404 for every other id.</summary>
+    public void AddProject(long id, string pathWithNamespace)
+    {
+        lock (_gate) { _projects[id] = pathWithNamespace; }
     }
 
     /// <summary>The scopes a personal access token reports for itself at <c>/api/v4/personal_access_tokens/self</c>.</summary>
@@ -358,7 +367,7 @@ public sealed class GitLabDoorkeeperStub : IDisposable
 
             if (path == "/api/v4/personal_access_tokens/self") return Reply.Json(404, """{"message":"404 Not Found"}""");
 
-            return scripted ?? Reply.Json(200, ApiBody(row.User, path));
+            return scripted ?? ProjectReply(path) ?? Reply.Json(200, ApiBody(row.User, path));
         }
     }
 
@@ -383,7 +392,7 @@ public sealed class GitLabDoorkeeperStub : IDisposable
             if (!live) return Reply.Json(401, UnauthorizedBody);
             if (path == "/api/v4/personal_access_tokens/self") return Reply.Json(200, SelfBody(token!));
 
-            return scripted ?? Reply.Json(200, ApiBody(token!.User, path));
+            return scripted ?? ProjectReply(path) ?? Reply.Json(200, ApiBody(token!.User, path));
         }
     }
 
@@ -399,6 +408,37 @@ public sealed class GitLabDoorkeeperStub : IDisposable
         Note(StubEvent.MembersFailed, $"{path} answered {_membersFailureStatus}", null);
 
         return Reply.Json(_membersFailureStatus, """{"message":"scripted failure"}""");
+    }
+
+    /// <summary>
+    /// <c>GET /api/v4/projects/:id</c> once projects have been added: the project, or GitLab's 404 for an id it was not given. Null for every other path, and for
+    /// this call while no project has been added, which keeps its old answer. Only a numeric id is routed: the path form is URL-encoded, and the listener
+    /// is free to decode it.
+    /// </summary>
+    private Reply? ProjectReply(string path)
+    {
+        const string prefix = "/api/v4/projects/";
+
+        if (_projects.Count == 0 || !path.StartsWith(prefix, StringComparison.Ordinal) || !long.TryParse(path[prefix.Length..], out var id)) return null;
+
+        if (!_projects.TryGetValue(id, out var fullPath)) return Reply.Json(404, """{"message":"404 Project Not Found"}""");
+
+        var name = fullPath[(fullPath.LastIndexOf('/') + 1)..];
+        var namespacePath = fullPath.Contains('/') ? fullPath[..fullPath.LastIndexOf('/')] : string.Empty;
+
+        return Reply.Json(200, JsonSerializer.Serialize(new
+        {
+            id,
+            name,
+            path = name,
+            path_with_namespace = fullPath,
+            @namespace = new { id = 7, name = namespacePath, path = namespacePath, kind = "group", full_path = namespacePath },
+            default_branch = "main",
+            visibility = "private",
+            web_url = $"{BaseUrl}/{fullPath}",
+            http_url_to_repo = $"{BaseUrl}/{fullPath}.git",
+            archived = false
+        }));
     }
 
     private string ApiBody(string user, string path)

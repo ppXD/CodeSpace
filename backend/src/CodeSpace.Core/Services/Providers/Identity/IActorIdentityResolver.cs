@@ -30,4 +30,11 @@ public interface IActorIdentityResolver
     /// Empty when none qualify or the repo is not the team's. Bots are excluded (they can't link one).
     /// </summary>
     Task<IReadOnlyList<ActAsCandidateSummary>> ListCandidatesAsync(Guid repositoryId, Guid teamId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// The same predicate for a provider instance known by id: every teammate with a live, usable identity on it, by name. What
+    /// <see cref="ListCandidatesAsync"/> answers for a repository is this for the repository's instance — and what it will answer for a repository
+    /// that moves to another connection is this for that connection, which is how a move reads who it would leave unable to act.
+    /// </summary>
+    Task<IReadOnlyList<ActAsCandidateSummary>> ListCandidatesOnInstanceAsync(Guid providerInstanceId, CancellationToken cancellationToken);
 }

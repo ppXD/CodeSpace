@@ -20,7 +20,7 @@ using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.RepositoryBinding;
 
-public sealed class RepositoryBindingService : IRepositoryBindingService, IScopedDependency
+public sealed partial class RepositoryBindingService : IRepositoryBindingService, IRepositoryRehoming, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly IProviderRegistry _registry;
@@ -272,8 +272,9 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     /// The chosen credential must belong to the SAME provider instance we're binding against. Both are
     /// already team-scoped (LoadProviderInstance / LoadCredential), but within one team a caller can still
     /// pair instance A1 with a credential of instance A2 — the token would then talk to the wrong host and
-    /// every API call would 401/404 mid-bind. Mirrors RepositoryService's relink-side
-    /// EnsureSameProviderInstance so bind and relink enforce the identical invariant.
+    /// every API call would 401/404 mid-bind. A relink accepts a credential of another connection to the same host
+    /// (<see cref="IRepositoryRehoming"/>) because it moves the repository to that connection; a bind names the connection
+    /// itself, so the pairing here stays exact.
     /// </summary>
     private static void EnsureCredentialMatchesInstance(BindContext ctx)
     {
@@ -376,9 +377,11 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
         return ctx with
         {
             NewWebhookId = Guid.NewGuid(),
-            WebhookSecret = Convert.ToBase64String(RandomNumberGenerator.GetBytes(32))
+            WebhookSecret = NewWebhookSecret()
         };
     }
+
+    private static string NewWebhookSecret() => Convert.ToBase64String(RandomNumberGenerator.GetBytes(32));
 
     /// <summary>
     /// Persist the Repository + a Pending RepositoryWebhook + the Project-Repository link
@@ -514,18 +517,21 @@ public sealed class RepositoryBindingService : IRepositoryBindingService, IScope
     /// reaches Registered; the secret is encrypted before persistence so an attacker with
     /// DB read access cannot recover it without the master key.
     /// </summary>
-    private RepositoryWebhook BuildPendingWebhookEntity(BindContext ctx, Guid repositoryId)
+    private RepositoryWebhook BuildPendingWebhookEntity(BindContext ctx, Guid repositoryId) => NewPendingWebhook(ctx.Instance.Provider, repositoryId, ctx.NewWebhookId, ctx.WebhookSecret);
+
+    /// <summary>The one shape of a freshly staged per-repository hook, whoever stages it: a bind, or a repository that moved to another connection.</summary>
+    private RepositoryWebhook NewPendingWebhook(ProviderKind provider, Guid repositoryId, Guid webhookId, string secret)
     {
-        var callbackUrl = $"{_webhookBaseUrl.Value.TrimEnd('/')}/api/webhooks/{ctx.NewWebhookId}";
-        var subscribedEvents = _subscriptionRegistry.GetSubscribedRawEvents(ctx.Instance.Provider);
+        var callbackUrl = $"{_webhookBaseUrl.Value.TrimEnd('/')}/api/webhooks/{webhookId}";
+        var subscribedEvents = _subscriptionRegistry.GetSubscribedRawEvents(provider);
 
         return new RepositoryWebhook
         {
-            Id = ctx.NewWebhookId,
+            Id = webhookId,
             RepositoryId = repositoryId,
             ExternalId = null,
             CallbackUrl = callbackUrl,
-            SecretEnc = _encryptor.Encrypt(ctx.WebhookSecret),
+            SecretEnc = _encryptor.Encrypt(secret),
             SubscribedEvents = subscribedEvents.ToList(),
             Active = true,
             RegistrationStatus = RepositoryWebhookRegistrationStatus.Pending,

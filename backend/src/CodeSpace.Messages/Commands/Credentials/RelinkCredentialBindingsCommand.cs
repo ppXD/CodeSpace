@@ -12,10 +12,12 @@ namespace CodeSpace.Messages.Commands.Credentials;
 ///
 /// <para>The source must be dead — Revoked, which includes a departed member's token the team retired and soft-deleted.
 /// Taking bindings off a live credential is a Disconnect with <c>MoveBindingsToCredentialId</c>. The target must be a live
-/// credential of the same provider instance that is the CALLER's own or the team's: a teammate's personal token is
-/// refused, because the repositories would then act as that person. Before anything is written the target is asked to
+/// credential of the same provider instance — or of another connection of the team to the same host, which takes the repositories to its
+/// connection with it (see <c>RelinkRepositoryCredentialCommand</c>; a group hook is keyed to its connection and stays) — that is the CALLER's own or
+/// the team's: a teammate's personal token is refused, because the repositories would then act as that person. Before anything is written the target is asked to
 /// read every repository it would take (the provider's own lookup, as a bind does); one it cannot read — the provider
-/// answered 401, 403 or 404, or the token's scope falls short — refuses the whole move and names them, so a relink never
+/// answered 401, 403 or 404, or the token's scope falls short — refuses the whole move and names them (onto another connection, one it finds at another
+/// path is refused too), so a relink never
 /// trades a loud failure for a quiet one. A provider that does not answer (an outage, a rate limit) says nothing about the
 /// target: that is a retryable refusal that blames nobody, and nothing is moved. The check is one call per repository and
 /// bounded: more than 100 repositories on one credential are refused before any is read, and are re-linked a few at a time.</para>
