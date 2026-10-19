@@ -823,32 +823,32 @@ public partial class CredentialReauthorizationFlowTests
     /// Revoked, the payload blanked, the row still listed; <paramref name="retired"/> is what a departure or a connection
     /// delete leaves on top of that — soft-deleted.
     /// </summary>
-    private async Task<Guid> SeedOAuthCredentialAsync(World world, Guid? ownerId, string accessToken, string refreshToken, bool disconnected = false, bool retired = false, bool expired = false, CredentialStatus status = CredentialStatus.Active, string? lastError = null, CredentialOwnership ownership = CredentialOwnership.Personal, Guid? instanceId = null)
+    private async Task<Guid> SeedOAuthCredentialAsync(World world, Guid? ownerId, string accessToken, string refreshToken, bool disconnected = false, bool retired = false, bool expired = false, CredentialStatus status = CredentialStatus.Active, string? lastError = null, CredentialOwnership ownership = CredentialOwnership.Personal, Guid? instanceId = null, Guid? id = null)
     {
         using var scope = _fixture.BeginScope();
         var payload = new OAuthPayload { AccessToken = accessToken, RefreshToken = refreshToken, ExpiresAt = expired ? DateTimeOffset.UtcNow.AddMinutes(-1) : DateTimeOffset.UtcNow.AddHours(2) };
         var sealedPayload = scope.Resolve<IPayloadEncryptor>().Encrypt(scope.Resolve<ICredentialPayloadSerializer>().Serialize(payload));
 
-        return await InsertCredentialAsync(scope, world, ownerId, AuthType.OAuth, sealedPayload, payload.ExpiresAt, disconnected || retired, retired, status, lastError, ownership, instanceId).ConfigureAwait(false);
+        return await InsertCredentialAsync(scope, world, ownerId, AuthType.OAuth, sealedPayload, payload.ExpiresAt, disconnected || retired, retired, status, lastError, ownership, instanceId, id).ConfigureAwait(false);
     }
 
-    private async Task<Guid> SeedTokenCredentialAsync(World world, Guid? ownerId, string token, AuthType authType = AuthType.Pat, CredentialOwnership ownership = CredentialOwnership.Personal, CredentialStatus status = CredentialStatus.Active, string? lastError = null, bool retired = false, DateTimeOffset? expires = null, Guid? instanceId = null)
+    private async Task<Guid> SeedTokenCredentialAsync(World world, Guid? ownerId, string token, AuthType authType = AuthType.Pat, CredentialOwnership ownership = CredentialOwnership.Personal, CredentialStatus status = CredentialStatus.Active, string? lastError = null, bool retired = false, DateTimeOffset? expires = null, Guid? instanceId = null, Guid? id = null)
     {
         using var scope = _fixture.BeginScope();
         CredentialPayload payload = authType == AuthType.GroupAccessToken ? new GroupAccessTokenPayload { Token = token } : new PatPayload { Token = token };
         var sealedPayload = scope.Resolve<IPayloadEncryptor>().Encrypt(scope.Resolve<ICredentialPayloadSerializer>().Serialize(payload));
 
-        return await InsertCredentialAsync(scope, world, ownerId, authType, retired ? string.Empty : sealedPayload, expires, retired, retired, status, lastError, ownership, instanceId).ConfigureAwait(false);
+        return await InsertCredentialAsync(scope, world, ownerId, authType, retired ? string.Empty : sealedPayload, expires, retired, retired, status, lastError, ownership, instanceId, id).ConfigureAwait(false);
     }
 
-    private static async Task<Guid> InsertCredentialAsync(ILifetimeScope scope, World world, Guid? ownerId, AuthType authType, string encryptedPayload, DateTimeOffset? expires, bool blank, bool retired, CredentialStatus status, string? lastError, CredentialOwnership ownership, Guid? instanceId)
+    private static async Task<Guid> InsertCredentialAsync(ILifetimeScope scope, World world, Guid? ownerId, AuthType authType, string encryptedPayload, DateTimeOffset? expires, bool blank, bool retired, CredentialStatus status, string? lastError, CredentialOwnership ownership, Guid? instanceId, Guid? id)
     {
         var db = scope.Resolve<CodeSpaceDbContext>();
         var actor = ownerId ?? world.BossId;
 
         var credential = new Credential
         {
-            Id = Guid.NewGuid(),
+            Id = id ?? Guid.NewGuid(),
             TeamId = world.TeamId,
             ProviderInstanceId = instanceId ?? world.InstanceId,
             OwnerUserId = ownerId,

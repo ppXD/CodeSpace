@@ -38,7 +38,9 @@ public interface ICredentialRevocationService
     /// tokens, by an older pod, or by an instance Admin losing the role; each exactly as a departure retires it and saved
     /// on its own. A token that cannot be attributed to an account is never one. Returns how many were retired. A token that
     /// fails is skipped and logged and the pass goes on past it — however many fail, they cannot crowd a healthy one out — and
-    /// one that has failed several passes in a row is set aside for a while (<see cref="SweepPass{TCandidate}"/>).
+    /// one that has failed several passes in a row is set aside for a while (<see cref="SweepPass{TCandidate}"/>). Each token is
+    /// retired under its refresh lock, judged departed again once it is held: a token a refresh or a re-authorization is
+    /// writing is skipped and met on the next pass, so a retirement never blanks what such a write lands.
     /// </summary>
     Task<int> RetireDepartedAsync(int batchSize, CancellationToken cancellationToken);
 }

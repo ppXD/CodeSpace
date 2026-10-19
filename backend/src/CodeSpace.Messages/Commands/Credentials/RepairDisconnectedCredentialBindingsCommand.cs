@@ -7,7 +7,8 @@ namespace CodeSpace.Messages.Commands.Credentials;
 /// own owner connected afterwards on the same provider instance and team. The connect paths carry these bindings
 /// forward themselves; this repairs the ones a connect path left behind anyway — rows stranded before the carry-forward
 /// existed, a connect served by an older pod during a rolling deploy, and any later path that strands one. Idempotent
-/// and bounded: a moved binding no longer points at a revoked credential, so the backlog only shrinks. NOT
+/// and bounded: a moved binding no longer points at a revoked credential, so the backlog only shrinks. A credential a refresh
+/// or an in-place re-authorization is writing is skipped for this pass, and one revived since it was read keeps its bindings. NOT
 /// tenant-scoped: a system-wide repair that runs without an actor context (mirrors <c>BackfillPackCloneUrlsCommand</c>).
 ///
 /// <para>NOT transactional (<see cref="INonTransactionalCommand"/>): each credential's bindings are saved on their own,
