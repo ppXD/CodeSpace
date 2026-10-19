@@ -1,7 +1,7 @@
 import { useState } from "react";
 
 import { Ic } from "@/_imported/ai-code-space/icons";
-import type { ProviderRemedy, RemedyAction, RemedyActionKind } from "@/api/types";
+import type { ProviderRemedy, RemedyAction, RemedyActionKind, RemedyOrigin } from "@/api/types";
 
 import { useProviderFixes } from "./useProviderFixes";
 
@@ -14,6 +14,8 @@ interface ProviderRemedyCardProps {
   rawDetail?: string | null;
   /** Called after a fix landed — the caller re-reads whatever it shows. */
   onFixed?: () => void;
+  /** Opens another run: the sub-workflow run a failure happened in. Absent where no run viewer is mounted, and the run is then named without a link. */
+  onOpenRun?: (runId: string) => void;
 }
 
 /**
@@ -25,8 +27,11 @@ interface ProviderRemedyCardProps {
  *
  * Once what failed works again the card says so and puts Re-run first — the repair is done, the run only needs another go. Until then
  * there is no Re-run to press: nothing about the run changes until the connection does.
+ *
+ * A failure a sub-workflow node carried up from its child run is the child's remedy on the parent's page, plus a line naming the child run it
+ * happened in (a link, where a run can be opened). Re-run stays the parent's: it starts the parent again, which starts a fresh child.
  */
-export function ProviderRemedyCard({ remedy, onRerun, rerunning = false, rawDetail = null, onFixed }: ProviderRemedyCardProps) {
+export function ProviderRemedyCard({ remedy, onRerun, rerunning = false, rawDetail = null, onFixed, onOpenRun }: ProviderRemedyCardProps) {
   const fix = useProviderFixes({ onFixed });
   const [showRaw, setShowRaw] = useState(false);
   const credential = remedy.credential ?? null;
@@ -75,8 +80,9 @@ export function ProviderRemedyCard({ remedy, onRerun, rerunning = false, rawDeta
         <div className="room-err-title">{remedy.title}</div>
         <p className="room-err-text">{remedy.cause}</p>
 
-        {(credential || remedy.repositories.length > 0) && (
+        {(remedy.origin || credential || remedy.repositories.length > 0) && (
           <div className="rmd-subjects">
+            {remedy.origin && <OriginSubject origin={remedy.origin} onOpenRun={onOpenRun} />}
             {credential && (
               <span className="rmd-subject" title={credential.retired ? "Retired" : `${credential.health.replace("_", " ")}`}>
                 <Ic.Key size={11} /> {credential.displayName}
@@ -117,6 +123,21 @@ export function ProviderRemedyCard({ remedy, onRerun, rerunning = false, rawDeta
 
       {fix.dialogs}
     </div>
+  );
+}
+
+/** Where the failure happened when it was not in this run: the sub-workflow and its run, the way run pages show a run (its first eight characters) — a link where the run can be opened. */
+function OriginSubject({ origin, onOpenRun }: { origin: RemedyOrigin; onOpenRun?: (runId: string) => void }) {
+  const label = `In sub-workflow ${origin.workflowName} (run ${origin.runId.slice(0, 8)})`;
+
+  return onOpenRun ? (
+    <button type="button" className="rmd-subject rmd-origin" title="Open the sub-workflow run" onClick={() => onOpenRun(origin.runId)}>
+      <Ic.Workflow size={11} /> {label}
+    </button>
+  ) : (
+    <span className="rmd-subject rmd-origin">
+      <Ic.Workflow size={11} /> {label}
+    </span>
   );
 }
 

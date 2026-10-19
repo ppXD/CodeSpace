@@ -22,6 +22,9 @@ public sealed partial class ProviderRemedyService
         /// <summary>False for a refused delivery: there is no run to run again.</summary>
         public required bool OffersRerun { get; init; }
 
+        /// <summary>The sub-workflow run the failure happened in, when it was carried up to this run from one that is the team's; null otherwise.</summary>
+        public RemedyOrigin? Origin { get; init; }
+
         public List<RepositoryRow> Repositories { get; set; } = new();
         public Dictionary<Guid, CredentialRow> Credentials { get; set; } = new();
 
@@ -45,6 +48,9 @@ public sealed partial class ProviderRemedyService
         public RemedyFacts Facts { get; set; } = default!;
         public IReadOnlyList<RemedyAction> Actions { get; set; } = Array.Empty<RemedyAction>();
     }
+
+    /// <summary>The run a carried failure happened in — as the remedy names it, the repositories it was launched against and, when it was kept, when it recorded the failure.</summary>
+    private sealed record OriginRun(RemedyOrigin Origin, IReadOnlyList<Guid> ScopeRepositoryIds, DateTimeOffset? FailedAt);
 
     private sealed record RepositoryRow(Guid Id, string FullPath, RepositoryStatus Status, Guid? CredentialId, Guid ProviderInstanceId);
 

@@ -7,6 +7,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
 using CodeSpace.Messages.Failures;
+using Microsoft.EntityFrameworkCore;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Credentials;
@@ -64,6 +65,49 @@ public partial class ProviderFailureThroughTheEngineFlowTests
         remedy.Credential!.Id.ShouldBe(first.CredentialId);
     }
 
+    [Fact]
+    public async Task A_map_branch_rerun_fork_that_fails_on_a_replayed_sub_workflow_branch_names_the_child_run_the_original_branch_ran()
+    {
+        // The replayed branch's sub-workflow node recorded the failure its child ended on, origin and all; the seeder carries it onto the fork's record of the
+        // cell, so the fork's map answers for it as the original's did — and says it happened in the ORIGINAL branch's child, not in the fresh branch's.
+        using var gitlab = new GitLabDoorkeeperStub();
+        var team = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var seed = await GitLabCredentialSeed.SeedAsync(_fixture, gitlab.BaseUrl, "at-0", "rt-0", expired: true, existingTeam: team);
+        await RecordThePersonItWasConnectedForAsync(seed.CredentialId, team.UserId);
+        var child = await CreateNamedWorkflowAsync(team, "Review", ListThenEndDefinition(seed.RepositoryId));
+        var workflowId = await CreateWorkflowAsync(team, SubWorkflowParent(child, SubWorkflowSite.InMap));
+        var originalRunId = await WorkflowsTestSeed.SeedAdmittedManualRunAsync(_fixture, workflowId, team.TeamId, payloadJson: JsonSerializer.Serialize(new { things = new[] { Guid.NewGuid(), Guid.NewGuid() } }));
+
+        await RunEngineAsync(originalRunId);   // both branches park on a child of their own
+        var originalChildren = new[] { await ChildOfBranchAsync(originalRunId, "map#0"), await ChildOfBranchAsync(originalRunId, "map#1") };
+
+        originalChildren.Distinct().Count().ShouldBe(2, "fixture check: each branch ran a child of its own");
+
+        foreach (var childRunId in originalChildren) await RunEngineAsync(childRunId);
+
+        await RunEngineAsync(originalRunId);
+        await AssertRunStatusAsync(originalRunId, WorkflowRunStatus.Failure, "fixture check: the children's failure ended the map");
+
+        (await RemedyForAsync(team.UserId, team.TeamId, originalRunId)).Origin!.RunId.ShouldBe(originalChildren[0], "fixture check: the original answers for element 0, the first branch to fail by element order");
+
+        var forkRunId = await RerunBranchAsync(team, originalRunId, branchIndex: 1);
+
+        await RunEngineAsync(forkRunId);   // branch 0 is replayed failed; branch 1 runs fresh and parks on a fresh child
+        var freshChild = await ChildOfBranchAsync(forkRunId, "map#1");
+
+        freshChild.ShouldNotBe(originalChildren[1], "fixture check: the fresh branch ran a fresh child");
+
+        await RunEngineAsync(freshChild);
+        await RunEngineAsync(forkRunId);
+        await AssertRunStatusAsync(forkRunId, WorkflowRunStatus.Failure, "fixture check: element 0 is replayed failed, so the map fails again");
+
+        var remedy = await RemedyForAsync(team.UserId, team.TeamId, forkRunId);
+
+        remedy.Origin!.RunId.ShouldBe(originalChildren[0], "the replayed branch's child — the run the failure happened in — not the fresh branch's");
+        remedy.Origin.WorkflowName.ShouldBe("Review");
+        remedy.Credential!.Id.ShouldBe(seed.CredentialId);
+    }
+
     // ─── Helpers ───────────────────────────────────────────────────────────────
 
     /// <summary>
@@ -90,5 +134,16 @@ public partial class ProviderFailureThroughTheEngineFlowTests
         using var scope = _fixture.BeginScope();
 
         return await scope.Resolve<IWorkflowService>().RerunMapBranchAsync(originalRunId, "map", branchIndex, team.TeamId, team.UserId, operationId: null, CancellationToken.None);
+    }
+
+    /// <summary>The child run a map branch's sub-workflow node parked on — the wait's token is the child run id.</summary>
+    private async Task<Guid> ChildOfBranchAsync(Guid parentRunId, string iterationKey)
+    {
+        using var scope = _fixture.BeginScope();
+        var token = await scope.Resolve<CodeSpace.Core.Persistence.Db.CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking()
+            .Where(w => w.RunId == parentRunId && w.NodeId == "sub" && w.IterationKey == iterationKey && w.WaitKind == CodeSpace.Messages.Constants.WorkflowWaitKinds.Subworkflow)
+            .Select(w => w.Token).SingleAsync();
+
+        return Guid.Parse(token);
     }
 }

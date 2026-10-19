@@ -40,11 +40,29 @@ public sealed record ProviderRemedy
     /// <summary>For <c>provider_base_url_redirects</c>: the origin the provider answered with, what its base URL would be edited to. Null for every other failure.</summary>
     public string? RedirectsTo { get; init; }
 
+    /// <summary>Where the failure happened when it was not in the run this remedy is for: the sub-workflow run that met it, which this run's <c>flow.subworkflow</c> node ran. Null for a failure that happened in the run itself — and for one whose sub-workflow run is not the team's or is gone, which is never named.</summary>
+    public RemedyOrigin? Origin { get; init; }
+
     /// <summary>What can be done, best first, each saying whether the caller may do it and, when not, why. Never empty.</summary>
     public required IReadOnlyList<RemedyAction> Actions { get; init; }
 
     /// <summary>Who to ask when some action is not the caller's: the team's Owners and Admins, and the credential's own person for a token replace only they can make. Empty when every action is the caller's, or nobody can be named.</summary>
     public IReadOnlyList<RemedyPerson> AskPeople { get; init; } = Array.Empty<RemedyPerson>();
+}
+
+/// <summary>The sub-workflow run a failure happened in, as the run page names it: which run (to link to), which workflow it ran and the node that ended it. Re-running is still the PARENT's — this only says where to look.</summary>
+public sealed record RemedyOrigin
+{
+    /// <summary>The sub-workflow run — the deepest one, when sub-workflows are nested.</summary>
+    public required Guid RunId { get; init; }
+
+    public required Guid WorkflowId { get; init; }
+
+    /// <summary>The name of the workflow that run executed, read under the asker's team.</summary>
+    public required string WorkflowName { get; init; }
+
+    /// <summary>The node that ended that run; null when the run's own record carried the failure.</summary>
+    public string? NodeId { get; init; }
 }
 
 /// <summary>The kinds of fix the remedy offers. Serialized as the lower-case names a client branches on, so a rename is a breaking change.</summary>

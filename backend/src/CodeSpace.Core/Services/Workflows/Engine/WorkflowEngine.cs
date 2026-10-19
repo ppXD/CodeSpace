@@ -3423,14 +3423,14 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
                 }
                 catch (SubworkflowStartException ex)
                 {
-                    return await FinalizeFailureAsync(exec, ex.Message, thrown: null, cancellationToken).ConfigureAwait(false);
+                    return await FinalizeFailureAsync(exec, ex.Message, thrown: null, carried: null, cancellationToken).ConfigureAwait(false);
                 }
                 catch (AgentRunAdmissionException ex)
                 {
                     // The fail-closed admission cap refused this agent run at staging — a clean node failure (like a
                     // failed sub-workflow start), so the agent.run node routes to its error edge and, inside a map
                     // branch, the map's continue-on-error / terminate policy applies. NOT a crash, NOT a leaked wait.
-                    return await FinalizeFailureAsync(exec, ex.Message, thrown: null, cancellationToken).ConfigureAwait(false);
+                    return await FinalizeFailureAsync(exec, ex.Message, thrown: null, carried: null, cancellationToken).ConfigureAwait(false);
                 }
             }
 
@@ -3450,7 +3450,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
             retryable = retryable && (result?.Retryable ?? true);
 
             if (!retryable || attempt >= plan.MaxAttempts)
-                return await FinalizeFailureAsync(exec, lastError, thrown ?? result?.Cause, cancellationToken).ConfigureAwait(false);
+                return await FinalizeFailureAsync(exec, lastError, thrown ?? result?.Cause, result?.CarriedFailure, cancellationToken).ConfigureAwait(false);
 
             await LogRetryAndWaitAsync(exec, attempt, plan, lastError, attemptStartedAt, retryAfter, cancellationToken).ConfigureAwait(false);
 
@@ -3468,7 +3468,7 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
         }
 
         // Defensive: the loop always returns on its final attempt.
-        return await FinalizeFailureAsync(exec, lastError, thrown: null, cancellationToken).ConfigureAwait(false);
+        return await FinalizeFailureAsync(exec, lastError, thrown: null, carried: null, cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -3622,9 +3622,10 @@ public sealed class WorkflowEngine : IWorkflowEngine, IScopedDependency
     /// once the walker merges it. The scope write happens in <see cref="MergeNodeOutcome"/>; it's
     /// harmless when the node has no error edge — the run fails and scope is dropped.
     /// </summary>
-    private async Task<NodeRunOutcome> FinalizeFailureAsync(NodeExecution exec, string error, Exception? thrown, CancellationToken cancellationToken)
+    private async Task<NodeRunOutcome> FinalizeFailureAsync(NodeExecution exec, string error, Exception? thrown, PersistedFailure? carried, CancellationToken cancellationToken)
     {
-        var failure = ProviderFailureCapture.From(thrown, RepositoryActedOn(exec));
+        // What an exception declares wins; failing that, the failure the node itself read back from where it happened (a sub-workflow's child run).
+        var failure = ProviderFailureCapture.From(thrown, RepositoryActedOn(exec)) ?? carried;
 
         await _recordLogger.NodeFailedAsync(exec.Run.Id, exec.Node.Id, exec.IterationKey, RedactForPersistence(exec.Scope, error), DateTimeOffset.UtcNow - exec.StartedAt, failure, cancellationToken).ConfigureAwait(false);
         return new NodeRunOutcome(NodeStatus.Failure, BuildErrorOutput(error, exec.Node.Id), null, null);

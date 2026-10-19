@@ -1,5 +1,6 @@
 using CodeSpace.Core.Services.Credentials.Remedy;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Credentials;
 using CodeSpace.Messages.Failures;
 using Shouldly;
 
@@ -127,5 +128,43 @@ public class RemedyCopyTests
             RemedyCopy.Cause(code, Facts()).ShouldNotContain("glpat", Case.Insensitive);
             RemedyCopy.Title(code, Facts()).ShouldNotBeNullOrWhiteSpace();
         }
+    }
+
+    private static RemedyOrigin Origin(string? node = "list") => new() { RunId = Guid.Parse("1a2b3c4d-0000-0000-0000-000000000000"), WorkflowId = Guid.NewGuid(), WorkflowName = "Review the pull requests", NodeId = node };
+
+    [Fact]
+    public void A_failure_carried_up_from_a_child_run_names_the_run_it_happened_in_before_saying_what_is_wrong()
+    {
+        var cause = RemedyCopy.Cause(FailureCodes.CredentialNeedsReconnect, Facts() with { Origin = Origin() });
+
+        cause.ShouldStartWith("This failed in the sub-workflow “Review the pull requests” (run 1a2b3c4d), at node 'list'. ");
+        cause.ShouldContain("refused to renew the sign-in behind “GitLab · NACHO.L”");
+    }
+
+    [Fact]
+    public void A_child_run_that_names_no_node_is_named_without_one()
+    {
+        RemedyCopy.Cause(FailureCodes.CredentialDisconnected, Facts() with { Origin = Origin(node: null) }).ShouldStartWith("This failed in the sub-workflow “Review the pull requests” (run 1a2b3c4d). ");
+    }
+
+    [Fact]
+    public void The_origin_leads_every_cause_and_changes_nothing_else_the_remedy_says()
+    {
+        foreach (var code in FailureCodes.ProviderConnection)
+            foreach (var resolved in new[] { false, true })
+            {
+                var plain = Facts() with { Resolved = resolved };
+                var carried = plain with { Origin = Origin() };
+
+                RemedyCopy.Cause(code, carried).ShouldEndWith(RemedyCopy.Cause(code, plain), Case.Sensitive, $"{code}/{resolved}: the child's words are the parent's, after the sentence that says where");
+                RemedyCopy.Title(code, carried).ShouldBe(RemedyCopy.Title(code, plain), $"{code}/{resolved}: the title is the failure's, wherever it happened");
+            }
+    }
+
+    [Fact]
+    public void A_failure_that_happened_in_the_run_itself_reads_exactly_as_it_did()
+    {
+        RemedyCopy.Cause(FailureCodes.CredentialDisconnected, Facts()).ShouldNotContain("sub-workflow", Case.Insensitive);
+        RemedyCopy.Cause(FailureCodes.CredentialDisconnected, Facts() with { Origin = null }).ShouldBe(RemedyCopy.Cause(FailureCodes.CredentialDisconnected, Facts()));
     }
 }

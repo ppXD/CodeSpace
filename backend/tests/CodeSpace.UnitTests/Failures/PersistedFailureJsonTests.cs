@@ -79,6 +79,106 @@ public class PersistedFailureJsonTests
     }
 
     [Fact]
+    public void Where_a_failure_happened_survives_the_trip_and_is_stored_beside_what_it_names()
+    {
+        var run = Guid.NewGuid();
+        var failure = new PersistedFailure { Code = FailureCodes.ProviderUnauthorized, RepositoryId = Repository, Origin = new FailureOrigin { RunId = run, NodeId = "list" } };
+
+        PersistedFailureJson.ToElement(failure).GetRawText().ShouldBe($$$"""{"code":"provider_unauthorized","repositoryId":"{{{Repository}}}","origin":{"runId":"{{{run}}}","nodeId":"list"}}""");
+
+        var read = PersistedFailureJson.Read(PersistedFailureJson.AsPayload(failure));
+
+        read.ShouldNotBeNull();
+        read.Origin.ShouldBe(new FailureOrigin { RunId = run, NodeId = "list" });
+        read.RepositoryId.ShouldBe(Repository);
+    }
+
+    [Fact]
+    public void When_the_failure_happened_in_that_run_is_stored_with_the_origin_and_survives_the_trip()
+    {
+        var run = Guid.NewGuid();
+        var at = new DateTimeOffset(2026, 10, 19, 4, 29, 49, TimeSpan.Zero);
+        var failure = new PersistedFailure { Code = FailureCodes.ProviderUnauthorized, Origin = new FailureOrigin { RunId = run, NodeId = "list", At = at } };
+
+        PersistedFailureJson.ToElement(failure).GetRawText().ShouldBe($$$"""{"code":"provider_unauthorized","origin":{"runId":"{{{run}}}","nodeId":"list","at":"2026-10-19T04:29:49+00:00"}}""");
+        PersistedFailureJson.Read(PersistedFailureJson.AsPayload(failure))!.Origin.ShouldBe(new FailureOrigin { RunId = run, NodeId = "list", At = at });
+    }
+
+    [Fact]
+    public void An_origin_written_before_it_kept_its_time_reads_with_none_and_is_stored_exactly_as_it_was()
+    {
+        var before = $$$"""{"code":"provider_unauthorized","origin":{"runId":"{{{Guid.NewGuid()}}}","nodeId":"list"}}""";
+        var read = PersistedFailureJson.ReadElement(JsonDocument.Parse(before).RootElement)!;
+
+        read.Origin!.At.ShouldBeNull("the record that carries it is then the only time there is");
+        PersistedFailureJson.ToElement(read).GetRawText().ShouldBe(before, "an absent time is not written as null");
+    }
+
+    [Fact]
+    public void A_failure_with_an_origin_that_names_no_node_keeps_the_run_alone()
+    {
+        var run = Guid.NewGuid();
+        var json = PersistedFailureJson.ToElement(new PersistedFailure { Code = FailureCodes.CredentialDisconnected, Origin = new FailureOrigin { RunId = run } }).GetRawText();
+
+        json.ShouldBe($$$"""{"code":"credential_disconnected","origin":{"runId":"{{{run}}}"}}""", "an absent node is not written as null");
+        PersistedFailureJson.ReadElement(JsonDocument.Parse(json).RootElement)!.Origin!.NodeId.ShouldBeNull();
+    }
+
+    [Fact]
+    public void A_failure_written_before_origins_reads_with_none_and_is_stored_exactly_as_it_was()
+    {
+        var before = $$$"""{"code":"credential_disconnected","details":{"credentialId":"{{{Credential}}}"},"repositoryId":"{{{Repository}}}"}""";
+        var read = PersistedFailureJson.ReadElement(JsonDocument.Parse(before).RootElement)!;
+
+        read.Origin.ShouldBeNull();
+        PersistedFailureJson.ToElement(read).GetRawText().ShouldBe(before, "reading an old row and writing it back adds nothing");
+    }
+
+    [Fact]
+    public void A_member_a_later_build_adds_to_a_failure_is_ignored_not_an_error()
+    {
+        // What an older reader meets after a rollback (and what this reader will meet from the next additive field): unknown members are skipped,
+        // so the failure — and the remedy built from it — still reads, minus only what the older reader never knew to look for.
+        var written = $$$$"""{"error":"x","failure":{"code":"credential_disconnected","origin":{"runId":"{{{{Guid.NewGuid()}}}}","nodeId":"n","someLaterMember":[1,2]},"aMemberFromTheFuture":{"a":1}}}""";
+
+        PersistedFailureJson.Read(written)!.Code.ShouldBe(FailureCodes.CredentialDisconnected);
+    }
+
+    /// <summary>The failure exactly as it was before origins: a build rolled back to it (or a worker not yet upgraded) deserializes records with this shape.</summary>
+    private sealed record PreviousShape(string Code, Dictionary<string, string>? Details, Guid? RepositoryId);
+
+    /// <summary>The failure as it was when an origin named only the run and the node: a build rolled back to that one reads a record that now also carries the time.</summary>
+    private sealed record PreviousOriginShape(string Code, PreviousOrigin? Origin);
+
+    private sealed record PreviousOrigin(Guid RunId, string? NodeId);
+
+    [Fact]
+    public void A_build_that_predates_the_origins_time_reads_what_is_written_now_minus_the_time()
+    {
+        var run = Guid.NewGuid();
+        var written = PersistedFailureJson.ToElement(new PersistedFailure { Code = FailureCodes.ProviderUnauthorized, Origin = new FailureOrigin { RunId = run, NodeId = "list", At = DateTimeOffset.UtcNow } });
+
+        var old = written.Deserialize<PreviousOriginShape>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+
+        old.Code.ShouldBe(FailureCodes.ProviderUnauthorized);
+        old.Origin.ShouldBe(new PreviousOrigin(run, "list"), "the older reader still names the run and the node; the time it never knew is skipped");
+    }
+
+    [Fact]
+    public void A_build_that_predates_origins_reads_what_is_written_now_minus_the_origin()
+    {
+        var run = Guid.NewGuid();
+        var written = PersistedFailureJson.ToElement(new PersistedFailure { Code = FailureCodes.CredentialNeedsReconnect, Details = new Dictionary<string, string> { ["credentialId"] = Credential.ToString() }, RepositoryId = Repository, Origin = new FailureOrigin { RunId = run, NodeId = "list", At = DateTimeOffset.UtcNow } });
+
+        // The same serializer defaults the ledger reads with: unknown members are skipped, so the older build still has the failure — and the remedy built from it.
+        var old = written.Deserialize<PreviousShape>(new JsonSerializerOptions(JsonSerializerDefaults.Web))!;
+
+        old.Code.ShouldBe(FailureCodes.CredentialNeedsReconnect);
+        old.Details!["credentialId"].ShouldBe(Credential.ToString());
+        old.RepositoryId.ShouldBe(Repository);
+    }
+
+    [Fact]
     public void An_agent_result_names_its_failure_or_a_refused_push()
     {
         var own = $$$"""{"status":"Failed","exitReason":"credential_disconnected","failure":{"code":"credential_disconnected","details":{"credentialId":"{{{Credential}}}"},"repositoryId":"{{{Repository}}}"}}""";

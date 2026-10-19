@@ -25,6 +25,9 @@ public sealed record PersistedFailure
     /// <summary>The repository the failing step was acting on, when the step names one — the subject a remedy re-links. A failure that carries a credential of its own does not need it, and one that carries none (a provider's 401) cannot be traced to a credential without it.</summary>
     public Guid? RepositoryId { get; init; }
 
+    /// <summary>Where the failure happened when it was not in the run that records it — a sub-workflow's run, carried up to the parent node that ran it (<see cref="FailureOrigin"/>). Absent for a failure that happened in the run itself, and for every record written before sub-workflows carried their failures, which then reads exactly as it did.</summary>
+    public FailureOrigin? Origin { get; init; }
+
     public string? Detail(string key) => Details is not null && Details.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;
 
     public Guid? DetailGuid(string key) => Guid.TryParse(Detail(key), out var id) && id != Guid.Empty ? id : null;

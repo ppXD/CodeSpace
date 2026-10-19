@@ -6547,6 +6547,8 @@ body.chat-resizing .acs-root .app { transition: none; }
 .rmd-subject { display: inline-flex; align-items: center; gap: 5px; max-width: 100%; padding: 2px 9px; border: 1px solid var(--line); border-radius: 999px; background: #fff; font-size: 11.5px; line-height: 1.6; color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rmd-subject[data-works="true"] { border-color: var(--rm-good-line); color: var(--rm-good); }
 .rmd-subject .cn-cred-owner { margin-left: 2px; }
+button.rmd-subject { font: inherit; font-size: 11.5px; line-height: 1.6; color: var(--accent); cursor: pointer; transition: background .12s, border-color .12s; }
+button.rmd-subject:hover { background: var(--panel-2); border-color: var(--line-2); }
 .rmd-ask { margin: 10px 0 0; font-size: 12px; line-height: 1.55; color: var(--ink-2); }
 .rmd-ask-list { margin: 3px 0 5px; padding-left: 18px; }
 .rmd-ask-list strong { font-weight: 600; color: var(--ink); }

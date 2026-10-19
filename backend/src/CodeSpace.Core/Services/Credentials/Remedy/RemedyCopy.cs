@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Credentials;
 using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.Core.Services.Credentials.Remedy;
@@ -27,7 +28,14 @@ public static class RemedyCopy
         _ => "A provider connection needs attention"
     });
 
-    public static string Cause(string code, RemedyFacts facts) => Capitalise(facts.Resolved ? ResolvedCause(code, facts) : code switch
+    /// <summary>What happened, in sentences that name the credential and the repository — led, for a failure carried up from a sub-workflow's child run, by the sentence that says which run it happened in.</summary>
+    public static string Cause(string code, RemedyFacts facts) => facts.Origin is { } origin ? $"{Where(origin)} {CauseOf(code, facts)}" : CauseOf(code, facts);
+
+    /// <summary>Where a failure carried up from a child run happened: the sub-workflow's name, the run (the first eight characters of its id, as the run pages show it) and the node that ended it.</summary>
+    private static string Where(RemedyOrigin origin) =>
+        $"This failed in the sub-workflow “{origin.WorkflowName}” (run {origin.RunId.ToString()[..8]}){(origin.NodeId is { Length: > 0 } node ? $", at node '{node}'" : "")}.";
+
+    private static string CauseOf(string code, RemedyFacts facts) => Capitalise(facts.Resolved ? ResolvedCause(code, facts) : code switch
     {
         FailureCodes.CredentialDisconnected => Disconnected(facts),
         FailureCodes.CredentialNeedsReconnect => NeedsReconnect(facts),

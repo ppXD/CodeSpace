@@ -132,4 +132,28 @@ public class ProviderFailureCaptureTests
     {
         ProviderFailureCapture.From(null, Repository).ShouldBeNull();
     }
+
+    [Theory]
+    [InlineData(FailureCodes.CredentialDisconnected)]
+    [InlineData(FailureCodes.CredentialNeedsReconnect)]
+    [InlineData(FailureCodes.ProviderUnauthorized)]
+    [InlineData(FailureCodes.GitCredentialRejected)]
+    [InlineData(FailureCodes.ProviderBaseUrlRedirects)]
+    [InlineData(FailureCodes.OAuthExchangeFailed)]
+    public void A_recorded_provider_connection_failure_is_kept_exactly_as_recorded(string code)
+    {
+        var recorded = new PersistedFailure { Code = code, RepositoryId = Repository, Origin = new FailureOrigin { RunId = Guid.NewGuid(), NodeId = "list" } };
+
+        ProviderFailureCapture.OfRecord(recorded).ShouldBeSameAs(recorded);
+    }
+
+    [Theory]
+    [InlineData(FailureCodes.Internal)]
+    [InlineData(FailureCodes.Forbidden)]
+    [InlineData("not_a_code")]
+    public void A_recorded_failure_that_is_not_a_provider_connection_is_not_kept_and_nothing_is_nothing(string code)
+    {
+        ProviderFailureCapture.OfRecord(new PersistedFailure { Code = code }).ShouldBeNull("what is carried onward is never wider than what is captured");
+        ProviderFailureCapture.OfRecord(null).ShouldBeNull();
+    }
 }

@@ -89,6 +89,23 @@ Provider-credential tests share two more pieces, both in `CodeSpace.IntegrationT
   again on the replayed failed branch answers with the original run's remedy, never the fresh branch's
   (`ProviderFailureThroughTheEngineFlowTests.Rerun.cs`, and over HTTP in `ProviderFailureInAContainerHttpE2ETests`, which also pins what the run
   detail and the lean remedy read answer, plus that a run recorded before containers carried the failure answers exactly as it did).
+- A provider failure inside a `flow.subworkflow` CHILD run that ends the PARENT is read back where the child recorded it — by the same
+  `IRunFailureReader` the child's own page asks — and carried up: the engine's completion hook (`ISubworkflowService.ResumeParentIfChildTerminalAsync`, the
+  one resume path the reconciler's stranded-parent backstop re-fires too) stamps it on the resume payload, the node fails with its own sentence untouched and
+  the failure beside it (`NodeResult.CarriedFailure`), and the parent's `node.failed` — and, through a map or loop the node sits in, the container's — carries
+  it with a `FailureOrigin` naming the deepest child run that met it, the node that ended that run and when that run recorded it. `ProviderFailureThroughTheEngineFlowTests.SubWorkflows.cs`
+  drives the real engine parent → child (top level, in a map, in a loop, and three levels deep) against the stub and pins: the parent's remedy is the
+  child's (same code, credential, repositories, buttons, resolution — compared with the child's own remedy) plus the origin and a sentence that names it; a
+  failure that names no repository is traced through the CHILD's launch scope, never the parent's; a retried node carries the last attempt's child; and the
+  negatives — a child that failed on something else, handled the failure, or handled it and failed on something else carries nothing — plus an origin that is
+  not the team's run (another team's, or none) is never named and never changes the remedy; a fan-out parent (two children at once, one slow) whose token is replaced between the
+  child's failure and the barrier's release reads "fixed" exactly as the child's page does, because the fix is measured from when the CHILD recorded the failure
+  (`FailureOrigin.At`), not from the parent's later record — and a record that kept no time falls back to the carrying record's own; a child whose node worded
+  its failure alone is traced through its own agent run, as the child's page is; a cancelled child carries nothing even when an agent run of it met a refused push; and a map-branch rerun fork that fails on a
+  replayed sub-workflow branch names the child the ORIGINAL branch ran (`….Rerun.cs`). `StuckRunReconcilerFlowTests` pins the backstop path;
+  `ProviderFailureInASubWorkflowHttpE2ETests` pins the wire shape for an Owner, a Member and a Viewer, that Re-run on the parent replays the PARENT and
+  starts a fresh child, and that a parent recorded before the field answers as it did. The frontend's `ProviderRemedyCard.test.tsx` / `RunRemedyCard.test.tsx`
+  pin the "In sub-workflow … (run …)" line, its link, and that Re-run replays the run the page is on.
 - `RefreshPodHarness` — pods as real OS processes (`CodeSpace.StorageTestWorker`'s `oauth-refresh-pod` mode) running the
   production refresher, or the pinned previous build's (`StorageTestWorker/PreviousBuild`), against the fixture's Postgres.
   One process shares one refresh semaphore, so only separate processes exercise the cross-pod advisory lock.

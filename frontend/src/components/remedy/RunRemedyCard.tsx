@@ -11,7 +11,8 @@ import { ProviderRemedyCard } from "./ProviderRemedyCard";
  * read still loading, or it failed). The answer is read fresh and re-read after any fix, so the card turns to "run it again" the
  * moment the connection works.
  *
- * Re-run replays the run and opens the new one, the same Re-run the turn's own footer offers.
+ * Re-run replays the run and opens the new one, the same Re-run the turn's own footer offers. For a failure carried up from a sub-workflow's child
+ * run it is still THIS run that is replayed — the parent, which starts a fresh child — and the card links to the child run the failure happened in.
  */
 export function RunRemedyCard({ runId, rawDetail, onOpenRun }: { runId: string; rawDetail?: string | null; onOpenRun?: (runId: string) => void }) {
   const remedy = useRunRemedy(runId);
@@ -26,5 +27,5 @@ export function RunRemedyCard({ runId, rawDetail, onOpenRun }: { runId: string; 
     openRun?.(result.runId);
   };
 
-  return <ProviderRemedyCard remedy={remedy.data} rawDetail={rawDetail} rerunning={replay.isPending} onRerun={rerun} onFixed={() => void remedy.refetch()} />;
+  return <ProviderRemedyCard remedy={remedy.data} rawDetail={rawDetail} rerunning={replay.isPending} onRerun={rerun} onFixed={() => void remedy.refetch()} onOpenRun={openRun ?? undefined} />;
 }

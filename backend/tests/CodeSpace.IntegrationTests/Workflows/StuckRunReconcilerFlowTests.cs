@@ -928,6 +928,65 @@ public class StuckRunReconcilerFlowTests
         payload.GetProperty("outputs").GetProperty("result").GetString().ShouldBe("ok", "the child's REAL outputs ride to the parent — the same mapping as the happy path");
     }
 
+    [Theory]
+    [InlineData(WorkflowRunStatus.Failure, true)]
+    [InlineData(WorkflowRunStatus.Failure, false)]
+    [InlineData(WorkflowRunStatus.Cancelled, true)]
+    public async Task A_stranded_subworkflow_parent_whose_child_ended_on_a_provider_failure_is_recovered_carrying_it_only_when_the_child_failed(WorkflowRunStatus childStatus, bool failedOnAProviderConnection)
+    {
+        // The reconciler re-fires the SAME resume the engine's completion hook runs, so a parent recovered after a lost hook learns what the child
+        // ended on exactly as one resumed in time does — read from the child's own ledger by the reader its own page asks. A child that was CANCELLED
+        // did not fail on anything: whatever its ledger holds, it is a cancel the parent is told about, never a connection to repair.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        var workflowId = await CreateWorkflowAsync(teamId, userId);
+        var credentialId = Guid.NewGuid();
+
+        var parentRunId = await StageStuckRunAsync(workflowId, teamId, status: WorkflowRunStatus.Suspended, createdAgo: TimeSpan.FromMinutes(10), backdateLastModified: true);
+        var childRunId = await SeedChildRunAsync(teamId, parentRunId, childStatus, outputsJson: "{}");
+        await EndChildOnAsync(childRunId, "list", failedOnAProviderConnection ? CodeSpace.Core.Failures.ProviderFailureCapture.From(new CodeSpace.Messages.Exceptions.CredentialDisconnectedException(credentialId, "GitLab · NACHO.L"), Guid.NewGuid()) : null);
+        await SeedSubworkflowWaitAsync(parentRunId, childRunId);
+
+        await ReconcileAsync();
+
+        using var scope = _fixture.BeginScope();
+        var wait = await scope.Resolve<CodeSpaceDbContext>().WorkflowRunWait.AsNoTracking().SingleAsync(w => w.RunId == parentRunId && w.WaitKind == WorkflowWaitKinds.Subworkflow);
+
+        wait.Status.ShouldBe(WorkflowWaitStatuses.Resolved, "the re-fire resolved the wait");
+
+        var payload = JsonDocument.Parse(wait.PayloadJson!).RootElement;
+
+        payload.GetProperty("status").GetString().ShouldBe(childStatus.ToString(), "the child's REAL status — nothing faked");
+        payload.GetProperty("error").GetString().ShouldBe("Node 'list' failed.");
+
+        if (childStatus != WorkflowRunStatus.Failure || !failedOnAProviderConnection)
+        {
+            payload.TryGetProperty("failure", out _).ShouldBeFalse("a child that failed on a sentence alone — or was cancelled — leaves the payload the shape it always was");
+            return;
+        }
+
+        payload.GetProperty("failure").GetProperty("code").GetString().ShouldBe("credential_disconnected");
+        payload.GetProperty("failure").GetProperty("details").GetProperty("credentialId").GetGuid().ShouldBe(credentialId);
+        payload.GetProperty("failure").GetProperty("origin").GetProperty("runId").GetGuid().ShouldBe(childRunId, "the child run it happened in");
+        payload.GetProperty("failure").GetProperty("origin").GetProperty("nodeId").GetString().ShouldBe("list");
+    }
+
+    /// <summary>Ends a seeded child run the way the engine does: the node's <c>node.failed</c> record (carrying the failure it was thrown with, when it was a provider connection) and the run's own sentence naming that node.</summary>
+    private async Task EndChildOnAsync(Guid childRunId, string nodeId, CodeSpace.Messages.Failures.PersistedFailure? failure)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var logger = scope.Resolve<CodeSpace.Core.Services.Workflows.Lifecycle.IRunRecordLogger>();
+
+        await logger.NodeStartedAsync(childRunId, nodeId, string.Empty, new Dictionary<string, JsonElement>(), new Dictionary<string, JsonElement>(), CancellationToken.None);
+        await logger.NodeFailedAsync(childRunId, nodeId, string.Empty, "the node's own sentence", TimeSpan.FromMilliseconds(5), failure, CancellationToken.None);
+
+        var child = await db.WorkflowRun.SingleAsync(r => r.Id == childRunId);
+
+        child.Error = $"Node '{nodeId}' failed.";
+        child.CompletedAt = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync();
+    }
+
     [Fact]
     public async Task A_subworkflow_parent_whose_child_is_still_running_is_left_alone()
     {

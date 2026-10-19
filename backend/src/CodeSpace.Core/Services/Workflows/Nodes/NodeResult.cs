@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes;
 
@@ -31,6 +32,14 @@ public sealed record NodeResult
     /// </summary>
     public Exception? Cause { get; init; }
 
+    /// <summary>
+    /// A provider failure the node already holds in its recorded form, when what it failed on happened somewhere else and was read back — a
+    /// sub-workflow's child run ended on it — so there is no exception to hand over as <see cref="Cause"/>. The engine writes it beside the
+    /// sentence exactly as it writes the failure it reads off an exception, and an exception's own declared failure wins over it. Like
+    /// <see cref="Cause"/> it never decides a retry.
+    /// </summary>
+    public PersistedFailure? CarriedFailure { get; init; }
+
     /// <summary>Set when Status == Suspended. Opaque token the resume mechanism feeds back.</summary>
     public SuspensionToken? SuspendUntil { get; init; }
 
@@ -54,6 +63,9 @@ public sealed record NodeResult
 
     /// <summary>A failure worded by the node, keeping the exception it was worded from (<see cref="Cause"/>) so what it declared can be recorded.</summary>
     public static NodeResult Fail(string error, Exception cause) => new() { Status = NodeStatus.Failure, Error = error, Cause = cause };
+
+    /// <summary>A failure worded by the node, keeping the failure it was read back as (<see cref="CarriedFailure"/>) so what was recorded where it happened is recorded here too.</summary>
+    public static NodeResult Fail(string error, PersistedFailure carried) => new() { Status = NodeStatus.Failure, Error = error, CarriedFailure = carried };
 
     /// <summary>A failure with an explicit retry verdict — <paramref name="retryable"/> false marks a deterministic outcome the retry policy must not re-run.</summary>
     public static NodeResult Fail(string error, bool retryable) => new() { Status = NodeStatus.Failure, Error = error, Retryable = retryable };

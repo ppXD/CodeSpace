@@ -19,7 +19,10 @@ namespace CodeSpace.Core.Services.Workflows.Failures;
 /// that failed it (<c>Node 'x' failed.</c>), and that node's record decides — a failure carried there, else the agent run it spawned.
 /// A node that failed for another reason, or a run ended by the reconciler, answers null rather than the first failure found.
 /// When the node that ended the run is a container (a map, a loop), its own record carries the failure of the cell that ended IT —
-/// the engine writes it there from <see cref="ICellFailureReader"/> — so this reads a container exactly as it reads any node.</para>
+/// the engine writes it there from <see cref="ICellFailureReader"/> — so this reads a container exactly as it reads any node.
+/// A <c>flow.subworkflow</c> node whose child run ended on a provider failure fails carrying THAT failure — read from the child by this same reader when the
+/// child finished, with the child run it happened in as its <see cref="PersistedFailure.Origin"/> — so a parent run reads the same way too, and a chain of
+/// nested sub-workflows reads to the deepest.</para>
 /// </summary>
 public sealed class RunFailureReader : IRunFailureReader, IScopedDependency
 {
@@ -40,7 +43,7 @@ public sealed class RunFailureReader : IRunFailureReader, IScopedDependency
             ? await FromWhereTheRunEndedAsync(runId, teamId, run.Error, cancellationToken).ConfigureAwait(false)
             : await FromLatestAgentRunAsync(runId, teamId, nodeId: null, publishRefusalOnly: true, cancellationToken).ConfigureAwait(false);
 
-        return found is null ? null : new RecordedFailure { Failure = found.Value.Failure, At = found.Value.At, ScopeRepositoryIds = run.ScopeRepositoryIds };
+        return found is null ? null : new RecordedFailure { Failure = found.Value.Failure, At = found.Value.At, NodeId = found.Value.NodeId, ScopeRepositoryIds = run.ScopeRepositoryIds };
     }
 
     private async Task<RunHeader?> LoadRunAsync(Guid runId, Guid teamId, CancellationToken cancellationToken) =>
@@ -50,11 +53,11 @@ public sealed class RunFailureReader : IRunFailureReader, IScopedDependency
             .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     /// <summary>The failure the node that ended the run recorded; failing that, its agent run's own account. Where the ledger names no node that ended the run, nothing speaks for it — except a ledger with no node failure at all, which leaves the agent run as the only witness.</summary>
-    private async Task<(PersistedFailure Failure, DateTimeOffset At)?> FromWhereTheRunEndedAsync(Guid runId, Guid teamId, string? runError, CancellationToken cancellationToken)
+    private async Task<(PersistedFailure Failure, DateTimeOffset At, string? NodeId)?> FromWhereTheRunEndedAsync(Guid runId, Guid teamId, string? runError, CancellationToken cancellationToken)
     {
         var ended = await ReadLedgerEndAsync(runId, runError, cancellationToken).ConfigureAwait(false);
 
-        if (ended.Failure is { } failure) return (failure, ended.At);
+        if (ended.Failure is { } failure) return (failure, ended.At, ended.NodeId);
 
         return ended.NodeFailuresRecorded && ended.NodeId is null ? null : await FromLatestAgentRunAsync(runId, teamId, ended.NodeId, publishRefusalOnly: false, cancellationToken).ConfigureAwait(false);
     }
@@ -101,12 +104,12 @@ public sealed class RunFailureReader : IRunFailureReader, IScopedDependency
     /// and was respawned says nothing about why the run ended. <paramref name="publishRefusalOnly"/> narrows it to the one failure a
     /// run that finished can carry — its branch was refused by the remote.
     /// </summary>
-    private async Task<(PersistedFailure Failure, DateTimeOffset At)?> FromLatestAgentRunAsync(Guid runId, Guid teamId, string? nodeId, bool publishRefusalOnly, CancellationToken cancellationToken)
+    private async Task<(PersistedFailure Failure, DateTimeOffset At, string? NodeId)?> FromLatestAgentRunAsync(Guid runId, Guid teamId, string? nodeId, bool publishRefusalOnly, CancellationToken cancellationToken)
     {
         var latest = await _db.AgentRun.AsNoTracking()
             .Where(a => a.WorkflowRunId == runId && a.TeamId == teamId && a.ResultJson != null && (nodeId == null || a.NodeId == nodeId))
             .OrderByDescending(a => a.CreatedDate)
-            .Select(a => new { a.ResultJson, At = a.CompletedAt ?? a.LastModifiedDate })
+            .Select(a => new { a.ResultJson, a.NodeId, At = a.CompletedAt ?? a.LastModifiedDate })
             .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
         if (latest is null) return null;
@@ -115,7 +118,7 @@ public sealed class RunFailureReader : IRunFailureReader, IScopedDependency
 
         if (failure is null || (publishRefusalOnly && failure.Code != FailureCodes.GitCredentialRejected)) return null;
 
-        return (failure, latest.At);
+        return (failure, latest.At, latest.NodeId);
     }
 
     /// <summary>The failure an agent run's stored result names: its own <c>failure</c>, else a push refused for the credential — the single-repo result's, or a multi-repo result's first refused repository.</summary>

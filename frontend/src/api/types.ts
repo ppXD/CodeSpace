@@ -126,6 +126,20 @@ export interface RemedyProviderInstance {
   baseUrl: string;
 }
 
+/**
+ * The sub-workflow run a failure happened in, when the run the remedy is for ran it as a step and failed on what it ended on. Only says where
+ * to look: Re-run is still the run the card is on. Absent for a failure that happened in the run itself — and for a run written before
+ * sub-workflows carried their failures, which reads exactly as it did.
+ */
+export interface RemedyOrigin {
+  /** The sub-workflow run — the deepest one, when sub-workflows are nested. */
+  runId: string;
+  workflowId: string;
+  workflowName: string;
+  /** The node that ended that run. */
+  nodeId?: string | null;
+}
+
 export interface RemedyPerson {
   userId: string;
   name: string;
@@ -149,6 +163,8 @@ export interface ProviderRemedy {
   providerInstance?: RemedyProviderInstance | null;
   /** For a redirecting provider: the origin it answered with — what its base URL would be edited to. */
   redirectsTo?: string | null;
+  /** The sub-workflow run the failure happened in, when it was carried up to this run from one. */
+  origin?: RemedyOrigin | null;
   actions: RemedyAction[];
   askPeople: RemedyPerson[];
 }

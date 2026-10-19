@@ -55,6 +55,7 @@ public sealed partial class ProviderRemedyService
             RequestedOrigin = _ctx.Failure.Detail("requestedOrigin"),
             RedirectFix = RedirectFixFor(),
             ConnectedCredentials = _ctx.ConnectedCredentials,
+            Origin = _ctx.Origin,
             InstanceName = _ctx.Instance?.DisplayName,
             ProviderStatus = _ctx.Failure.Detail("providerStatus"),
             OAuthError = _ctx.Failure.Detail("oauthError"),
@@ -96,6 +97,7 @@ public sealed partial class ProviderRemedyService
         Repositories = _ctx.Repositories.Select(repository => ToRepository(repository)).ToList(),
         ProviderInstance = _ctx.Instance is { } instance ? new RemedyProviderInstance { Id = instance.Id, DisplayName = instance.DisplayName, Provider = instance.Provider, BaseUrl = CredentialUrl.Masked(instance.BaseUrl)! } : null,
         RedirectsTo = _ctx.Failure.Detail("finalOrigin"),
+        Origin = _ctx.Origin,
         Actions = _ctx.Actions,
         AskPeople = await WhoToAskAsync(cancellationToken).ConfigureAwait(false)
     };
