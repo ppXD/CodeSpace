@@ -40,6 +40,11 @@ public sealed class ActorIdentityResolver : IActorIdentityResolver, IScopedDepen
 
         if (providerInstanceId == null) return Array.Empty<ActAsCandidateSummary>();
 
+        return await ListCandidatesOnInstanceAsync(providerInstanceId.Value, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<ActAsCandidateSummary>> ListCandidatesOnInstanceAsync(Guid providerInstanceId, CancellationToken cancellationToken)
+    {
         // Every teammate who may act on this provider instance — the EXACT predicate ResolveAsync uses, so every
         // candidate is guaranteed to resolve (no throw) at write time.
         var identities = await MayAct(_db.UserProviderIdentity.AsNoTracking())

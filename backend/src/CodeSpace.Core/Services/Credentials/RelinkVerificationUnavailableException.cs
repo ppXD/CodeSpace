@@ -14,8 +14,10 @@ public sealed class RelinkVerificationUnavailableException : Exception, IFailure
 
     public string Code => FailureCodes.ProviderError;
 
-    public RelinkVerificationUnavailableException(string targetName, string sourceName, Exception inner)
-        : base($"Could not check whether credential '{targetName}' can read the repositories bound through '{sourceName}': the provider did not answer. Nothing was moved. Try again in a moment.", inner)
+    public RelinkVerificationUnavailableException(string targetName, string? sourceName, Exception inner)
+        : base(sourceName is null
+            ? $"Could not check whether credential '{targetName}' can read the repository: the provider did not answer. Nothing was moved. Try again in a moment."
+            : $"Could not check whether credential '{targetName}' can read the repositories bound through '{sourceName}': the provider did not answer. Nothing was moved. Try again in a moment.", inner)
     {
     }
 }

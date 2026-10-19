@@ -19,6 +19,7 @@ public class RelinkSuggestionRankingTests
     private static readonly Guid Caller = Guid.NewGuid();
     private static readonly Guid Teammate = Guid.NewGuid();
     private static readonly DateTimeOffset Revoked = new(2026, 10, 10, 12, 0, 0, TimeSpan.Zero);
+    private static readonly DateTimeOffset Now = new(2026, 10, 19, 12, 0, 0, TimeSpan.Zero);
 
     [Fact]
     public void Own_connections_come_first_newest_first_then_team_tokens_newest_first()
@@ -125,6 +126,73 @@ public class RelinkSuggestionRankingTests
         };
 
         RelinkSuggestionRanking.Rank(dead, new[] { candidate, kept }, Caller).Select(r => r.CredentialId).ShouldBe(new[] { kept.Id }, $"{shape}");
+    }
+
+    [Fact]
+    public void A_credential_on_a_sibling_connection_is_offered_only_when_the_caller_names_the_connections_in_reach_and_after_the_same_connections()
+    {
+        var sibling = Guid.NewGuid();
+        var dead = Dead();
+        var onSibling = With(Own(Revoked.AddDays(9)), c => c.ProviderInstanceId = sibling);
+        var here = Own(Revoked.AddDays(1));
+        var candidates = new[] { onSibling, here };
+
+        RelinkSuggestionRanking.Rank(dead, candidates, Caller).Select(r => r.CredentialId).ShouldBe(new[] { here.Id }, "the connections in reach are the caller's to name; without them only the credential's own is");
+        RelinkSuggestionRanking.Rank(dead, candidates, Caller, new HashSet<Guid> { Instance, sibling }).Select(r => r.CredentialId).ShouldBe(new[] { here.Id, onSibling.Id }, "the same connection first, though the sibling's credential is the newer");
+        RelinkSuggestionRanking.Rank(dead, candidates, Caller, new HashSet<Guid> { Instance, sibling }).Single(r => r.CredentialId == onSibling.Id).ProviderInstanceId.ShouldBe(sibling);
+    }
+
+    [Fact]
+    public void A_connection_that_is_not_in_reach_is_never_offered_whatever_else_is_true_of_it()
+    {
+        var elsewhere = With(Own(Revoked.AddDays(1)), c => c.ProviderInstanceId = Guid.NewGuid());
+
+        RelinkSuggestionRanking.Rank(Dead(), new[] { elsewhere }, Caller, new HashSet<Guid> { Instance }).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public void A_repository_is_offered_every_live_credential_the_caller_may_bind_with_whether_or_not_the_one_it_is_leaving_is_dead()
+    {
+        var sibling = Guid.NewGuid();
+        var leaving = With(Own(Revoked), c => c.Id = Guid.NewGuid());
+        var own = Own(Revoked.AddDays(-1));
+        var team = Team_(Revoked.AddDays(5));
+        var ownOnSibling = With(Own(Revoked.AddDays(9)), c => c.ProviderInstanceId = sibling);
+        var teammates = With(Own(Revoked), c => c.OwnerUserId = Teammate);
+        var revoked = With(Own(Revoked), c => c.Status = CredentialStatus.Revoked);
+
+        var offered = RelinkSuggestionRanking.RankForRepository(Instance, leaving, new[] { leaving, ownOnSibling, teammates, revoked, team, own }, Caller, Now);
+
+        offered.Select(r => r.CredentialId).ShouldBe(new[] { own.Id, team.Id, ownOnSibling.Id }, "the leaving credential is left out although it is live; the same connection's come first, the caller's own before the team's");
+        offered.Select(r => r.Kind).ShouldBe(new[] { RelinkSuggestionKind.YourConnection, RelinkSuggestionKind.TeamServiceToken, RelinkSuggestionKind.YourConnection });
+    }
+
+    [Theory]
+    [InlineData(AuthType.Pat, -3, false)]                // past its recorded expiry: Active by status, rejected by the health model
+    [InlineData(AuthType.ProjectAccessToken, 0, false)]  // expiring at this very instant has expired (HasExpired reads <=)
+    [InlineData(AuthType.GroupAccessToken, -1, false)]
+    [InlineData(AuthType.Pat, 3, true)]                  // about to expire still authenticates, and the chip says so
+    [InlineData(AuthType.Pat, null, true)]               // no recorded expiry
+    [InlineData(AuthType.OAuth, -3, true)]               // an OAuth credential's expiry is its access token's, which renews itself
+    public void A_repository_is_offered_a_credential_only_while_the_health_model_says_it_can_authenticate(AuthType authType, int? daysFromNow, bool offered)
+    {
+        var own = With(Own(Revoked), c => { c.AuthType = authType; c.ExpiresDate = daysFromNow is { } days ? Now.AddDays(days) : null; });
+        var team = With(Team_(Revoked), c => { c.AuthType = authType == AuthType.OAuth ? AuthType.GroupAccessToken : authType; c.ExpiresDate = authType != AuthType.OAuth && daysFromNow is { } days ? Now.AddDays(days) : null; });   // a team token is never an OAuth one
+        var healthy = Own(Revoked.AddDays(-1));
+
+        var ids = RelinkSuggestionRanking.RankForRepository(Instance, leaving: null, new[] { own, team, healthy }, Caller, Now).Select(r => r.CredentialId).ToHashSet();
+
+        ids.Contains(own.Id).ShouldBe(offered, $"{authType} expiring {daysFromNow} days from now: its own row");
+        ids.Contains(team.Id).ShouldBe(offered, "the team's token, on the same terms");
+        ids.ShouldContain(healthy.Id, "a healthy credential is offered whatever its neighbours' state");
+    }
+
+    [Fact]
+    public void A_repository_with_no_credential_to_leave_flags_nothing_as_connected_before_a_disconnect()
+    {
+        var offered = RelinkSuggestionRanking.RankForRepository(Instance, leaving: null, new[] { Own(Revoked.AddDays(-30)) }, Caller, Now);
+
+        offered.Select(r => r.ConnectedBeforeDisconnect).ShouldBe(new[] { false });
     }
 
     [Fact]

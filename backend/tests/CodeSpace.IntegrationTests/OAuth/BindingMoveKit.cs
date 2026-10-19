@@ -70,6 +70,34 @@ internal sealed class BindingMoveKit
         return instance.Id;
     }
 
+    /// <summary>
+    /// A second connection of the world's team to the SAME host as <paramref name="ofInstanceId"/> (the world's own by default) —
+    /// another OAuth application on one GitLab: same provider and base URL, its own client id, which is what the unique index lets
+    /// a team hold twice. Credentials and repositories on the two can serve each other, since the repositories behind them are the same.
+    /// </summary>
+    public async Task<Guid> SeedSiblingInstanceAsync(World world, Guid? ofInstanceId = null, ProviderWebhookScope webhookScope = ProviderWebhookScope.Repository, string? apiUrl = null)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var of = await db.ProviderInstance.AsNoTracking().SingleAsync(p => p.Id == (ofInstanceId ?? world.InstanceId));
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+
+        var sibling = new ProviderInstance { Id = Guid.NewGuid(), TeamId = of.TeamId, Provider = of.Provider, DisplayName = $"GitLab sibling {suffix}", BaseUrl = of.BaseUrl, ApiUrl = apiUrl ?? of.ApiUrl, WebhookScope = webhookScope, OauthClientId = $"client-{suffix}", OauthClientSecretEnc = scope.Resolve<IPayloadEncryptor>().Encrypt("client-secret") };
+
+        db.ProviderInstance.Add(sibling);
+        await db.SaveChangesAsync();
+
+        return sibling.Id;
+    }
+
+    /// <summary>The connection moved to <paramref name="webhookScope"/> as an operator's edit leaves it, with nothing registered yet to retire — for a test that needs a connection-wide target.</summary>
+    public async Task SetWebhookScopeAsync(Guid instanceId, ProviderWebhookScope webhookScope)
+    {
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().ProviderInstance.Where(p => p.Id == instanceId).ExecuteUpdateAsync(s => s.SetProperty(p => p.WebhookScope, webhookScope));
+    }
+
     /// <summary>A person with a membership in the world's team at <paramref name="role"/> — the shape a later joiner or a leaver takes.</summary>
     public async Task<Guid> SeedMemberAsync(World world, TeamRole role)
     {
@@ -176,14 +204,14 @@ internal sealed class BindingMoveKit
     /// (two live tokens for one person, a token held by someone who never joined the team). A revoked one carries the blank
     /// payload a Disconnect leaves; <paramref name="createdDate"/> places it before or after another credential's revocation.
     /// </summary>
-    public async Task<Guid> SeedCredentialAsync(World world, Guid? ownerId, string token, CredentialStatus status = CredentialStatus.Active, CredentialOwnership ownership = CredentialOwnership.Personal, Guid? instanceId = null, DateTimeOffset? createdDate = null, Guid? id = null)
+    public async Task<Guid> SeedCredentialAsync(World world, Guid? ownerId, string token, CredentialStatus status = CredentialStatus.Active, CredentialOwnership ownership = CredentialOwnership.Personal, Guid? instanceId = null, DateTimeOffset? createdDate = null, Guid? id = null, IReadOnlyList<string>? scopes = null, DateTimeOffset? expiresDate = null)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
         var sealedToken = scope.Resolve<IPayloadEncryptor>().Encrypt(scope.Resolve<ICredentialPayloadSerializer>().Serialize(new PatPayload { Token = token }));
         var created = createdDate ?? DateTimeOffset.UtcNow;
 
-        var credential = new Credential { Id = id ?? Guid.NewGuid(), TeamId = world.TeamId, ProviderInstanceId = instanceId ?? world.InstanceId, OwnerUserId = ownerId, Ownership = ownership, AuthType = AuthType.Pat, DisplayName = $"{ownership} {token}", EncryptedPayload = status == CredentialStatus.Revoked ? string.Empty : sealedToken, Status = status, CreatedDate = created, LastModifiedDate = created };
+        var credential = new Credential { Id = id ?? Guid.NewGuid(), TeamId = world.TeamId, ProviderInstanceId = instanceId ?? world.InstanceId, OwnerUserId = ownerId, Ownership = ownership, AuthType = AuthType.Pat, DisplayName = $"{ownership} {token}", EncryptedPayload = status == CredentialStatus.Revoked ? string.Empty : sealedToken, Status = status, Scopes = scopes?.ToList(), ExpiresDate = expiresDate, CreatedDate = created, LastModifiedDate = created };
 
         db.Credential.Add(credential);
         await db.SaveChangesAsync();
@@ -201,10 +229,14 @@ internal sealed class BindingMoveKit
         return request!.Token;
     }
 
-    public async Task<Guid> SeedRepositoryAsync(World world, Guid credentialId, RepositoryStatus status = RepositoryStatus.Active, Guid? instanceId = null)
+    /// <summary>
+    /// A repository bound through <paramref name="credentialId"/>. Its external id is its path, which is what the Git test provider answers a lookup with, so a
+    /// probe reads it where CodeSpace has it; <paramref name="storedPath"/> is the path CodeSpace stores it under when that should differ from the provider's — a rename the provider has seen and CodeSpace has not.
+    /// </summary>
+    public async Task<Guid> SeedRepositoryAsync(World world, Guid credentialId, RepositoryStatus status = RepositoryStatus.Active, Guid? instanceId = null, string? name = null, string? storedPath = null)
     {
-        var name = $"repo-{Guid.NewGuid():N}"[..13];
-        var repo = new Repository { Id = Guid.NewGuid(), TeamId = world.TeamId, ProviderInstanceId = instanceId ?? world.InstanceId, CredentialId = credentialId, ExternalId = $"acme/{name}", NamespacePath = "acme", Name = name, FullPath = $"acme/{name}", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = $"https://git.test/acme/{name}", CloneUrlHttps = $"https://git.test/acme/{name}.git", Status = status, LastError = status == RepositoryStatus.Error ? "Credential disconnected." : null };
+        name ??= $"repo-{Guid.NewGuid():N}"[..13];
+        var repo = new Repository { Id = Guid.NewGuid(), TeamId = world.TeamId, ProviderInstanceId = instanceId ?? world.InstanceId, CredentialId = credentialId, ExternalId = $"acme/{name}", NamespacePath = "acme", Name = name, FullPath = storedPath ?? $"acme/{name}", DefaultBranch = "main", Visibility = RepositoryVisibility.Private, WebUrl = $"https://git.test/acme/{name}", CloneUrlHttps = $"https://git.test/acme/{name}.git", Status = status, LastError = status == RepositoryStatus.Error ? "Credential disconnected." : null };
 
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -215,8 +247,33 @@ internal sealed class BindingMoveKit
         return repo.Id;
     }
 
+    /// <summary>
+    /// A per-repository hook as a bind leaves it: <paramref name="status"/> and, when Registered, the id the provider gave it. The callback
+    /// carries the row's own id, as a bind's does.
+    /// </summary>
+    public async Task<Guid> SeedRepositoryWebhookAsync(Guid repositoryId, RepositoryWebhookRegistrationStatus status)
+    {
+        var id = Guid.NewGuid();
+        var registered = status == RepositoryWebhookRegistrationStatus.Registered;
+
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        db.RepositoryWebhook.Add(new RepositoryWebhook { Id = id, RepositoryId = repositoryId, CallbackUrl = $"https://codespace.test/api/webhooks/{id}", SecretEnc = scope.Resolve<IPayloadEncryptor>().Encrypt("hook-secret"), SubscribedEvents = new List<string> { "push" }, RegistrationStatus = status, ExternalId = registered ? $"hook-{id:N}"[..12] : null, RegisteredAt = registered ? DateTimeOffset.UtcNow.AddDays(-20) : null });
+        await db.SaveChangesAsync();
+
+        return id;
+    }
+
+    public async Task<List<RepositoryWebhook>> LoadRepositoryWebhooksAsync(Guid repositoryId)
+    {
+        using var scope = _fixture.BeginScope();
+
+        return await scope.Resolve<CodeSpaceDbContext>().RepositoryWebhook.AsNoTracking().Where(w => w.RepositoryId == repositoryId).OrderBy(w => w.CreatedDate).ToListAsync();
+    }
+
     /// <summary>A group hook on the world's instance, registered through <paramref name="credentialId"/> — failed ones carrying the 401 a dying token returns.</summary>
-    public async Task<Guid> SeedConnectionWebhookAsync(World world, Guid credentialId, RepositoryWebhookRegistrationStatus status)
+    public async Task<Guid> SeedConnectionWebhookAsync(World world, Guid credentialId, RepositoryWebhookRegistrationStatus status, Guid? instanceId = null, string ownerPath = "acme")
     {
         var id = Guid.NewGuid();
         var failed = status is RepositoryWebhookRegistrationStatus.Failed or RepositoryWebhookRegistrationStatus.DeadLettered;
@@ -225,7 +282,7 @@ internal sealed class BindingMoveKit
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        db.ConnectionWebhook.Add(new ConnectionWebhook { Id = id, ProviderInstanceId = world.InstanceId, CredentialId = credentialId, OwnerPath = "acme", CallbackUrl = $"https://codespace.test/api/webhooks/connection/{id}", SecretEnc = scope.Resolve<IPayloadEncryptor>().Encrypt("hook-secret"), SubscribedEvents = new List<string> { "push" }, RegistrationStatus = status, Attempts = SeededHookAttempts, NextAttemptAt = DateTimeOffset.UtcNow.AddHours(1), LastError = failed ? "401 Unauthorized" : null, ExternalId = registered ? "4242" : null, RegisteredAt = registered ? DateTimeOffset.UtcNow.AddDays(-20) : null });
+        db.ConnectionWebhook.Add(new ConnectionWebhook { Id = id, ProviderInstanceId = instanceId ?? world.InstanceId, CredentialId = credentialId, OwnerPath = ownerPath, CallbackUrl = $"https://codespace.test/api/webhooks/connection/{id}", SecretEnc = scope.Resolve<IPayloadEncryptor>().Encrypt("hook-secret"), SubscribedEvents = new List<string> { "push" }, RegistrationStatus = status, Attempts = SeededHookAttempts, NextAttemptAt = DateTimeOffset.UtcNow.AddHours(1), LastError = failed ? "401 Unauthorized" : null, ExternalId = registered ? "4242" : null, RegisteredAt = registered ? DateTimeOffset.UtcNow.AddDays(-20) : null });
         await db.SaveChangesAsync();
 
         return id;
@@ -262,6 +319,9 @@ internal sealed class BindingMoveKit
     }
 
     public bool WasDispatched(Guid hookId) => Jobs().Calls.Any(c => c.ServiceType == typeof(IConnectionWebhookRegistrar) && Equals(c.FirstArgument, hookId));
+
+    /// <summary>A per-repository hook was handed to its registrar.</summary>
+    public bool WasRegistrationDispatched(Guid webhookId) => Jobs().Calls.Any(c => c.ServiceType == typeof(IRepositoryWebhookRegistrar) && Equals(c.FirstArgument, webhookId));
 
     public static OAuthTokenResponse Token(string accessToken, string? refreshToken) => new() { AccessToken = accessToken, RefreshToken = refreshToken, ExpiresAt = refreshToken == null ? null : DateTimeOffset.UtcNow + TimeSpan.FromHours(2) };
 

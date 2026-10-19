@@ -121,6 +121,23 @@ export const oauthApi = {
   getRelinkSuggestions: (credentialId: string) =>
     fetchJson<RelinkSuggestion[]>(`/api/credentials/${encodeURIComponent(credentialId)}/relink-suggestions`),
 
+  // Every credential a repository on this provider connection could be re-linked to, best first — the whole list the Re-link dialog shows, computed by the
+  // backend: the caller's own and the team's service tokens, on this connection or another one to the same host. Null from an API that predates it, which the
+  // dialog answers by filtering the credential list itself, as it did. Any 404 means that: a server without the route does not answer an empty 404 but the
+  // JSON { code: "not_found" } its fallback endpoint writes (Startup's MapFallback), a gateway in front of it may answer anything, and the route's own 404 — a
+  // connection that is not the team's — leaves the same fallback an empty list to show. Telling them apart by code is how an older server's rollback broke the dialog.
+  getRelinkCandidates: async (providerInstanceId: string, fromCredentialId: string | null): Promise<RelinkSuggestion[] | null> => {
+    const from = fromCredentialId ? `?fromCredentialId=${encodeURIComponent(fromCredentialId)}` : "";
+
+    try {
+      return await fetchJson<RelinkSuggestion[]>(`/api/provider-instances/${encodeURIComponent(providerInstanceId)}/relink-candidates${from}`);
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) return null;
+
+      throw err;
+    }
+  },
+
   // Pre-revoke preview — drives the confirm dialog's impact wording.
   getCredentialUsage: (credentialId: string) =>
     fetchJson<CredentialUsage>(`/api/credentials/${encodeURIComponent(credentialId)}/usage`),

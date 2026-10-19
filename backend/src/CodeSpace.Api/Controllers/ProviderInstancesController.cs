@@ -1,4 +1,5 @@
 using CodeSpace.Messages.Commands.ProviderInstances;
+using CodeSpace.Messages.Queries.Credentials;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Queries.ProviderInstances;
 using CodeSpace.Messages.Queries.Providers;
@@ -21,6 +22,18 @@ public class ProviderInstancesController : ControllerBase
     public async Task<IActionResult> List(CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new ListProviderInstancesQuery(), cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// The credentials a repository on this connection could be re-linked to, best first — the whole list the Re-link dialog shows: the
+    /// caller's own live connections and the team's service tokens, on this connection or another one to the same host. Route's id is
+    /// authoritative; <c>fromCredentialId</c> (the credential being left) is the only query-string field.
+    /// </summary>
+    [HttpGet("{providerInstanceId:guid}/relink-candidates")]
+    public async Task<IActionResult> RelinkCandidates([FromRoute] Guid providerInstanceId, [FromQuery] GetRelinkCandidatesQuery query, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(query with { ProviderInstanceId = providerInstanceId }, cancellationToken).ConfigureAwait(false);
         return Ok(result);
     }
 

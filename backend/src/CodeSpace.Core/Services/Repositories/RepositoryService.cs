@@ -1,7 +1,10 @@
 using CodeSpace.Core.DependencyInjection;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Credentials;
 using CodeSpace.Core.Services.Identity;
+using CodeSpace.Core.Services.ProviderInstances;
+using CodeSpace.Core.Services.RepositoryBinding;
 using CodeSpace.Core.Services.Providers;
 using CodeSpace.Core.Services.Providers.Capabilities;
 using CodeSpace.Core.Services.Webhooks.Registration;
@@ -17,16 +20,22 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
 {
     private readonly CodeSpaceDbContext _db;
     private readonly ICurrentTeam _currentTeam;
+    private readonly ICurrentUser _currentUser;
     private readonly IProviderRegistry _registry;
     private readonly IConnectionWebhookCoverageService _hookCoverage;
+    private readonly IRepositoryRehoming _rehoming;
+    private readonly IRepositoryReadProbe _probe;
     private readonly ILogger<RepositoryService> _logger;
 
-    public RepositoryService(CodeSpaceDbContext db, ICurrentTeam currentTeam, IProviderRegistry registry, IConnectionWebhookCoverageService hookCoverage, ILogger<RepositoryService> logger)
+    public RepositoryService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IProviderRegistry registry, IConnectionWebhookCoverageService hookCoverage, IRepositoryRehoming rehoming, IRepositoryReadProbe probe, ILogger<RepositoryService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
+        _currentUser = currentUser;
         _registry = registry;
         _hookCoverage = hookCoverage;
+        _rehoming = rehoming;
+        _probe = probe;
         _logger = logger;
     }
 
@@ -202,11 +211,63 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
 
         var repo = await LoadOwnedRepositoryAsync(repositoryId, teamId, cancellationToken).ConfigureAwait(false);
         var credential = await LoadActiveCandidateCredentialAsync(newCredentialId, teamId, cancellationToken).ConfigureAwait(false);
-        EnsureSameProviderInstance(repo, credential);
 
-        repo.CredentialId = credential.Id;
+        if (credential.ProviderInstanceId != repo.ProviderInstanceId) await MoveToAnotherConnectionAsync(repo, credential, teamId, cancellationToken).ConfigureAwait(false);
+        else repo.CredentialId = credential.Id;
+
         repo.Status = RepositoryStatus.Active;
         repo.LastError = null;
+    }
+
+    /// <summary>
+    /// A credential of another connection to the same host takes the repository to its connection. Refused for a different host with the message a
+    /// credential of another host always got; and, since this reaches further than the repository's own connection, held to what the other doors hold a
+    /// move to — the caller's own credential or a team token (the repository would act as that person), a connection that does not already hold the
+    /// project, a credential whose scopes cover the hook it will register — and to reading the repository where CodeSpace has it, before anything is written.
+    /// </summary>
+    private async Task MoveToAnotherConnectionAsync(Repository repo, Credential credential, Guid teamId, CancellationToken cancellationToken)
+    {
+        await EnsureSameHostAsync(repo, credential, teamId, cancellationToken).ConfigureAwait(false);
+        EnsureCallerMayBindWith(credential);
+        await EnsureNotRefusedAsync(repo, credential, cancellationToken).ConfigureAwait(false);
+        await EnsureReadAsync(repo, credential, cancellationToken).ConfigureAwait(false);
+
+        var staged = await _rehoming.RehomeAsync(repo, credential, cancellationToken).ConfigureAwait(false);
+
+        await _rehoming.DispatchAfterCommitAsync(staged, cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task EnsureSameHostAsync(Repository repo, Credential credential, Guid teamId, CancellationToken cancellationToken)
+    {
+        if (await ProviderInstanceHost.AreInterchangeableAsync(_db, teamId, repo.ProviderInstanceId, credential.ProviderInstanceId, cancellationToken).ConfigureAwait(false)) return;
+
+        throw new InvalidOperationException($"Credential '{credential.DisplayName}' is for a different provider instance. Pick a credential connected to the same provider as the repository.");
+    }
+
+    private void EnsureCallerMayBindWith(Credential credential)
+    {
+        if (_currentUser.Id is Guid callerId && RelinkSuggestionRanking.IsCallersOrTeams(credential, callerId)) return;
+
+        throw new InvalidOperationException($"Credential '{credential.DisplayName}' is another person's personal connection, and a repository bound through it would act as them. Pick one of your own connections, or a team token.");
+    }
+
+    private async Task EnsureNotRefusedAsync(Repository repo, Credential credential, CancellationToken cancellationToken)
+    {
+        var refused = await _rehoming.RefusalsAsync(new[] { repo }, credential, cancellationToken).ConfigureAwait(false);
+
+        if (refused.TryGetValue(repo.Id, out var reason)) throw new InvalidOperationException(reason);
+    }
+
+    /// <summary>Ask the provider, as the credential, for the repository by its id — and expect it at the path CodeSpace has it, which tells it from another repository (or the same one, renamed since CodeSpace last read it).</summary>
+    private async Task EnsureReadAsync(Repository repo, Credential credential, CancellationToken cancellationToken)
+    {
+        var read = await _probe.ReadAsync(credential, repo.ExternalId, sourceName: null, cancellationToken).ConfigureAwait(false);
+
+        if (!read.Readable)
+            throw new InvalidOperationException($"Credential '{credential.DisplayName}' cannot read '{repo.FullPath}'. Nothing was moved. Pick a credential that reaches it, or unbind the repository first.");
+
+        if (!read.IsAt(repo.FullPath))
+            throw new InvalidOperationException($"Credential '{credential.DisplayName}' does not find '{repo.FullPath}' where CodeSpace has it — the provider names that repository '{read.FullPath}'. Nothing was moved. Pick another credential, or unbind the repository and bind it again.");
     }
 
     private async Task<Repository> LoadOwnedRepositoryAsync(Guid id, Guid teamId, CancellationToken cancellationToken)
@@ -236,15 +297,5 @@ public sealed class RepositoryService : IRepositoryService, IScopedDependency
         if (credential.Status != CredentialStatus.Active) throw new InvalidOperationException($"Credential '{credential.DisplayName}' is {credential.Status} — pick an Active credential.");
 
         return credential;
-    }
-
-    /// <summary>
-    /// A repo can only borrow a credential bound to its own provider instance. Otherwise
-    /// the OAuth/PAT token would talk to the wrong host and every API call would 401/404.
-    /// </summary>
-    private static void EnsureSameProviderInstance(Repository repo, Credential credential)
-    {
-        if (credential.ProviderInstanceId != repo.ProviderInstanceId)
-            throw new InvalidOperationException($"Credential '{credential.DisplayName}' is for a different provider instance. Pick a credential connected to the same provider as the repository.");
     }
 }

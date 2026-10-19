@@ -50,6 +50,11 @@ function renderCard(r: ProviderRemedy, props: { onRerun?: () => void; rawDetail?
   const base: Record<string, unknown> = {
     "/api/users/me": { id: "u1", email: "u@test.local", name: "Maya", teams: [team], permissions: [], passwordMustChange: false },
     "/relink-suggestions": [{ credentialId: "c-team", displayName: "Acme group token", authType: "GroupAccessToken", ownership: "TeamService", kind: "TeamServiceToken", createdDate: "2026-02-02T00:00:00Z", connectedBeforeDisconnect: false }],
+    // The Re-link dialog's list, as the backend computes it: the caller's own and the team's tokens that may take the repository, in the order to offer them.
+    "/relink-candidates": [
+      { credentialId: "c-team", displayName: "Acme group token", authType: "GroupAccessToken", ownership: "TeamService", kind: "TeamServiceToken", createdDate: "2026-02-02T00:00:00Z", connectedBeforeDisconnect: false, providerInstanceId: "pi1", providerInstanceName: "Acme GitLab" },
+      { credentialId: "c-mine", displayName: "Maya's GitLab", authType: "OAuth", ownership: "Personal", kind: "YourConnection", createdDate: "2026-02-01T00:00:00Z", connectedBeforeDisconnect: false, providerInstanceId: "pi1", providerInstanceName: "Acme GitLab" },
+    ],
     "/capabilities": { credentialId: "any", grantedScopes: [], capabilities: [] },
     "/api/provider-instances": [instance],
     "/api/credentials": credentials,
@@ -62,7 +67,12 @@ function renderCard(r: ProviderRemedy, props: { onRerun?: () => void; rawDetail?
 
     const key = Object.keys(routes).find((k) => url.includes(k));
     const body = key === undefined ? undefined : routes[key];
-    return new Response(body === undefined ? "" : JSON.stringify(body), { status: body === undefined ? 404 : 200, headers: { "Content-Type": "application/json" } });
+
+    // A route a test leaves unanswered is one this server does not have, and the real server says so the way Startup's MapFallback does: a 404 WITH a
+    // JSON body whose code is "not_found" — not an empty 404, which no CodeSpace API produces.
+    if (body === undefined) return new Response(JSON.stringify({ code: "not_found", message: `This server has no ${new URL(url, "http://host").pathname}. Check the host — the API and the web app are different origins.` }), { status: 404, headers: { "Content-Type": "application/json" } });
+
+    return new Response(JSON.stringify(body), { status: 200, headers: { "Content-Type": "application/json" } });
   }));
 
   render(
@@ -354,8 +364,28 @@ describe("ProviderRemedyCard — each button does what it says", () => {
     expect(put.body).toEqual({ token: "glpat-fresh" });
   });
 
-  it("Re-link offers only the caller's own and the team's credentials on the repository's provider, best suggestion first, and moves the repository", async () => {
+  it("Re-link offers what the backend says may take the repository, in its order, and moves the repository", async () => {
     const calls = renderCard(remedy(), {}, { "/api/repositories/r1/relink-credential": {} });
+
+    fireEvent.click(screen.getByRole("button", { name: "Re-link repository" }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Re-link credential" });
+    await waitFor(() => expect(within(dialog).getByText("Acme group token")).toBeTruthy());
+
+    const offered = within(dialog).getAllByRole("listitem").map((e) => e.textContent);
+    expect(offered).toEqual([expect.stringContaining("Acme group token"), expect.stringContaining("Maya's GitLab")]);   // the backend's list, untouched: the dialog drops and reorders nothing
+
+    fireEvent.click(within(dialog).getByText("Acme group token"));
+
+    await waitFor(() => expect(calls.some((c) => c.method === "POST" && c.url.endsWith("/api/repositories/r1/relink-credential"))).toBe(true));
+    expect(calls.find((c) => c.url.endsWith("/api/repositories/r1/relink-credential"))!.body).toEqual({ newCredentialId: "c-team" });
+    expect(calls.some((c) => c.url.includes("/api/provider-instances/pi1/relink-candidates?fromCredentialId=c-dead"))).toBe(true);
+    expect(calls.some((c) => c.url.includes("/relink-suggestions"))).toBe(false);
+    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Re-link credential" })).toBeNull());
+  });
+
+  it("Re-link against an API that predates the list offers only the caller's own and the team's credentials on the repository's provider, best suggestion first", async () => {
+    const calls = renderCard(remedy(), {}, { "/relink-candidates": undefined, "/api/repositories/r1/relink-credential": {} });
 
     fireEvent.click(screen.getByRole("button", { name: "Re-link repository" }));
 
@@ -376,7 +406,7 @@ describe("ProviderRemedyCard — each button does what it says", () => {
   });
 
   it("Re-link says what to do when no credential can take the repository", async () => {
-    renderCard(remedy(), {}, { "/api/credentials": [] });
+    renderCard(remedy(), {}, { "/relink-candidates": [] });
 
     fireEvent.click(screen.getByRole("button", { name: "Re-link repository" }));
 

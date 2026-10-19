@@ -6560,7 +6560,10 @@ button.rmd-subject:hover { background: var(--panel-2); border-color: var(--line-
 .rmd-candidate { display: flex; align-items: center; justify-content: space-between; gap: 12px; width: 100%; padding: 9px 12px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--ink); font: inherit; font-size: 13px; text-align: left; cursor: pointer; transition: background .12s, border-color .12s; }
 .rmd-candidate:hover:not(:disabled) { background: var(--panel-2); border-color: var(--line-2); }
 .rmd-candidate:disabled { opacity: .6; cursor: default; }
+.rmd-candidate-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; }
 .rmd-candidate-main { display: inline-flex; align-items: center; gap: 7px; min-width: 0; flex-wrap: wrap; }
+.rmd-candidate-note { font-size: 11.5px; line-height: 1.5; color: var(--ink-2); }
+.rmd-candidate-main .cn-status[data-connection="true"] { text-transform: none; }
 .rmd-candidate-name { font-weight: 500; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rmd-candidate-go { flex: none; font-size: 12px; color: var(--accent); font-weight: 500; }
 /* The repository page's connection row, above the tabs: chip, the sentence behind it, then the fixes. */

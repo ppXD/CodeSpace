@@ -56,6 +56,8 @@ Provider-credential tests share two more pieces, both in `CodeSpace.IntegrationT
   `expires_at` at `personal_access_tokens/self`, 401 once revoked or expired) and can script the members lookup to fail
   (`FailMembers(status, times)`). Every user has an id of their own (`UserIdOf`) and a personal access token can be seeded for one
   (`SeedPersonalAccessToken`), so a test can tell two accounts apart and drive a pasted token, as the in-place re-authorization tests do.
+  Once a project has been added (`AddProject(id, path)`) `GET /api/v4/projects/:id` answers that project to a live token — and 404 for any other id — so a
+  repository move that asks the new credential for the project is seen from the stub's log (`Log`, the token and the path) as well as in the database.
   Its counters (`Count(StubEvent.Refused)`, …) are how a test says "GitLab was never shown a consumed refresh token".
   `GitLabDoorkeeperStubTests` pins what it does, so a red test built on it is the product's and not the stub's.
 - `SilentProviderHost` (`CodeSpace.IntegrationTests/Webhooks`, linked into the unit project like `StubProviderHost`) — a loopback provider that
