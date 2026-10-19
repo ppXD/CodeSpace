@@ -27,6 +27,52 @@ export function isLiveCredential(credential: CredentialSummary): boolean {
   return word === "active" || word === "expiring";
 }
 
+/**
+ * A disconnected credential nothing leans on: no repository, group hook or act-as identity is left on it, so it is only history, and the
+ * dialog folds it away and offers to remove it. Only a server that sends `dependentCount` can say so — one that predates it says nothing,
+ * which is also the one that has no removal, so its rows are listed as they always were.
+ */
+export function isHistory(credential: CredentialSummary): boolean {
+  return credentialHealthWord(credential) === "disconnected" && credential.dependentCount === 0;
+}
+
+/**
+ * The credentials whose bindings `relink-bindings` moves in one action: a disconnected or refused credential that still holds repositories or group hooks
+ * (the two it carries — a hook-only credential moves too). Not one still in service, whatever it reads — the server refuses a source that is `Active` (a Disconnect that
+ * names where they go is how those are moved), so a token whose expiry passed but whose row is not yet marked is not offered a move that could only answer 400.
+ * Not a credential held only by act-as identities: the move leaves those where they are.
+ */
+export function canMoveBindingsOff(credential: CredentialSummary): boolean {
+  const word = credentialHealthWord(credential);
+
+  return (word === "disconnected" || word === "rejected") && credential.status !== "Active" && ((credential.boundRepositoryCount ?? 0) > 0 || (credential.boundConnectionWebhookCount ?? 0) > 0);
+}
+
+/**
+ * What leans on a credential, in a few words. A working one says what a reconnect or a disconnect puts at stake — "3 repositories bound". A dead one says why it is
+ * still listed — "3 repositories still use it", or with the group hooks and act-as identities that hold it as well ("2 repositories and 1 group hook still use it") — so
+ * a row held only by a hook still gives its reason. Null when nothing is on it (an older server's missing counts too).
+ */
+export function dependentsLabel(credential: CredentialSummary): string | null {
+  const repositories = credential.boundRepositoryCount ?? 0;
+  const word = credentialHealthWord(credential);
+
+  if (word !== "disconnected" && word !== "rejected") return repositories > 0 ? `${repositories} ${repositories === 1 ? "repository" : "repositories"} bound` : null;
+
+  const kinds = [
+    { count: repositories, one: "repository", many: "repositories" },
+    { count: credential.boundConnectionWebhookCount ?? 0, one: "group hook", many: "group hooks" },
+    { count: credential.actAsIdentityCount ?? 0, one: "act-as identity", many: "act-as identities" },
+  ].filter(k => k.count > 0);
+
+  if (kinds.length === 0) return null;
+
+  const parts = kinds.map(k => `${k.count} ${k.count === 1 ? k.one : k.many}`);
+  const subject = parts.length === 1 ? parts[0] : `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
+
+  return `${subject} ${kinds.length === 1 && kinds[0].count === 1 ? "still uses" : "still use"} it`;
+}
+
 /** A pasted token (personal, project or group) rather than a sign-in — decides Replace token versus Reconnect. */
 export function isStaticToken(credential: Pick<CredentialSummary, "authType">): boolean {
   return credential.authType === "Pat" || credential.authType === "ProjectAccessToken" || credential.authType === "GroupAccessToken";

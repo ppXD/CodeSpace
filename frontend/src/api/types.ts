@@ -60,6 +60,19 @@ export interface CredentialSummary {
    * from a server that predates it: read the role then (`ownsIt || can(CredentialsManage)`), which is what every client did before.
    */
   callerMayRepair?: boolean | null;
+  /**
+   * How many things lean on it: live repositories bound through it, group hooks registered through it still in service, and act-as identities it backs. A
+   * disconnected credential with none is history, which the Providers dialog folds away and offers to remove. Absent from a server that predates it —
+   * which also has no removal, so the dialog then lists every credential as it always did.
+   */
+  dependentCount?: number | null;
+  /**
+   * Of `dependentCount`, the group hooks registered through it that are still in service: what a dead credential with no repository left is still held by, and what
+   * moving its bindings carries with the repositories. Absent from a server that predates it — read as none.
+   */
+  boundConnectionWebhookCount?: number | null;
+  /** Of `dependentCount`, the act-as identities it backs. Moving a dead credential's bindings does not carry them. Absent from a server that predates it — read as none. */
+  actAsIdentityCount?: number | null;
 }
 
 export interface InitOAuthResponse {
@@ -183,6 +196,18 @@ export interface RelinkSuggestion {
   providerInstanceName?: string;
   /** Names of the teammates whose acting-as on the repository's connection stops working if this credential is picked: they can act as themselves there and not on this credential's connection. Empty for a credential on the repository's own connection; absent from an API that predates it. */
   strandedActAs?: string[];
+}
+
+/** What `POST /api/credentials/{id}/relink-bindings` moved: repositories re-pointed (the ones its dead credential had turned Error come back) and group hooks re-pointed. */
+export interface RelinkCredentialBindingsResponse {
+  fromCredentialId: string;
+  toCredentialId: string;
+  movedRepositoryCount: number;
+  movedConnectionWebhookCount: number;
+}
+
+export interface RemoveCredentialResponse {
+  credentialId: string;
 }
 
 export interface ReplaceCredentialTokenResponse {

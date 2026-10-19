@@ -59,7 +59,8 @@ export function describeOAuthFlowError(err: OAuthFlowError): string {
     case "popup_blocked": return "Your browser blocked the OAuth popup. Allow popups for this site and try again.";
     case "cancelled":     return "You closed the authorization window. No connection was made.";
     case "init_failed":   return `Couldn't start the OAuth flow: ${err.message}`;
-    case "provider_error": return err.providerError ? `Provider rejected: ${err.providerError}` : err.message;
+    // The callback's own sentence when it gave one; its code alone ("credential_account_mismatch") tells a person nothing. `message` IS the code when there was no sentence.
+    case "provider_error": return err.providerError && err.message === err.providerError ? `Provider rejected: ${err.providerError}` : err.message;
     case "timeout":       return "The authorization took too long. Try again.";
     default:              return err.message;
   }

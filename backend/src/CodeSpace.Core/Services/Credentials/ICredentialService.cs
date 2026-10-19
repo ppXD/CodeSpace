@@ -40,5 +40,13 @@ public interface ICredentialService
     /// </summary>
     Task<ReplaceCredentialTokenResult> ReplaceTokenAsync(Guid credentialId, string token, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Take a disconnected credential with nothing leaning on it out of the team's list — soft-deleted, as a departed member's retired credential is.
+    /// Refused, writing nothing, for one still in service and for one with repositories, group hooks or act-as identities left on it
+    /// (<c>CredentialRemoval</c>), and for one a reconnect revived while this ran. A credential already removed, or of another team, is not found.
+    /// Returns the credential's id. Tracked changes only — the caller's unit of work commits them.
+    /// </summary>
+    Task<Guid> RemoveDisconnectedAsync(Guid credentialId, CancellationToken cancellationToken);
+
     Task<RemoteRepositoryPage> ListAccessibleRepositoriesAsync(Guid credentialId, string? search, int page, int perPage, CancellationToken cancellationToken);
 }

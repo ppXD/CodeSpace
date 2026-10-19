@@ -49,6 +49,8 @@ describe("providers settings summary", () => {
     { what: "a token whose expiry passed, though its row is still Active", held: [credential("lapsed", { health: "rejected" })], expected: "needs reconnect" },
     { what: "a refused one beside a working one", held: [credential("dead", { status: "Error" }), credential("ok")], expected: "connected" },
     { what: "only someone else's credential", held: [credential("theirs", { ownerUserId: "u2" })], expected: "not connected" },
+    { what: "only disconnected rows nothing leans on, which the dialog folds into one line", held: [credential("old-1", { status: "Revoked", dependentCount: 0 }), credential("old-2", { status: "Revoked", dependentCount: 0 })], expected: "not connected" },
+    { what: "a working credential beside folded history, from a server that sends the new fields", held: [credential("ok", { lastValidatedDate: "2026-10-19T09:00:00Z", dependentCount: 1, boundRepositoryCount: 1 }), credential("old-1", { status: "Revoked", dependentCount: 0 })], expected: "connected" },
     { what: "nothing", held: [], expected: "not connected" },
   ])("reads $what as '$expected'", async ({ held, expected }) => {
     renderWith(held);

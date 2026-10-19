@@ -1,5 +1,5 @@
 import { ApiError, fetchJson } from "./request";
-import type { CompleteOAuthResponse, CredentialCapabilitiesResponse, CredentialSummary, CredentialUsage, DeleteProviderInstanceResponse, InitOAuthResponse, ProviderDefaults, ProviderInstanceSummary, ProviderInstanceUsage, ProviderKind, RelinkSuggestion, ReplaceCredentialTokenResponse, RevokeCredentialResponse } from "./types";
+import type { CompleteOAuthResponse, CredentialCapabilitiesResponse, CredentialSummary, CredentialUsage, DeleteProviderInstanceResponse, InitOAuthResponse, ProviderDefaults, ProviderInstanceSummary, ProviderInstanceUsage, ProviderKind, RelinkCredentialBindingsResponse, RelinkSuggestion, RemoveCredentialResponse, ReplaceCredentialTokenResponse, RevokeCredentialResponse } from "./types";
 
 /**
  * Thin typed wrappers around the new OAuth + credential endpoints. They handle:
@@ -108,6 +108,18 @@ export const oauthApi = {
   revokeCredential: (credentialId: string) => fetchJson<RevokeCredentialResponse>(`/api/credentials/${credentialId}/revoke`, {
     method: "POST",
   }),
+
+  // Take a disconnected credential nothing leans on out of the list (soft-delete). The server refuses a live one and one with repositories, hooks or identities left on it — 400 with the reason.
+  removeCredential: (credentialId: string) => fetchJson<RemoveCredentialResponse>(`/api/credentials/${encodeURIComponent(credentialId)}`, {
+    method: "DELETE",
+  }),
+
+  // Move every repository and group hook still bound through a dead credential onto another, in one action.
+  relinkCredentialBindings: (fromCredentialId: string, toCredentialId: string) =>
+    fetchJson<RelinkCredentialBindingsResponse>(`/api/credentials/${encodeURIComponent(fromCredentialId)}/relink-bindings`, {
+      method: "POST",
+      body: JSON.stringify({ toCredentialId }),
+    }),
 
   // Put a new token into an existing credential, in place — it keeps its id, so what is bound through it keeps working. The
   // token must belong to the same provider account (409 credential_account_mismatch otherwise).

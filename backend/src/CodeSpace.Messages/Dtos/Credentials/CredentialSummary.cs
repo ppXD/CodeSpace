@@ -45,4 +45,17 @@ public sealed record CredentialSummary
 
     /// <summary>How many live repositories are bound through the credential — what a person reconnecting, replacing or disconnecting it needs to know is at stake. Zero from a server that predates it.</summary>
     public int BoundRepositoryCount { get; init; }
+
+    /// <summary>
+    /// How many things lean on the credential: the live repositories bound through it, the group hooks registered through it that are still in service, and the act-as identities it backs — the three a Disconnect leaves behind or a
+    /// removal would strand (<c>GET /credentials/{id}/dependents</c> lists them). A disconnected credential with none is history, which a client may
+    /// fold away and offer to remove (<c>RemoveDisconnectedCredentialCommand</c>). Null from a server that predates it, which is also the sign that it has no such removal.
+    /// </summary>
+    public int? DependentCount { get; init; }
+
+    /// <summary>How many of <see cref="DependentCount"/> are group hooks registered through the credential that are still in service — what a dead credential with no repository left on it is still held by, and what <c>relink-bindings</c> moves with the repositories. Zero from a server that predates it.</summary>
+    public int BoundConnectionWebhookCount { get; init; }
+
+    /// <summary>How many of <see cref="DependentCount"/> are live act-as identities the credential backs. <c>relink-bindings</c> does not move them: they end with the credential's own disconnect or are unlinked. Zero from a server that predates it.</summary>
+    public int ActAsIdentityCount { get; init; }
 }

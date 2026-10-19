@@ -116,6 +116,17 @@ public class CredentialsController : ControllerBase
     }
 
     /// <summary>
+    /// Remove a disconnected credential nothing leans on any more: soft-deleted, so it leaves the list. Refused with 400 for one still connected and for one with
+    /// repositories, group hooks or act-as identities left on it. A single route value, so the one-field command is built here (Rule 17).
+    /// </summary>
+    [HttpDelete("{credentialId:guid}")]
+    public async Task<IActionResult> RemoveDisconnected([FromRoute] Guid credentialId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new RemoveDisconnectedCredentialCommand { CredentialId = credentialId }, cancellationToken).ConfigureAwait(false);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Move every repository and group hook still bound through a dead credential onto another credential in one action.
     /// Route's fromCredentialId is authoritative; the body carries <c>toCredentialId</c>.
     /// </summary>

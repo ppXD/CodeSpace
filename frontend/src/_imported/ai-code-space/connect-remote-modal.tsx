@@ -6,11 +6,14 @@ import type { CredentialSummary, ProviderInstanceSummary, ProviderKind } from "@
 import { useAlert, useConfirm } from "@/components/dialog";
 import { IdentityLinkModal } from "@/components/identities/IdentityLinkModal";
 import { ReplaceTokenModal } from "@/components/identities/ReplaceTokenModal";
+import { CredentialRow } from "@/components/providers/CredentialRow";
+import { AuthorizedSince, CredentialDependents, CredentialHealthChip, NoticeLine, type Notice } from "@/components/providers/credentialParts";
+import { EarlierConnections } from "@/components/providers/EarlierConnections";
 import { useAddGroupAccessToken, useAddProviderInstance, useCredentialCapabilities, useCredentials, useDeleteProviderInstance, useProviderDefaults, useProviderInstances, useRevokeCredential, useUpdateProviderInstance } from "@/hooks/use-credentials";
 import { useMe } from "@/hooks/use-me";
 import { TeamPermissions, useTeamPermissions } from "@/hooks/use-team-management";
 import { describeOAuthFlowError, OAuthFlowError, useOAuthFlow } from "@/hooks/use-oauth-flow";
-import { credentialHealthWord, isLiveCredential, isStaticToken } from "@/lib/credentialHealth";
+import { credentialHealthWord, isHistory, isLiveCredential } from "@/lib/credentialHealth";
 import { providerEndpointMoves, providerSecretMustBeReentered, showsMaskedCredentials } from "@/lib/credentialEndpoint";
 import { providerSupportsTeamServiceCredential } from "@/lib/teamCredentials";
 
@@ -81,49 +84,11 @@ function capabilityLabel(key: string): string {
 }
 
 /**
- * What a credential's health says to the person — every state, so no credential reads as healthy by saying nothing: working,
- * a token about to expire (and how long it has), one the provider refused (how to come back), one disconnected, one lent by
- * someone who left the team. The words come from `credentialHealthWord`, which folds `status` in for a server that sends no `health`.
- */
-function CredentialHealthChip({ credential }: { credential: CredentialSummary }) {
-  const word = credentialHealthWord(credential);
-
-  if (word === "rejected") {
-    return (
-      <span className="cn-status cn-status-warn" title={credential.lastError ?? "The provider refused this credential, or its token has expired."}>
-        <Ic.Triangle size={10} /> {isStaticToken(credential) ? "needs a new token" : "needs reconnect"}
-      </span>
-    );
-  }
-
-  if (word === "disconnected") return <span className="cn-status cn-status-revoked" title="This credential was disconnected: its token is gone. Reconnect it to bring it back, or link what leans on it to another credential."><Ic.Triangle size={10} /> disconnected</span>;
-  if (word === "owner_left") return <span className="cn-status cn-status-warn" title="This credential belongs to someone who left the team and is about to be retired. Link what leans on it to a credential that stays."><Ic.Triangle size={10} /> owner left</span>;
-
-  if (word === "expiring") {
-    const days = credential.daysToExpiry ?? 0;
-
-    return (
-      <span className="cn-status cn-status-warn" title="The provider ends this token on its expiry date. Replace it before then, in place, and nothing bound through it stops working.">
-        <Ic.Clock size={10} /> {days === 0 ? "expires today" : `expires in ${days} ${days === 1 ? "day" : "days"}`}
-      </span>
-    );
-  }
-
-  return <span className="cn-status cn-status-active" title="Nothing recorded says this credential will not work."><span className="cn-status-dot" /> active</span>;
-}
-
-/** How many repositories still run through a credential — what reconnecting, replacing or disconnecting it puts at stake. Nothing when none do. */
-function BoundRepositories({ credential }: { credential: CredentialSummary }) {
-  const count = credential.boundRepositoryCount ?? 0;
-
-  return count > 0 ? <span className="cn-cred-since" data-testid="bound-repositories">{count} {count === 1 ? "repository" : "repositories"} bound</span> : null;
-}
-
-/**
  * Every credential is listed, whatever shape it is in — a refused one and a disconnected one are exactly the ones a person came
  * to repair, and hiding them left a dead credential invisible with its repositories still bound to it. (A retired credential is
  * not in the API's list at all; what leans on it is reached through its repositories.) Ones that need a person's attention come
- * first, so the list opens on what is broken.
+ * first, so the list opens on what is broken. The one exception is a disconnected credential nothing leans on any more: history,
+ * folded into a single line (`EarlierConnections`) so the list is not a pile of dead rows.
  */
 function needsAttentionFirst(credentials: CredentialSummary[]): CredentialSummary[] {
   return [...credentials].sort((a, b) => Number(isLiveCredential(a)) - Number(isLiveCredential(b)) || b.createdDate.localeCompare(a.createdDate));
@@ -140,7 +105,10 @@ export function ConnectRemoteModal({ onClose, editInstanceId, suggestedBaseUrl }
   const [teamTokenInstance, setTeamTokenInstance] = useState<ProviderInstanceSummary | null>(null);
   const [providerTab, setProviderTab] = useState<ProviderTab>("personal");
   const [connectingId, setConnectingId] = useState<string | null>(null);
-  const [errorByInstance, setErrorByInstance] = useState<Record<string, string>>({});
+  // What the last action said, keyed by what it was for: a credential's id for a reconnect, a replaced token or a refused move, a provider's id for a plain
+  // connect that failed and for a move that emptied the row it was pressed on.
+  const [notices, setNotices] = useState<Record<string, Notice | undefined>>({});
+  const setNotice = (key: string, notice: Notice | undefined) => setNotices(prev => ({ ...prev, [key]: notice }));
 
   const me = useMe();
   const credentials = useCredentials();
@@ -206,19 +174,24 @@ export function ConnectRemoteModal({ onClose, editInstanceId, suggestedBaseUrl }
   // repositories bound through it keep working. Without it this is a plain connect, which creates a new credential.
   const connect = async (instance: ProviderInstanceSummary, reauthorizing?: CredentialSummary) => {
     setConnectingId(instance.id);
-    setErrorByInstance(prev => ({ ...prev, [instance.id]: "" }));
+    setNotice(instance.id, undefined);
+
+    if (reauthorizing) setNotice(reauthorizing.id, undefined);
 
     try {
       const displayName = reauthorizing?.displayName ?? `${me.data?.name ?? "user"}'s ${instance.displayName}`;
       await runOAuth({ providerInstanceId: instance.id, displayName, replaceCredentialId: reauthorizing?.id });
-      // Hook invalidates ['credentials']; row re-renders with "Connected" automatically.
+      // Hook invalidates ['credentials']; row re-renders with "Connected" automatically. A re-authorization changes nothing a person can see by itself
+      // (the same row, the same id), so it says it landed: this is what "Reconnect does nothing" was.
+      if (reauthorizing) setNotice(reauthorizing.id, { tone: "ok", text: `Reconnected — ${PROVIDER_THEME[instance.provider].label} authorized ${reauthorizing.displayName} just now` });
     } catch (err) {
       const message =
         err instanceof OAuthFlowError ? describeOAuthFlowError(err)
           : err instanceof ApiError ? err.message
             : err instanceof Error ? err.message
               : "Authorization failed.";
-      setErrorByInstance(prev => ({ ...prev, [instance.id]: message }));
+      // A refused re-authorization is said on the credential it was for, where the person pressed it; a failed new connect has no row, so it is said on the provider.
+      setNotice(reauthorizing?.id ?? instance.id, { tone: "err", text: message });
     } finally {
       setConnectingId(null);
     }
@@ -257,6 +230,8 @@ export function ConnectRemoteModal({ onClose, editInstanceId, suggestedBaseUrl }
       destructive: true,
     });
     if (!ok) return;
+    // What the row said about an earlier action (a "Reconnected" confirmation) is not true of it once it is disconnected.
+    setNotice(credential.id, undefined);
     revoke.mutate(credential.id);
   };
 
@@ -276,7 +251,14 @@ export function ConnectRemoteModal({ onClose, editInstanceId, suggestedBaseUrl }
 
     const ok = await confirm({ title: "Revoke this team credential?", message: usageMsg, confirmLabel: "Revoke", destructive: true });
     if (!ok) return;
+    setNotice(credential.id, undefined);
     revoke.mutate(credential.id);
+  };
+
+  // Opening Replace token for a credential starts a new action on it: the confirmation of the last one no longer describes what is about to happen.
+  const replaceToken = (credential: CredentialSummary, instance: ProviderInstanceSummary) => {
+    setNotice(credential.id, undefined);
+    setReplacing({ credential, instance });
   };
 
   return createPortal(
@@ -297,10 +279,11 @@ export function ConnectRemoteModal({ onClose, editInstanceId, suggestedBaseUrl }
             onTabChange={setProviderTab}
             connectingId={connectingId}
             revokingId={revoke.isPending ? revoke.variables ?? null : null}
-            errors={errorByInstance}
+            notices={notices}
+            onNotice={setNotice}
             onConnect={connect}
             onReconnect={connect}
-            onReplaceToken={(credential, instance) => setReplacing({ credential, instance })}
+            onReplaceToken={replaceToken}
             onConnectPat={connectPat}
             onDisconnect={disconnect}
             onAddProvider={() => setStep("addProvider")}
@@ -351,6 +334,7 @@ export function ConnectRemoteModal({ onClose, editInstanceId, suggestedBaseUrl }
           credential={replacing.credential}
           providerLabel={`${PROVIDER_THEME[replacing.instance.provider].label} · ${replacing.instance.displayName}`}
           onClose={() => setReplacing(null)}
+          onReplaced={() => setNotice(replacing.credential.id, { tone: "ok", text: `Token replaced — ${PROVIDER_THEME[replacing.instance.provider].label} authorized ${replacing.credential.displayName} just now` })}
         />
       )}
     </>,
@@ -370,7 +354,8 @@ interface ProvidersStepProps {
   onTabChange: (tab: ProviderTab) => void;
   connectingId: string | null;
   revokingId: string | null;
-  errors: Record<string, string>;
+  notices: Record<string, Notice | undefined>;
+  onNotice: (key: string, notice: Notice | undefined) => void;
   onConnect: (instance: ProviderInstanceSummary) => void;
   onReconnect: (instance: ProviderInstanceSummary, credential: CredentialSummary) => void;
   onReplaceToken: (credential: CredentialSummary, instance: ProviderInstanceSummary) => void;
@@ -383,7 +368,7 @@ interface ProvidersStepProps {
   onClose: () => void;
 }
 
-function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServiceCreds, tab, onTabChange, connectingId, revokingId, errors, onConnect, onReconnect, onReplaceToken, onConnectPat, onDisconnect, onAddProvider, onEditProvider, onAddTeamToken, onRevokeTeamCred, onClose }: ProvidersStepProps) {
+function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServiceCreds, tab, onTabChange, connectingId, revokingId, notices, onNotice, onConnect, onReconnect, onReplaceToken, onConnectPat, onDisconnect, onAddProvider, onEditProvider, onAddTeamToken, onRevokeTeamCred, onClose }: ProvidersStepProps) {
   // Absent rather than present-and-refusing. The form this opens asks for an OAuth client secret
   // before it can be submitted, so a member who cannot add a provider would type one into a request
   // that was never going to land. Asked as a permission — the server's matrix stays the only copy of
@@ -395,6 +380,8 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
   // caller's own credentials, "Use a token", which links a personal token, and Reconnect, which re-authorizes one of those
   // same credentials in place: all stay theirs on membership alone (the server's init passes a credential's own person).
   const mayManageCredentials = can(TeamPermissions.CredentialsManage);
+  // Moving every repository off a dead credential in one action is the relink-bindings door, which holds both bars (the command's and the service's).
+  const mayMoveBindings = can(TeamPermissions.ReposManage) && mayManageCredentials;
   return (
     <>
       <div className="mdl-head">
@@ -450,7 +437,9 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
                     myCreds={myCredsByInstance.get(instance.id) ?? []}
                     isConnecting={connectingId === instance.id}
                     revokingId={revokingId}
-                    errorMsg={errors[instance.id]}
+                    notices={notices}
+                    mayMove={mayMoveBindings}
+                    onNotice={onNotice}
                     onConnect={mayManageCredentials ? onConnect : null}
                     onReconnect={onReconnect}
                     onReplaceToken={onReplaceToken}
@@ -473,6 +462,9 @@ function ProvidersStep({ providers, loading, error, myCredsByInstance, teamServi
                       theme={PROVIDER_THEME[instance.provider]}
                       creds={teamServiceCreds.filter(c => c.providerInstanceId === instance.id)}
                       revokingId={revokingId}
+                      notices={notices}
+                      onNotice={onNotice}
+                      mayRemove={mayManageCredentials}
                       onAdd={mayManageCredentials ? onAddTeamToken : null}
                       onRevoke={mayManageCredentials ? onRevokeTeamCred : null}
                       onReplaceToken={mayManageCredentials ? onReplaceToken : null}
@@ -504,7 +496,10 @@ interface ProviderRowProps {
   myCreds: CredentialSummary[];
   isConnecting: boolean;
   revokingId: string | null;
-  errorMsg: string | undefined;
+  notices: Record<string, Notice | undefined>;
+  /** Whether the caller may move a dead credential's repositories in one action — see CredentialRow. */
+  mayMove: boolean;
+  onNotice: (key: string, notice: Notice | undefined) => void;
   /** Null when the caller may not start an OAuth connect — the button is absent rather than present-and-refused. */
   onConnect: ((instance: ProviderInstanceSummary) => void) | null;
   /** Reconnect re-authorizes one of the caller's own credentials in place, so it needs no more than membership — the row lists only theirs. */
@@ -516,7 +511,7 @@ interface ProviderRowProps {
   onEdit: ((instance: ProviderInstanceSummary) => void) | null;
 }
 
-function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, errorMsg, onConnect, onReconnect, onReplaceToken, onConnectPat, onDisconnect, onEdit }: ProviderRowProps) {
+function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, notices, mayMove, onNotice, onConnect, onReconnect, onReplaceToken, onConnectPat, onDisconnect, onEdit }: ProviderRowProps) {
   // "Connected" is about a credential that works; a disconnected one is listed (so it can be reconnected) but is not a connection.
   const connected = myCreds.some(isLiveCredential);
   // A refused credential is brought back in place (Reconnect, Replace token), so it counts as the connection of its kind — a second
@@ -524,6 +519,9 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
   const hasOAuth = myCreds.some(c => c.authType === "OAuth" && isInService(c));
   const hasPat = myCreds.some(c => c.authType === "Pat" && isInService(c));
   const listed = myCreds.length > 0;
+  // Disconnected and leaned on by nothing: history, folded into one line. The rest are rows, the ones that need a person first.
+  const history = myCreds.filter(isHistory);
+  const rows = myCreds.filter(c => !isHistory(c));
 
   // Connect affordances for the methods NOT yet linked. OAuth needs a configured app; a personal
   // token is always available; a provider with no OAuth app instead offers "Configure OAuth".
@@ -560,37 +558,28 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
         {onEdit && <ProviderRowMenu instance={instance} hasCredential={listed} onEdit={onEdit} />}
       </div>
 
-      {/* What you HAVE — one uniform row per credential, labelled by method, each independently repairable and revocable. */}
+      {/* What you HAVE — one uniform row per credential, labelled by method, each independently repairable and revocable. The dead ones nothing leans on are one folded line. */}
       {listed && (
         <div className="cn-creds">
-          {myCreds.map(c => (
-            <div key={c.id} className="cn-cred">
-              <div className="cn-cred-main">
-                <span className="cn-cred-method">
-                  {c.authType === "OAuth" ? <><Ic.Link size={12} /> OAuth</> : <><Ic.Key size={12} /> Token</>}
-                </span>
-                <span className="cn-cred-since">connected {formatRelative(c.createdDate)}</span>
-                <CredentialHealthChip credential={c} />
-                <BoundRepositories credential={c} />
-                {/* Sign in again to the SAME credential (an OAuth sign-in), or paste a new token into it (a token): either way
-                    it keeps its id, so the repositories bound through it keep working. */}
-                {c.authType === "OAuth" && instance.oauthEnabled && (
-                  <button className="btn btn-ghost cn-cred-x" onClick={() => onReconnect(instance, c)} disabled={isConnecting}>
-                    {isConnecting ? <><Ic.Clock size={13} /> …</> : "Reconnect"}
-                  </button>
-                )}
-                {c.authType !== "OAuth" && (
-                  <button className="btn btn-ghost cn-cred-x" onClick={() => onReplaceToken(c, instance)}>Replace token</button>
-                )}
-                {credentialHealthWord(c) !== "disconnected" && (
-                  <button className="btn btn-ghost cn-cred-x" onClick={() => onDisconnect(c)} disabled={revokingId === c.id}>
-                    {revokingId === c.id ? <><Ic.Clock size={13} /> …</> : "Disconnect"}
-                  </button>
-                )}
-              </div>
+          {rows.map(c => (
+            <CredentialRow
+              key={c.id}
+              credential={c}
+              instance={instance}
+              notice={notices[c.id]}
+              onNotice={(notice) => onNotice(c.id, notice)}
+              onMoved={(text) => onNotice(instance.id, { tone: "ok", text })}
+              isConnecting={isConnecting}
+              isRevoking={revokingId === c.id}
+              mayMove={mayMove}
+              onReconnect={() => onReconnect(instance, c)}
+              onReplaceToken={() => onReplaceToken(c, instance)}
+              onDisconnect={() => onDisconnect(c)}
+            >
               <CredentialCapabilityWarnings credentialId={c.id} />
-            </div>
+            </CredentialRow>
           ))}
+          {history.length > 0 && <EarlierConnections credentials={history} mayRemove notices={notices} onNotice={onNotice} onReconnect={instance.oauthEnabled ? (c) => onReconnect(instance, c) : null} isConnecting={isConnecting} />}
         </div>
       )}
 
@@ -618,7 +607,7 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
         </div>
       )}
 
-      {errorMsg && <div className="cn-row-err">{errorMsg}</div>}
+      {notices[instance.id] && <div className="cn-creds"><NoticeLine notice={notices[instance.id]!} /></div>}
     </div>
   );
 }
@@ -630,11 +619,15 @@ function ProviderRow({ instance, theme, myCreds, isConnecting, revokingId, error
  * can mint a group token in place ("+ Add team token"); others show why they can't yet (GitHub
  * needs an App installation — not built). Each existing token carries its own Revoke.
  */
-function TeamProviderGroup({ instance, theme, creds, revokingId, onAdd, onRevoke, onReplaceToken }: {
+function TeamProviderGroup({ instance, theme, creds, revokingId, notices, onNotice, mayRemove, onAdd, onRevoke, onReplaceToken }: {
   instance: ProviderInstanceSummary;
   theme: { initials: string; label: string };
   creds: CredentialSummary[];
   revokingId: string | null;
+  notices: Record<string, Notice | undefined>;
+  onNotice: (key: string, notice: Notice | undefined) => void;
+  /** False when the caller may not remove a team token's dead row — the button is absent rather than present-and-refused. */
+  mayRemove: boolean;
   /** Null when the caller may not add team tokens — the button is absent rather than present-and-refused. */
   onAdd: ((instance: ProviderInstanceSummary) => void) | null;
   /** Null when the caller may not revoke team tokens — the button is absent rather than present-and-refused. */
@@ -643,6 +636,8 @@ function TeamProviderGroup({ instance, theme, creds, revokingId, onAdd, onRevoke
   onReplaceToken: ((credential: CredentialSummary, instance: ProviderInstanceSummary) => void) | null;
 }) {
   const supportsTeamToken = providerSupportsTeamServiceCredential(instance.provider);
+  const history = creds.filter(isHistory);
+  const rows = creds.filter(c => !isHistory(c));
 
   return (
     <div className="cn-tg">
@@ -654,22 +649,27 @@ function TeamProviderGroup({ instance, theme, creds, revokingId, onAdd, onRevoke
       {/* Tokens + add/coming-soon, indented to line up under the provider name. A provider can
           hold many team tokens (different groups, rotation) — they stack here, each revocable. */}
       <div className="cn-tg-items">
-        {creds.map(c => (
-          <div key={c.id} className="cn-tg-cred">
-            <Ic.Key size={12} />
-            <span className="cn-tg-cred-name" title={c.displayName}>{c.displayName}</span>
-            <CredentialHealthChip credential={c} />
-            <BoundRepositories credential={c} />
-            {onReplaceToken && (
-              <button className="btn btn-ghost" onClick={() => onReplaceToken(c, instance)}>Replace token</button>
-            )}
-            {onRevoke && credentialHealthWord(c) !== "disconnected" && (
-              <button className="btn btn-ghost" onClick={() => onRevoke(c)} disabled={revokingId === c.id}>
-                {revokingId === c.id ? "Revoking…" : "Revoke"}
-              </button>
-            )}
+        {rows.map(c => (
+          <div key={c.id}>
+            <div className="cn-tg-cred">
+              <Ic.Key size={12} />
+              <span className="cn-tg-cred-name" title={c.displayName}>{c.displayName}</span>
+              <AuthorizedSince credential={c} />
+              <CredentialHealthChip credential={c} />
+              <CredentialDependents credential={c} />
+              {onReplaceToken && (
+                <button className="btn btn-ghost" onClick={() => onReplaceToken(c, instance)}>Replace token</button>
+              )}
+              {onRevoke && credentialHealthWord(c) !== "disconnected" && (
+                <button className="btn btn-ghost" onClick={() => onRevoke(c)} disabled={revokingId === c.id}>
+                  {revokingId === c.id ? "Revoking…" : "Revoke"}
+                </button>
+              )}
+            </div>
+            {notices[c.id] && <NoticeLine notice={notices[c.id]!} />}
           </div>
         ))}
+        {history.length > 0 && <EarlierConnections credentials={history} mayRemove={mayRemove} notices={notices} onNotice={onNotice} onReconnect={null} isConnecting={false} />}
 
         {supportsTeamToken ? (
           onAdd && <button className="btn btn-ghost cn-tg-add" onClick={() => onAdd(instance)}><Ic.Plus size={13} /> Add team token</button>
@@ -1381,16 +1381,6 @@ function buildRemoveProviderMessage(repoCount: number, credCount: number): strin
   const r = repoCount === 1 ? "repository" : "repositories";
   const credPart = credCount > 0 ? ` ${credCount} connected ${credCount === 1 ? "credential" : "credentials"} will be revoked.` : "";
   return `${repoCount} ${r} bound to this provider will be unbound (remote webhooks deleted best-effort).${credPart} This can't be undone.`;
-}
-
-function formatRelative(iso: string) {
-  const then = new Date(iso).getTime();
-  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
-
-  if (seconds < 60) return "just now";
-  if (seconds < 3600) return `${Math.floor(seconds / 60)} min ago`;
-  if (seconds < 86400) return `${Math.floor(seconds / 3600)} hr ago`;
-  return `${Math.floor(seconds / 86400)} d ago`;
 }
 
 /**

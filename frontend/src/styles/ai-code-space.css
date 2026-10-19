@@ -1689,6 +1689,19 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .cn-cred-since { font-size: 11.5px; color: var(--muted); white-space: nowrap; }
 .cn-cred-x { flex-shrink: 0; height: 28px; padding: 0 10px; font-size: 12px; }
 .cn-cred-main .cn-cred-x:first-of-type { margin-left: auto; }
+/* The ⋯ that holds a working sign-in's Re-authorize: the action buttons' height, a glyph's width. */
+.cn-cred-menu { padding: 0 8px; }
+/* What a finished action says in its row — the warm "good" green the room uses for a repaired connection. Refusals use .cn-row-err. */
+.cn-note-ok { display: flex; align-items: center; gap: 6px; padding: 5px 9px; border: 1px solid #C2E0CF; border-radius: 6px; background: #E9F4EE; color: #1F6B3F; font-size: 12px; line-height: 1.4; }
+.cn-note-ok svg { flex-shrink: 0; }
+/* Dead rows nothing leans on, folded into one quiet line (EarlierConnections) — muted, small, never louder than the credentials that work. */
+.cn-earlier { display: flex; flex-direction: column; gap: 6px; }
+.cn-earlier-toggle { display: inline-flex; align-items: center; gap: 5px; align-self: flex-start; padding: 2px 4px; border: 0; background: transparent; font-size: 11.5px; color: var(--muted); cursor: pointer; }
+.cn-earlier-toggle:hover { color: var(--ink-2); }
+.cn-earlier-toggle svg { transition: transform .12s; }
+.cn-earlier-toggle[aria-expanded="true"] svg { transform: rotate(90deg); }
+.cn-earlier-list { display: flex; flex-direction: column; gap: 4px; }
+.cn-earlier-row { display: flex; flex-direction: column; gap: 5px; padding: 4px 10px; border: 1px dashed var(--line); border-radius: 8px; }
 /* Capability warnings — a wrapping line listing what this token CAN'T do. A leading amber label
    ("Missing access") explains the chips; the row wraps freely so two or six warnings both fit
    without overflowing the credential card. */
@@ -1723,9 +1736,9 @@ html, body, * { scrollbar-width: thin; scrollbar-color: rgba(0, 0, 0, .16) trans
 .cn-tg-items { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; margin-left: 46px; }
 .cn-tg-note { font-size: 12px; color: var(--muted); line-height: 1.45; }
 .cn-tg-add { align-self: flex-start; }
-.cn-tg-cred { display: flex; align-items: center; gap: 8px; padding: 6px 8px 6px 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
+.cn-tg-cred { display: flex; align-items: center; flex-wrap: wrap; gap: 6px 8px; padding: 6px 8px 6px 10px; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; }
 .cn-tg-cred svg { color: var(--muted); flex-shrink: 0; }
-.cn-tg-cred-name { flex: 1; min-width: 0; font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cn-tg-cred-name { flex: 1 1 150px; min-width: 0; font-size: 12.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .cn-tg-cred .btn { height: 26px; padding: 0 10px; font-size: 12px; }
 .cn-pv-list { display: flex; flex-direction: column; gap: 10px; }
 .cn-pv-card { display: flex; align-items: center; gap: 14px; padding: 14px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); cursor: pointer; transition: border-color .12s, background .12s; }

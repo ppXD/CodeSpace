@@ -283,6 +283,36 @@ export function useReplaceCredentialToken() {
 }
 
 /**
+ * Remove a disconnected credential nothing leans on: it leaves the list, so refresh it. A refusal refreshes it too — what the server refused over (the row was
+ * reconnected, something now leans on it) is exactly what the list on screen no longer says.
+ */
+export function useRemoveCredential() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (credentialId: string) => oauthApi.removeCredential(credentialId),
+    onSettled: () => queryClient.invalidateQueries({ queryKey: ["credentials"] }),
+  });
+}
+
+/**
+ * Move every repository and group hook bound through a dead credential onto another credential. What it moved shows in the credential list (counts), the repository
+ * rows (their connection issue goes), a run page's remedy card and the suggestions that offered it, so each is read again.
+ */
+export function useRelinkCredentialBindings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ fromCredentialId, toCredentialId }: { fromCredentialId: string; toCredentialId: string }) => oauthApi.relinkCredentialBindings(fromCredentialId, toCredentialId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["credentials"] });
+      queryClient.invalidateQueries({ queryKey: ["repositories"] });
+      queryClient.invalidateQueries({ queryKey: ["relink-suggestions"] });
+      queryClient.invalidateQueries({ queryKey: ["run-remedy"] });
+      queryClient.invalidateQueries({ queryKey: ["repository"] });
+    },
+  });
+}
+
+/**
  * The credentials the caller could move a credential's bindings onto, best first. Asked only when a fix is being picked
  * (`enabled`), never on page load: it is a read per credential.
  */

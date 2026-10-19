@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { ApiError } from "@/api/oauth";
 
-import { initAtFirstAcceptedReturnUrl, oauthReturnUrlsFor } from "./use-oauth-flow";
+import { describeOAuthFlowError, initAtFirstAcceptedReturnUrl, OAuthFlowError, oauthReturnUrlsFor } from "./use-oauth-flow";
 
 /**
  * Where a connect brings its popup back to. A connect whose callback cannot find the browser's binding cookie — started
@@ -101,4 +101,25 @@ describe("initAtFirstAcceptedReturnUrl", () => {
       return JSON.parse((init as RequestInit).body as string).returnUrl;
     });
   }
+});
+
+/**
+ * What a refused connect says. The callback hands the opener a short code (`error`) and, when it has one, the words for a person
+ * (`description`): a reconnect refused because it signed in as a different account is `credential_account_mismatch` plus a sentence
+ * saying so and what to do, and the code alone tells a person nothing.
+ */
+describe("describeOAuthFlowError", () => {
+  it("says the callback's own sentence when it gave one, not only its code", () => {
+    const refused = new OAuthFlowError("provider_error", "That sign-in is a different GitLab account than the one this credential was connected as.", "credential_account_mismatch");
+
+    expect(describeOAuthFlowError(refused)).toBe("That sign-in is a different GitLab account than the one this credential was connected as.");
+  });
+
+  it("falls back to naming the code when the callback gave nothing more", () => {
+    expect(describeOAuthFlowError(new OAuthFlowError("provider_error", "access_denied", "access_denied"))).toBe("Provider rejected: access_denied");
+  });
+
+  it("says the message of a refusal that carried no code at all", () => {
+    expect(describeOAuthFlowError(new OAuthFlowError("provider_error", "Authorization failed"))).toBe("Authorization failed");
+  });
 });

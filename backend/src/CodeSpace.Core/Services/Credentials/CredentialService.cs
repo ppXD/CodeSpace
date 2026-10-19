@@ -35,11 +35,12 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
     private readonly ICredentialRevocationService _revocation;
     private readonly ICredentialHealthService _health;
     private readonly ICredentialReauthorizer _reauthorizer;
+    private readonly ICredentialRelinkService _relink;
     private readonly ITeamMemberService _members;
     private readonly TeamMembershipResolver _membership;
     private readonly ILogger<CredentialService> _logger;
 
-    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthGrantRevoker grants, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ICredentialHealthService health, ICredentialReauthorizer reauthorizer, ITeamMemberService members, TeamMembershipResolver membership, ILogger<CredentialService> logger)
+    public CredentialService(CodeSpaceDbContext db, ICurrentTeam currentTeam, ICurrentUser currentUser, IPayloadEncryptor encryptor, ICredentialPayloadSerializer serializer, IOAuthGrantRevoker grants, IProviderRegistry registry, IProviderModuleCatalog modules, IScopeChecker scopeChecker, ICredentialSuccessionService succession, ICredentialRevocationService revocation, ICredentialHealthService health, ICredentialReauthorizer reauthorizer, ICredentialRelinkService relink, ITeamMemberService members, TeamMembershipResolver membership, ILogger<CredentialService> logger)
     {
         _db = db;
         _currentTeam = currentTeam;
@@ -54,6 +55,7 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
         _revocation = revocation;
         _health = health;
         _reauthorizer = reauthorizer;
+        _relink = relink;
         _members = members;
         _membership = membership;
         _logger = logger;
@@ -105,13 +107,18 @@ public sealed partial class CredentialService : ICredentialService, IScopedDepen
         var ids = summaries.Select(s => s.Id).ToList();
         var left = await DepartedCredentials.Of(_db).AsNoTracking().Where(c => c.TeamId == teamId && ids.Contains(c.Id)).Select(c => c.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
         var bound = await CountBoundRepositoriesAsync(teamId, ids, cancellationToken).ConfigureAwait(false);
+        var hooks = await CountInServiceConnectionWebhooksAsync(ids, cancellationToken).ConfigureAwait(false);
+        var identities = await CountLiveIdentitiesAsync(ids, cancellationToken).ConfigureAwait(false);
         var now = DateTimeOffset.UtcNow;
 
         return summaries.Select(s => s with
         {
             Health = CredentialHealthDerivation.Derive(s.Status, s.AuthType, s.ExpiresDate, left.Contains(s.Id), now),
             DaysToExpiry = CredentialHealthDerivation.DaysToExpiry(s.AuthType, s.ExpiresDate, now),
-            BoundRepositoryCount = bound.GetValueOrDefault(s.Id)
+            BoundRepositoryCount = bound.GetValueOrDefault(s.Id),
+            BoundConnectionWebhookCount = hooks.GetValueOrDefault(s.Id),
+            ActAsIdentityCount = identities.GetValueOrDefault(s.Id),
+            DependentCount = bound.GetValueOrDefault(s.Id) + hooks.GetValueOrDefault(s.Id) + identities.GetValueOrDefault(s.Id)
         }).ToList();
     }
 
