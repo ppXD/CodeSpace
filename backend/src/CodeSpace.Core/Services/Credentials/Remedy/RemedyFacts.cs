@@ -1,3 +1,5 @@
+using CodeSpace.Messages.Enums;
+
 namespace CodeSpace.Core.Services.Credentials.Remedy;
 
 /// <summary>
@@ -17,6 +19,12 @@ public sealed record RemedyFacts
 
     /// <summary>The credential is a person's own and the asker is that person.</summary>
     public bool CallerOwnsCredential { get; init; }
+
+    /// <summary>The role the credential's person stands as in the team, for wording who outranks them; null for a team's own credential and for a person who left.</summary>
+    public TeamRole? OwnerRole { get; init; }
+
+    /// <summary>The credential is a person's own and that person no longer stands in the team: it is waiting to be retired, and nobody can put it right in place — only move what leans on it.</summary>
+    public bool CredentialOwnerLeft { get; init; }
 
     /// <summary>Soft-deleted: it cannot be reconnected, only replaced by moving what leans on it.</summary>
     public bool CredentialRetired { get; init; }

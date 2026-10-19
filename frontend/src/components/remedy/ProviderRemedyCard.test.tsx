@@ -141,12 +141,12 @@ describe("ProviderRemedyCard — a failure that is nobody's credential to repair
 describe("ProviderRemedyCard — who may press what", () => {
   const memberView = remedy({
     actions: [
-      action("reconnect", { enabled: false, disabledReason: "Needs the Admin or Owner role." }),
+      action("reconnect", { enabled: false, disabledReason: "Only Nacho, or a team Admin, can do this." }),
       action("relink", { enabled: false, disabledReason: "Needs the Admin or Owner role." }),
       action("open_providers"),
       action("rerun", { enabled: false, disabledReason: "Fix the connection first, then run it again." }),
     ],
-    askPeople: [{ userId: "u3", name: "Olive", role: "Owner" }, { userId: "u2", name: "Ada", role: "Admin" }],
+    askPeople: [{ userId: "u1", name: "Nacho", role: "Owner of the credential" }, { userId: "u3", name: "Olive", role: "Owner" }, { userId: "u2", name: "Ada", role: "Admin" }],
   });
 
   it("gives a Member no dead buttons: what is not theirs is a line saying which fix, what it takes and who to ask", () => {
@@ -155,9 +155,28 @@ describe("ProviderRemedyCard — who may press what", () => {
     expect(screen.getAllByRole("button").map((b) => b.textContent?.trim())).toEqual(["Open Providers"]);   // no disabled Reconnect, Re-link or Re-run
 
     const ask = screen.getByRole("note");
-    expect(ask.textContent).toContain("Reconnect GitLab — Needs the Admin or Owner role.");
+    expect(ask.textContent).toContain("Reconnect GitLab — Only Nacho, or a team Admin, can do this.");
     expect(ask.textContent).toContain("Re-link repository — Needs the Admin or Owner role.");
-    expect(ask.textContent).toContain("Ask Olive (Owner) or Ada (Admin).");
+    expect(ask.textContent).toContain("Ask Nacho (Owner of the credential), Olive (Owner) or Ada (Admin).");
+  });
+
+  it("tells an Admin an Owner's sign-in is the Owner's alone, keeps their re-link, and names the Owner — not a peer who could not do it either", () => {
+    // An Admin holds credentials.manage and still cannot sign in as an Owner; what the server sends is shown as sent.
+    renderCard(remedy({
+      actions: [
+        action("reconnect", { enabled: false, disabledReason: "Only Nacho can reconnect their own sign-in." }),
+        action("relink"),
+        action("open_providers"),
+        action("rerun", { enabled: false, disabledReason: "Fix the connection first, then run it again." }),
+      ],
+      askPeople: [{ userId: "u9", name: "Nacho", role: "Owner of the credential" }],
+    }));
+
+    expect(screen.getAllByRole("button").filter((b) => !(b as HTMLButtonElement).disabled).map((b) => b.textContent?.trim())).toEqual(["Re-link repository", "Open Providers"]);
+
+    const ask = screen.getByRole("note");
+    expect(ask.textContent).toContain("Reconnect GitLab — Only Nacho can reconnect their own sign-in.");
+    expect(ask.textContent).toContain("Ask Nacho (Owner of the credential).");
   });
 
   it("says nothing about who to ask when every fix is the caller's", () => {
@@ -176,7 +195,7 @@ describe("ProviderRemedyCard — who may press what", () => {
 describe("ProviderRemedyCard — the same failure for an Owner, a Member and a Viewer", () => {
   const forRole = (reconnect: boolean, relink: boolean, askPeople: ProviderRemedy["askPeople"]) => remedy({
     actions: [
-      action("reconnect", { enabled: reconnect, disabledReason: reconnect ? null : "Needs the Admin or Owner role." }),
+      action("reconnect", { enabled: reconnect, disabledReason: reconnect ? null : "Only Nacho, or a team Admin, can do this." }),
       action("relink", { enabled: relink, disabledReason: relink ? null : "Needs the Admin or Owner role." }),
       action("open_providers"),
     ],
@@ -188,6 +207,7 @@ describe("ProviderRemedyCard — the same failure for an Owner, a Member and a V
     ["Owner", forRole(true, true, []), ["Reconnect GitLab", "Re-link repository", "Open Providers"], false],
     ["Member", forRole(false, false, who), ["Open Providers"], true],
     ["Viewer", forRole(false, false, who), ["Open Providers"], true],
+    ["Member whose credential it is", forRole(true, false, who), ["Reconnect GitLab", "Open Providers"], true],   // the credential's own person reconnects it; re-linking the repository is still not theirs
   ] as const)("%s: presses only what is enabled, and is told who to ask when something is not theirs", (_role, r, enabledButtons, asked) => {
     renderCard(r);
 

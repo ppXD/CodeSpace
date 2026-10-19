@@ -19,11 +19,12 @@ export function ConnectionIssueChip({ issue }: { issue: ConnectionIssue }) {
 }
 
 /**
- * The way out, on the repository itself: Replace token for a pasted token (the credential's own person, or anyone who manages
- * credentials), Reconnect for a sign-in (only who manages credentials: starting an OAuth connect takes `credentials.manage` whoever
- * owns the row), and Re-link to another credential (when the caller manages repositories). The same fixes the run page offers, done
- * by the same code. The server stays the authority: these only decide which buttons are worth showing, so a person is never offered
- * one that could only answer 403.
+ * The way out, on the repository itself: Replace token for a pasted token and Reconnect for a sign-in — the credential's own
+ * person's (on membership alone) or anyone's who manages credentials, and for a sign-in only over someone the caller reaches: an Admin
+ * cannot sign in as another Admin or an Owner — and Re-link to another credential (when the caller manages repositories).
+ * The same fixes the run page offers, done by the same code. The server stays the authority: it says whether the caller may repair this
+ * credential (`callerMayRepair`, decided by the rules the two endpoints apply), so a person is never offered a button that could only answer
+ * 403. A server that predates the flag leaves the role to say: the credential's own person, or `credentials.manage`.
  *
  * It stops clicks reaching the row it sits in: a repository row opens the repository, and a dialog's portal still bubbles React events.
  */
@@ -35,7 +36,7 @@ export function RepositoryConnectionFix({ repository, issue, onConnectNew }: { r
 
   const mayRelink = can(TeamPermissions.ReposManage);
   const ownsIt = credential?.ownership === "Personal" && credential.ownerUserId != null && credential.ownerUserId === me.data?.id;
-  const mayRepair = credential != null && (isStaticToken(credential) ? ownsIt || can(TeamPermissions.CredentialsManage) : can(TeamPermissions.CredentialsManage));
+  const mayRepair = credential != null && (credential.callerMayRepair ?? (ownsIt || can(TeamPermissions.CredentialsManage)));
   // A credential that merely looks fine (the repository is in Error for another reason) or whose person left is moved off, not repaired.
   const repairable = credential != null && (issue.kind === "rejected" || issue.kind === "disconnected");
 

@@ -42,6 +42,9 @@ public class MediatorModule : Autofac.Module
         //                             credential passes on membership, anyone else needs credentials.manage
         //   CredentialSpend        — the same shape for presenting a credential to its provider: the owner of a
         //                             Personal credential passes on membership, anyone else needs repos.manage
+        //   CredentialReauthorization — inside TeamMembership (whose marker it extends): a connect that names a credential
+        //                             is held to the credential's bar (its owner on membership, anyone else
+        //                             credentials.manage); one that names none mints a credential and needs credentials.manage
         //   BotVisibility          — opts the request into seeing bot users (IBotInclusive); default excludes
         //   Transactional          — innermost of these, wraps DB writes only after auth has passed
         //
@@ -59,6 +62,7 @@ public class MediatorModule : Autofac.Module
         builder.RegisterGeneric(typeof(CredentialAccessAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(CredentialManagementAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(CredentialSpendAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
+        builder.RegisterGeneric(typeof(CredentialReauthorizationAuthorizationBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(BotVisibilityBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
         builder.RegisterGeneric(typeof(TransactionalBehavior<,>)).As(typeof(IPipelineBehavior<,>)).InstancePerLifetimeScope();
 

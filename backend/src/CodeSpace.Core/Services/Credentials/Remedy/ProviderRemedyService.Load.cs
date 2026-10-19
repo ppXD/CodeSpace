@@ -1,4 +1,5 @@
 using System.Linq.Expressions;
+using CodeSpace.Core.Authorization;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Messages.Authorization;
 using CodeSpace.Messages.Enums;
@@ -93,6 +94,20 @@ public sealed partial class ProviderRemedyService
     {
         _ctx.Role = await _membership.ResolveRoleAsync(_ctx.TeamId, cancellationToken).ConfigureAwait(false);
         _ctx.CallerId = _currentUser.Id;
+    }
+
+    /// <summary>
+    /// Who the credential belongs to and the role they stand as, read the way the service that enforces a reconnect's reach reads it
+    /// (<see cref="TeamStanding.RolesActedOnAsync"/>) — so a person who has left, or one an Admin cannot reach, is known here before the button is, not after the endpoint refuses.
+    /// </summary>
+    private async Task LoadPersonAsync(CancellationToken cancellationToken)
+    {
+        if (_ctx.Credential is not { } credential) return;
+
+        var owners = credential.OwnerUserId is { } owner ? new[] { owner } : Array.Empty<Guid>();
+        var standing = await TeamStanding.RolesActedOnAsync(_db, _ctx.TeamId, owners, cancellationToken).ConfigureAwait(false);
+
+        _ctx.Person = CredentialPerson.Of(credential.Ownership, credential.OwnerUserId, _ctx.CallerId, standing);
     }
 
     private async Task<IReadOnlyList<(Guid UserId, string Name, TeamRole Role)>> ReadTeamAdministratorsAsync(CancellationToken cancellationToken)

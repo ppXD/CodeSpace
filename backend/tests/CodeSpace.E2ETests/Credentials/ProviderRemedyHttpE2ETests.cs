@@ -22,7 +22,7 @@ namespace CodeSpace.E2ETests.Credentials;
 /// (<c>ProviderFailureThroughTheEngineFlowTests</c>, with a real GitLab stub), which an HTTP test would only repeat slowly.
 ///
 /// <para>Also pinned here: a button is enabled exactly when the endpoint behind it accepts the request (the credential's own Member is
-/// offered no Reconnect, and the OAuth init answers them 403), a standing lookup the provider did not answer blames nobody while a row
+/// offered Reconnect and the OAuth init starts it; another member is offered none and the init answers 403), a standing lookup the provider did not answer blames nobody while a row
 /// written before the cause was kept keeps the repair, a run recorded before failures were kept answers exactly as it did (no
 /// <c>remedy</c>, the same <c>error</c>), and another team's run answers nothing.</para>
 /// </summary>
@@ -82,21 +82,24 @@ public sealed class ProviderRemedyHttpE2ETests : IClassFixture<TaskLaunchApiFact
     }
 
     [Fact]
-    public async Task A_button_is_enabled_exactly_when_the_endpoint_behind_it_accepts_the_request_for_the_credentials_own_member()
+    public async Task A_reconnect_button_is_enabled_exactly_when_the_endpoint_behind_it_accepts_the_request()
     {
         var world = await SeedWorldAsync();
+        await ConfigureOAuthAppAsync(world);
         var runId = await SeedFailedRunAsync(world, new CredentialNeedsReconnectException(world.CredentialId, "GitLab · nacho", "invalid_grant"), recordFailure: true);
-
-        var detail = await _tenants.SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}", world.CredentialOwner, world.Team);
-        var actions = JsonDocument.Parse(await detail.Content.ReadAsStringAsync()).RootElement.GetProperty("remedy").GetProperty("actions").EnumerateArray().ToDictionary(a => a.GetProperty("kind").GetString()!, a => a.GetProperty("enabled").GetBoolean());
-
         var init = new { providerInstanceId = world.InstanceId, displayName = "GitLab · nacho", replaceCredentialId = world.CredentialId };
-        var asTheCredentialsPerson = await _tenants.SendAsync(HttpMethod.Post, "/api/credentials/oauth/init", world.CredentialOwner, world.Team, init);
-        var asTheOwner = await _tenants.SendAsync(HttpMethod.Post, "/api/credentials/oauth/init", world.Owner, world.Team, init);
 
-        actions["reconnect"].ShouldBeFalse("the card must not offer the credential's own Member a button …");
-        asTheCredentialsPerson.StatusCode.ShouldBe(HttpStatusCode.Forbidden, "… that this endpoint answers 403: it needs credentials.manage, which owning the row does not give");
-        asTheOwner.StatusCode.ShouldNotBe(HttpStatusCode.Forbidden, "the team Owner passes authorization (the stub instance has no OAuth client, which is a different refusal)");
+        foreach (var (asker, label, accepted) in new[] { (world.CredentialOwner, "the credential's own member", true), (world.Owner, "the team Owner", true), (world.Member, "another member", false), (world.Viewer, "a viewer", false) })
+        {
+            var detail = await _tenants.SendAsync(HttpMethod.Get, $"/api/workflows/runs/{runId}", asker, world.Team);
+            var actions = JsonDocument.Parse(await detail.Content.ReadAsStringAsync()).RootElement.GetProperty("remedy").GetProperty("actions").EnumerateArray().ToDictionary(a => a.GetProperty("kind").GetString()!, a => a);
+            var started = await _tenants.SendAsync(HttpMethod.Post, "/api/credentials/oauth/init", asker, world.Team, init);
+
+            actions["reconnect"].GetProperty("enabled").GetBoolean().ShouldBe(accepted, $"{label}: the card's button");
+            started.StatusCode.ShouldBe(accepted ? HttpStatusCode.OK : HttpStatusCode.Forbidden, $"{label}: the endpoint the button calls — {await TenantHarness.DescribeAsync(started)}");
+
+            if (!accepted) actions["reconnect"].GetProperty("disabledReason").GetString().ShouldStartWith("Only ", Case.Sensitive, $"{label}: the card says whose it is");
+        }
     }
 
     [Fact]
@@ -246,6 +249,23 @@ public sealed class ProviderRemedyHttpE2ETests : IClassFixture<TaskLaunchApiFact
         response.StatusCode.ShouldBe(HttpStatusCode.OK, body);
 
         return JsonDocument.Parse(body).RootElement.GetProperty("remedy").Clone();
+    }
+
+    /// <summary>The OAuth app a connect needs, so a start that authorization lets in is not then refused for the stub having none.</summary>
+    private async Task ConfigureOAuthAppAsync(World world)
+    {
+        using var scope = _factory.Services.CreateScope();
+        var encryptor = scope.ServiceProvider.GetRequiredService<CodeSpace.Core.Services.Credentials.IPayloadEncryptor>();
+
+        await _tenants.DbAsync(async db =>
+        {
+            var instance = await db.ProviderInstance.SingleAsync(i => i.Id == world.InstanceId);
+
+            instance.OauthClientId = "remedy-app";
+            instance.OauthClientSecretEnc = encryptor.Encrypt("remedy-secret");
+            await db.SaveChangesAsync();
+            return 0;
+        });
     }
 
     private sealed record World(Guid Team, Guid Owner, Guid Member, Guid Viewer, Guid CredentialOwner, Guid InstanceId, Guid CredentialId, Guid RepositoryId);

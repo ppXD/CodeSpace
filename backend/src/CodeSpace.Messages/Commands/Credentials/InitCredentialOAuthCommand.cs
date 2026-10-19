@@ -1,5 +1,4 @@
 using CodeSpace.Messages.Authorization;
-using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Mediation;
 
 namespace CodeSpace.Messages.Commands.Credentials;
@@ -7,11 +6,13 @@ namespace CodeSpace.Messages.Commands.Credentials;
 /// <summary>
 /// Begins a provider-credential OAuth flow. Returns the authorize URL the SPA should open
 /// in a popup or full redirect. The provider's callback hits <c>CompleteCredentialOAuthCommand</c>.
+///
+/// <para><see cref="IRequireCredentialReauthorization"/>: a connect that names no credential mints one and takes
+/// <c>credentials.manage</c>; one that names <see cref="ReplaceCredentialId"/> re-authorizes it in place, which its own person may do on
+/// membership alone — anyone else needs <c>credentials.manage</c>.</para>
 /// </summary>
-public sealed record InitCredentialOAuthCommand : ICommand<InitCredentialOAuthResult>, IRequireTeamPermission
+public sealed record InitCredentialOAuthCommand : ICommand<InitCredentialOAuthResult>, IRequireCredentialReauthorization
 {
-    public string RequiredPermission => TeamPermissions.CredentialsManage;
-
     /// <summary>Provider instance we're authorising against. Must belong to the current team.</summary>
     public required Guid ProviderInstanceId { get; init; }
 
@@ -43,7 +44,7 @@ public sealed record InitCredentialOAuthCommand : ICommand<InitCredentialOAuthRe
     /// before. It must be a Personal credential of this team and provider instance, owned by the person; the sign-in must
     /// be the same provider account the credential was connected as, or the callback is refused with
     /// <c>credential_account_mismatch</c>. A pod from before this field ignores it and creates a new credential, as a
-    /// connect always did.
+    /// connect always did. Who may name one: its owner, or whoever holds <c>credentials.manage</c> (and reaches the owner by rank).
     /// </summary>
     public Guid? ReplaceCredentialId { get; init; }
 }

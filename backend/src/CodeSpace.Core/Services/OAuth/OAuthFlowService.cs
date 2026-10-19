@@ -10,6 +10,7 @@ using CodeSpace.Core.Settings.Application;
 using CodeSpace.Core.Settings.CorsPolicy;
 using CodeSpace.Core.Settings.OAuth;
 using CodeSpace.Messages.Commands.Credentials;
+using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Credentials;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Exceptions;
@@ -122,6 +123,7 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
         var (clientId, clientSecret) = ReadOAuthClientCredentials(instance);
 
         await EnsureOwnerStillInTeamAsync(pending, cancellationToken).ConfigureAwait(false);
+        await EnsureStarterStillMayReauthorizeAsync(pending, cancellationToken).ConfigureAwait(false);
 
         var token = await ExchangeCodeAsync(instance, clientId, clientSecret, code, pending.CodeVerifier, cancellationToken).ConfigureAwait(false);
 
@@ -235,6 +237,32 @@ public sealed class OAuthFlowService : IOAuthFlowService, IScopedDependency
 
         if (!teamLive || !await TeamStanding.HeldAsync(_db, pending.TeamId, ownerId, cancellationToken).ConfigureAwait(false))
             throw OwnerLeftTheTeam();
+    }
+
+    /// <summary>
+    /// A reconnect that named a credential was let in at the start on the credential's bar — its own person on membership alone, anyone else
+    /// <c>credentials.manage</c> and the reach over the person — and the callback can land up to <see cref="StateTtl"/> later, when the starter may
+    /// have been demoted, removed, or the credential's person promoted past them. The same rule (<see cref="CredentialOwnerOrPermission.PermitsReconnect"/>)
+    /// is asked again, of the starter's standing now and before the code is exchanged, so a token is never written into a credential under a
+    /// permission that was taken back. Runs anonymous, so it reads the starter's role directly (<see cref="TeamStanding.RoleHeldAsync"/>) rather than
+    /// as the caller, and the person's the way the reach reads it (<see cref="TeamStanding.RoleActedOnAsync"/>). A starter with no standing at all
+    /// — removed from the team — may do nothing. A connect that named no credential has nothing more to ask: the standing of the person it is for is
+    /// <see cref="EnsureOwnerStillInTeamAsync"/>'s.
+    /// </summary>
+    private async Task EnsureStarterStillMayReauthorizeAsync(OAuthPendingState pending, CancellationToken cancellationToken)
+    {
+        if (pending.ReplaceCredentialId is not Guid replacedId) return;
+
+        var owner = await _db.Credential.AsNoTracking()
+            .Where(c => c.Id == replacedId && c.TeamId == pending.TeamId && c.Ownership == CredentialOwnership.Personal)
+            .Select(c => c.OwnerUserId)
+            .FirstOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        var role = await TeamStanding.RoleHeldAsync(_db, pending.TeamId, pending.InitiatorUserId, cancellationToken).ConfigureAwait(false);
+        var ownerStanding = owner is { } ownerId ? await TeamStanding.RoleActedOnAsync(_db, pending.TeamId, ownerId, cancellationToken).ConfigureAwait(false) : null;
+
+        if (role is not { } held || !CredentialOwnerOrPermission.PermitsReconnect(held, owner == pending.InitiatorUserId, ownerStanding))
+            throw new OAuthCallbackException("the person who started this connection may no longer reconnect that credential");
     }
 
     /// <summary>

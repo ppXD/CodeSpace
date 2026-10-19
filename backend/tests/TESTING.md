@@ -69,8 +69,10 @@ Provider-credential tests share two more pieces, both in `CodeSpace.IntegrationT
   `git.pr_review`, `git.create_issue`, `git.close_issue`, `git.comment_issue`), and asserts what the node's ledger record carries and what
   the remedy says. A repair the remedy offers is proved against the real command the button runs: the redirect test sends
   `UpdateProviderInstanceCommand` (refused while a token is connected, accepted once it is disconnected) and `InitCredentialOAuthCommand`
-  is sent as the credential's own Member to show the button's enabled state is the endpoint's answer — never an edit by SQL that
-  production would refuse. `ProviderRemedyFlowTests` pins the per-role matrix and every other source of a failure (a run that failed on
+  is sent as the credential's own Member, and as a teammate, to show the button's enabled state is the endpoint's answer (the credential's
+  own person passes on membership, anyone else needs `credentials.manage`; `CredentialReauthorizationFlowTests.OwnerReconnect` and
+  `CredentialOwnerReconnectE2ETests` pin the rest of who may start a reconnect and who may finish it) — never an edit by SQL that
+  production would refuse. `ProviderRemedyFlowTests` pins the per-role matrix — and, for every asker role against every role the credential's person can have (or has left the team), that the remedy's button, the credential list's `callerMayRepair` and the real command (a connect, or a token replace against the stub) all agree, a command counting as accepted only if it returns and as refused for any exception at all — and every other source of a failure (a run that failed on
   another node than the one that handled a provider failure has none; a standing lookup that got no answer blames nobody);
   `ProviderRemedyHttpE2ETests` pins the wire shape for an Owner, a Member and a Viewer. Those fixtures write the failure with
   the real `IRunRecordLogger` from the real exception through `ProviderFailureCapture`, never a hand-typed payload.
