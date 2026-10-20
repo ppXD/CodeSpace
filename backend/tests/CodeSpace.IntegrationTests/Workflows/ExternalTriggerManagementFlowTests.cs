@@ -283,6 +283,32 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
     }
 
     [Theory]
+    [InlineData("reveal")]
+    [InlineData("rotate")]
+    [InlineData("rename")]
+    public async Task Deleting_the_workflow_retires_its_trigger_so_the_key_stops_resolving(string operation)
+    {
+        var seed = await SeedAsync();
+        using (var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId))
+            await scope.Resolve<IMediator>().Send(new DeleteWorkflowCommand { WorkflowId = seed.WorkflowId });
+
+        using (var verify = fixture.BeginScopeAs(seed.UserId, seed.TeamId))
+        {
+            var error = await Record.ExceptionAsync(() => ManageAsync(verify.Resolve<IMediator>(), operation, seed.Slug, "replacement-" + Guid.NewGuid().ToString("N")));
+            error.ShouldBeOfType<KeyNotFoundException>();
+            FailureClassifier.Classify(error).Kind.ShouldBe(FailureKind.NotFound);
+        }
+
+        (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.NotFound);
+        using var audit = fixture.BeginScope();
+        var db = audit.Resolve<CodeSpaceDbContext>();
+        var row = await db.WorkflowExternalTrigger.AsNoTracking().SingleAsync(t => t.WorkflowId == seed.WorkflowId);
+        row.DeletedDate.ShouldNotBeNull();
+        audit.Resolve<ExternalTriggerKeySealer>().Open(row.KeyCiphertext).ShouldBe(seed.Key);
+        (await db.WorkflowExternalTrigger.CountAsync(t => t.Slug == seed.Slug && t.DeletedDate == null)).ShouldBe(0);
+    }
+
+    [Theory]
     [InlineData("!!!")]
     [InlineData("告警")]
     [InlineData("")]

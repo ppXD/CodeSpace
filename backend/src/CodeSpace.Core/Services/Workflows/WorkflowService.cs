@@ -274,16 +274,24 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var workflow = await LoadWorkflowAsync(workflowId, teamId, cancellationToken).ConfigureAwait(false);
         if (workflow == null) return;
 
-        workflow.DeletedDate = DateTimeOffset.UtcNow;
+        var now = DateTimeOffset.UtcNow;
+        workflow.DeletedDate = now;
 
         var activations = await _db.WorkflowActivation.Where(a => a.WorkflowId == workflowId && a.DeletedDate == null).ToListAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var a in activations) a.DeletedDate = DateTimeOffset.UtcNow;
+        foreach (var a in activations) a.DeletedDate = now;
+
+        // Retiring the trigger row is what actually kills the credential: reveal/rotate/rename resolve the slug
+        // through workflow_external_trigger alone, so a live row here would keep handing out the plaintext key for
+        // a workflow nobody can list any more. Soft-delete keeps the audit trail and releases the slug, because
+        // uq_wet_slug is partial on deleted_date IS NULL.
+        var triggers = await _db.WorkflowExternalTrigger.Where(t => t.WorkflowId == workflowId && t.DeletedDate == null).ToListAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var t in triggers) t.DeletedDate = now;
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "Workflow soft-deleted. WorkflowId={WorkflowId} TeamId={TeamId} ActivationsRemoved={ActivationCount}",
-            workflowId, teamId, activations.Count);
+            "Workflow soft-deleted. WorkflowId={WorkflowId} TeamId={TeamId} ActivationsRemoved={ActivationCount} TriggersRemoved={TriggerCount}",
+            workflowId, teamId, activations.Count, triggers.Count);
     }
 
     public async Task SetEnabledAsync(Guid workflowId, Guid teamId, bool enabled, CancellationToken cancellationToken)
