@@ -1115,24 +1115,21 @@ function EditProviderStep({ instance, initialBaseUrl, onBack, onClose, onSaved }
   const defaults = useProviderDefaults(instance.provider);
   const effectiveCallbackUrl = defaults.data?.oAuthCallbackUrl ?? `${window.location.origin}/api/credentials/oauth/callback`;
 
-  // Two distinct validity rules depending on the provider's existing state:
-  //   • Configuring a non-OAuth row (oauthEnabled=false) → BOTH client_id and secret are
-  //     required to save. We're filling in the missing pair, not patching one of them.
-  //   • Editing an OAuth-ready row → both blank is fine (means "keep existing"). Filling
-  //     in just one is ambiguous (changing client_id without rotating the secret usually
-  //     breaks token exchange) so we require both-or-neither here too.
+  // One rule: the OAuth client pair is all-or-nothing, whether this row already has one or not — a client_id
+  // without its secret can't exchange a code, and a secret without an id is meaningless.
   const clientIdFilled = clientId.trim().length > 0;
   const secretFilled = clientSecret.length > 0;
   const oauthPairIncomplete = clientIdFilled !== secretFilled;
-  const configuringFresh = !instance.oauthEnabled;
-  const missingRequiredForConfig = configuringFresh && (!clientIdFilled || !secretFilled);
+  // The default scopes go with a newly configured OAuth app, so they are sent for a row that is getting one now.
+  // A token-only row keeps none: the form says "fill in the OAuth client ID and secret", not "that is required".
+  const configuringFresh = !instance.oauthEnabled && clientIdFilled;
   const blanksOnImmutable = !displayName.trim() || !baseUrl.trim();
   // A stored OAuth secret is only ever sent to the host it was entered for: moving the host needs it typed again.
   const nextBaseUrl = baseUrl.trim().replace(/\/$/, "");
   const hostMoves = providerEndpointMoves(instance.baseUrl, nextBaseUrl);
   const secretMustFollow = providerSecretMustBeReentered(instance, nextBaseUrl);
   const missingSecretForMove = secretMustFollow && !secretFilled;
-  const submitDisabled = update.isPending || blanksOnImmutable || oauthPairIncomplete || missingRequiredForConfig || missingSecretForMove;
+  const submitDisabled = update.isPending || blanksOnImmutable || oauthPairIncomplete || missingSecretForMove;
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -1145,7 +1142,7 @@ function EditProviderStep({ instance, initialBaseUrl, onBack, onClose, onSaved }
     if (nextBaseUrl !== instance.baseUrl) patch.baseUrl = nextBaseUrl;
     if (clientIdFilled) patch.oauthClientId = clientId.trim();
     if (secretFilled) patch.oauthClientSecret = clientSecret;
-    // If we're fixing a non-OAuth provider (no existing client_id), also send default scopes.
+    // A row gaining an OAuth app now also gets the default scope set; one that had none keeps none.
     if (configuringFresh && clientIdFilled && defaults.data?.defaultOAuthScopes) {
       patch.oauthDefaultScopes = defaults.data.defaultOAuthScopes;
     }
