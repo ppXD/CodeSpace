@@ -22,6 +22,64 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     private sealed record Seed(Guid UserId, Guid TeamId, Guid WorkflowId, string Slug, string Key);
 
     [Fact]
+    public async Task Management_reveals_rotates_and_renames_the_saved_endpoint()
+    {
+        var seed = await SeedAsync();
+        var harness = new TenantHarness(factory);
+        using var reveal = await harness.SendAsync(HttpMethod.Get, $"/api/workflows/external-triggers/{seed.Slug}/key", seed.UserId, seed.TeamId);
+        reveal.StatusCode.ShouldBe(HttpStatusCode.OK, await TenantHarness.DescribeAsync(reveal));
+        (await reveal.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("key").GetString().ShouldBe(seed.Key);
+        using var rotate = await harness.SendAsync(HttpMethod.Post, $"/api/workflows/external-triggers/{seed.Slug}/rotate-key", seed.UserId, seed.TeamId);
+        rotate.StatusCode.ShouldBe(HttpStatusCode.OK, await TenantHarness.DescribeAsync(rotate));
+        var fresh = (await rotate.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("key").GetString();
+        fresh.ShouldNotBeNullOrEmpty();
+        fresh.ShouldNotBe(seed.Key);
+        using var oldKey = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
+        oldKey.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        var renamed = "prod-alerts-v2-" + Guid.NewGuid().ToString("N");
+        using var rename = await harness.SendAsync(HttpMethod.Post, $"/api/workflows/external-triggers/{seed.Slug}/rename", seed.UserId, seed.TeamId, new { desiredSlug = renamed });
+        rename.StatusCode.ShouldBe(HttpStatusCode.NoContent, await TenantHarness.DescribeAsync(rename));
+        using var oldUrl = await PostAsync(Url(seed), BODY, apiKey: fresh);
+        oldUrl.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        using var newUrl = await PostAsync($"/api/ext/{renamed}/run", BODY, apiKey: fresh);
+        newUrl.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+    }
+
+    [Theory]
+    [InlineData("key", "GET")]
+    [InlineData("rotate-key", "POST")]
+    [InlineData("rename", "POST")]
+    public async Task Management_is_team_scoped_and_denies_viewers(string action, string method)
+    {
+        var seed = await SeedAsync();
+        var harness = new TenantHarness(factory);
+        var viewer = await harness.AccountAsync();
+        await harness.AddMemberAsync(seed.TeamId, viewer, TeamRole.Viewer);
+        var url = $"/api/workflows/external-triggers/{seed.Slug}/{action}";
+        using var denied = await harness.SendAsync(new HttpMethod(method), url, viewer, seed.TeamId, method == "POST" ? new { desiredSlug = "unused" } : null);
+        denied.StatusCode.ShouldBe(HttpStatusCode.Forbidden);
+        var other = await harness.TeamAsync((seed.UserId, TeamRole.Member));
+        using var absent = await harness.SendAsync(new HttpMethod(method), url, seed.UserId, other, method == "POST" ? new { desiredSlug = "unused" } : null);
+        absent.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        using var anonymous = await harness.Client().GetAsync($"/api/workflows/external-triggers/{seed.Slug}/key");
+        anonymous.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task A_slug_conflict_answers_409_without_breaking_either_endpoint()
+    {
+        var first = await SeedAsync();
+        var other = await SeedAsync();
+        using var conflict = await new TenantHarness(factory).SendAsync(HttpMethod.Post,
+            $"/api/workflows/external-triggers/{other.Slug}/rename", other.UserId, other.TeamId, new { desiredSlug = first.Slug });
+        conflict.StatusCode.ShouldBe(HttpStatusCode.Conflict, await TenantHarness.DescribeAsync(conflict));
+        using var firstCall = await PostAsync(Url(first), BODY, apiKey: first.Key);
+        using var otherCall = await PostAsync(Url(other), BODY, apiKey: other.Key);
+        firstCall.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+        otherCall.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+    }
+
+    [Fact]
     public async Task An_unknown_slug_is_404()
     {
         using var response = await PostAsync($"/api/ext/missing-{Guid.NewGuid():N}/run", "{}");
@@ -215,14 +273,9 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     {
         using var scope = factory.Services.CreateScope();
         var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
-        var key = scope.ServiceProvider.GetRequiredService<ExternalTriggerKeySealer>().Mint();
-        db.WorkflowExternalTrigger.Add(new WorkflowExternalTrigger
-        {
-            Id = Guid.NewGuid(), TeamId = teamId, WorkflowId = workflowId, NodeId = "trigger", Slug = slug,
-            KeyDigest = key.Digest, KeyCiphertext = key.Ciphertext, CreatedBy = userId, LastModifiedBy = userId,
-        });
-        await db.SaveChangesAsync();
-        return new(userId, teamId, workflowId, slug, key.Key);
+        var row = await db.WorkflowExternalTrigger.AsNoTracking().SingleAsync(t => t.WorkflowId == workflowId && t.TeamId == teamId && t.DeletedDate == null);
+        var key = scope.ServiceProvider.GetRequiredService<ExternalTriggerKeySealer>().Open(row.KeyCiphertext);
+        return new(userId, teamId, workflowId, slug, key);
     }
 
     private Task<Guid[]> RunsAsync(Seed seed) => new TenantHarness(factory).DbAsync(db => db.WorkflowRun.AsNoTracking().Where(r => r.WorkflowId == seed.WorkflowId).Select(r => r.Id).ToArrayAsync());
