@@ -37,7 +37,7 @@ public static class WebhookIngressRateLimitExtension
     public static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
 
     /// <summary>The route values that name what a request is addressed to, in the order the ingress routes declare them.</summary>
-    private static readonly string[] TargetRouteValues = { "webhookId", "connectionWebhookId", "token" };
+    private static readonly string[] TargetRouteValues = { "webhookId", "connectionWebhookId", "token", "slug" };
 
     /// <summary>The one partition every non-ingress request shares in the global limiter — no limit. Never an address.</summary>
     private const string NotIngress = "not-ingress";
