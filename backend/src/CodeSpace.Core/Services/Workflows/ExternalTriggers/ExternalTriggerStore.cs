@@ -74,7 +74,7 @@ public sealed class ExternalTriggerStore(CodeSpaceDbContext db, ExternalTriggerK
     {
         var slug = ExternalTriggerSlug.Derive(desiredSlug);
         if (!ExternalTriggerSlug.IsUsable(slug))
-            throw new ArgumentException("The name you entered must produce a non-empty external trigger slug. ASCII letters and digits are supported. Hyphens and underscores are allowed. Choose a usable ASCII name.", parameterName);
+            throw new ArgumentException("The name you entered must derive into a non-empty external trigger slug. Include at least one ASCII letter, digit or underscore. Hyphens and underscores are allowed in the resulting slug.", parameterName);
         return slug;
     }
 
