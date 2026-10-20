@@ -27,6 +27,7 @@ export function ExternalTriggerInspector({ config, nodeId, currentSlug, onConfig
   const [key, setKey] = useState<string | null>(null);
   const [copyStatus, setCopyStatus] = useState<string | null>(null);
   const [copyError, setCopyError] = useState<string | null>(null);
+  const [schemaWarning, setSchemaWarning] = useState<string | null>(null);
   const draft = typeof config.slug === "string" ? config.slug : "";
   const derived = deriveExternalTriggerSlug(draft);
   const usable = isUsableExternalTriggerSlug(derived);
@@ -44,7 +45,14 @@ export function ExternalTriggerInspector({ config, nodeId, currentSlug, onConfig
   const curl = key ? `curl -X POST '${fullUrl}?key=${encodeURIComponent(key)}' -H 'Content-Type: application/json' -d '{}'` : null;
 
   const changeFields = (next: WorkflowVariable[]) => {
+    const unappliedMetadata: string[] = [];
     const nextProperties = Object.fromEntries(next.map((field) => {
+      const hasMetadata = field.label != null || field.default !== undefined;
+      if (field.schema === null || typeof field.schema !== "object" || Array.isArray(field.schema)) {
+        if (hasMetadata) unappliedMetadata.push(field.name);
+        return [field.name, field.schema];
+      }
+      if (!hasMetadata && !("title" in field.schema) && !("default" in field.schema)) return [field.name, field.schema];
       const property = { ...asObject(field.schema) };
       if (field.label != null) property.title = field.label;
       else delete property.title;
@@ -52,6 +60,9 @@ export function ExternalTriggerInspector({ config, nodeId, currentSlug, onConfig
       else delete property.default;
       return [field.name, property];
     }));
+    setSchemaWarning(unappliedMetadata.length > 0
+      ? `${unappliedMetadata.join(", ")}: label/default could not be applied to a non-object schema. The original constraint was preserved.`
+      : null);
     onConfigChange({ ...config, inputSchema: { ...schema, type: "object", properties: nextProperties, required: next.filter((field) => field.required).map((field) => field.name) } });
   };
 
@@ -96,6 +107,7 @@ export function ExternalTriggerInspector({ config, nodeId, currentSlug, onConfig
       </section>
 
       <StartNodeInputsEditor inputs={fields} onChange={changeFields} />
+      {schemaWarning && <p role="alert" className="wf-retry-hint">{schemaWarning}</p>}
 
       <section className="wf-inspector-section">
         <h3 className="wf-inspector-section-h">Endpoint</h3>

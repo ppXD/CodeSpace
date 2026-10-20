@@ -30,6 +30,28 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals());
 
 describe("ExternalTriggerInspector", () => {
+  it("preserves a boolean-false property when another property's label changes", () => {
+    const client = new QueryClient();
+    const config = { slug: "prod-alerts", inputSchema: { properties: { blocked: false, message: { type: "string" } } } };
+    render(<QueryClientProvider client={client}><ExternalTriggerInspector config={config} nodeId="ext" currentSlug="prod-alerts" onConfigChange={CONFIG_CHANGE} /></QueryClientProvider>);
+    fireEvent.click(screen.getByText("message"));
+    fireEvent.change(screen.getByPlaceholderText("message"), { target: { value: "Alert message" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    expect(CONFIG_CHANGE).toHaveBeenLastCalledWith({ slug: "prod-alerts", inputSchema: { type: "object", properties: { blocked: false, message: { type: "string", title: "Alert message" } }, required: [] } });
+    expect(CONFIG_CHANGE.mock.lastCall?.[0].inputSchema.properties.blocked).toBe(false);
+  });
+
+  it("preserves a boolean constraint and warns when its display label cannot be applied", () => {
+    const client = new QueryClient();
+    const config = { slug: "prod-alerts", inputSchema: { properties: { blocked: false } } };
+    render(<QueryClientProvider client={client}><ExternalTriggerInspector config={config} nodeId="ext" currentSlug="prod-alerts" onConfigChange={CONFIG_CHANGE} /></QueryClientProvider>);
+    fireEvent.click(screen.getByText("blocked"));
+    fireEvent.change(screen.getByPlaceholderText("blocked"), { target: { value: "Blocked field" } });
+    fireEvent.click(screen.getByRole("button", { name: /^save$/i }));
+    expect(CONFIG_CHANGE.mock.lastCall?.[0].inputSchema.properties.blocked).toBe(false);
+    expect(screen.getByRole("alert")).toHaveTextContent(/blocked.*label.*default.*could not be applied.*constraint.*preserved/i);
+  });
+
   it("shows the keyless canonical endpoint and only copies a key-bearing curl after reveal", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
