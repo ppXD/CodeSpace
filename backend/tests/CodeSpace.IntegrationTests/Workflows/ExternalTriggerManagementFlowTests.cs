@@ -25,6 +25,40 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
     private sealed record Seed(Guid TeamId, Guid UserId, Guid WorkflowId, string Slug, string Key);
 
     [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Saving_projects_the_node_contract_into_the_hashed_version_inputs(bool update)
+    {
+        var seed = await SeedAsync();
+        if (update)
+        {
+            var definition = Definition(seed.Slug) with
+            {
+                Inputs = [new WorkflowVariable { Name = "stale", Schema = WorkflowsTestSeed.Json("""{"type":"string"}""") }],
+            };
+            definition = definition with
+            {
+                Nodes = definition.Nodes.Select(n => n.Id == "start" ? n with { Config = Config(seed.Slug, "integer") } : n).ToArray(),
+            };
+            await UpdateAsync(seed, definition);
+        }
+
+        using var scope = fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var version = await db.WorkflowVersion.AsNoTracking().SingleAsync(v => v.WorkflowId == seed.WorkflowId && v.Version == (update ? 2 : 1));
+        using var json = JsonDocument.Parse(version.DefinitionJson);
+        var inputs = json.RootElement.GetProperty("inputs");
+        inputs.GetArrayLength().ShouldBe(1);
+        inputs[0].GetProperty("name").GetString().ShouldBe("service");
+        inputs[0].GetProperty("required").GetBoolean().ShouldBeTrue();
+        inputs[0].GetProperty("schema").GetProperty("type").GetString().ShouldBe(update ? "integer" : "string");
+        var saved = JsonSerializer.Deserialize<WorkflowDefinition>(version.DefinitionJson, WorkflowJson.Options)!;
+        version.DefinitionHash.ShouldBe(DefinitionHash.Compute(saved));
+        var workflow = await db.Workflow.AsNoTracking().SingleAsync(w => w.Id == seed.WorkflowId);
+        workflow.DefinitionJson.ShouldBe(version.DefinitionJson);
+    }
+
+    [Theory]
     [InlineData("label")]
     [InlineData("position")]
     [InlineData("schema")]
