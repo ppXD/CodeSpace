@@ -4,13 +4,17 @@ using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows;
+using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.ExternalTriggers;
+using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.IntegrationTests.Infrastructure;
+using CodeSpace.IntegrationTests.Infrastructure.Jobs;
 using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Workflows;
@@ -81,6 +85,79 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     {
         var seed = await SeedAsync();
         (await ReceiveAsync(seed with { Slug = "nope" })).Kind.ShouldBe(ExternalTriggerOutcomeKind.NotFound);
+    }
+
+    [Theory]
+    [InlineData(true)]
+    [InlineData(false)]
+    public async Task A_trigger_for_a_replaced_node_is_not_found_before_authentication(bool correctKey)
+    {
+        var seed = await SeedAsync();
+        using (var edit = fixture.BeginScope())
+        {
+            var db = edit.Resolve<CodeSpaceDbContext>();
+            var trigger = await db.WorkflowExternalTrigger.SingleAsync(t => t.Slug == seed.Slug);
+            trigger.NodeId = "removed-node";
+            await db.SaveChangesAsync();
+        }
+
+        var outcome = await ReceiveAsync(seed, presentedKey: correctKey ? seed.Key : "wrong");
+        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.NotFound);
+        (await RunsAsync(seed)).ShouldBeEmpty();
+        (await RequestsAsync(seed)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_deduplicated_delivery_without_a_matching_run_is_accepted_and_warned_without_dispatch()
+    {
+        var seed = await SeedAsync();
+        var logger = new IngressWarnings();
+        var dispatcher = new IngressDispatches();
+        using var scope = fixture.BeginScope(b =>
+        {
+            b.RegisterType<EmptyRunStarter>().As<IRunStarter>().InstancePerLifetimeScope();
+            b.RegisterInstance(logger).As<ILogger<ExternalTriggerIngress>>();
+            b.RegisterInstance(dispatcher).As<IWorkflowRunDispatcher>();
+        });
+        var jobs = scope.Resolve<InMemoryBackgroundJobClient>();
+        var before = jobs.Calls.Count;
+
+        var outcome = await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(
+            new(seed.Slug, seed.Key, "missing-run", """{"service":"api"}""", false), CancellationToken.None);
+
+        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        outcome.RunId.ShouldBe(Guid.Empty);
+        dispatcher.Calls.ShouldBe(0);
+        jobs.Calls.Count.ShouldBe(before);
+        (await RunsAsync(seed)).ShouldBeEmpty();
+        (await RequestsAsync(seed)).ShouldBeEmpty();
+        logger.Warnings.ShouldContain(w => w.Contains(seed.Slug) && w.Contains("run could not be found"));
+    }
+
+    private sealed class EmptyRunStarter : IRunStarter
+    {
+        public Task<Guid> StartAsync(RunSourceEnvelope envelope, CancellationToken cancellationToken) => Task.FromResult(Guid.Empty);
+    }
+
+    private sealed class IngressDispatches : IWorkflowRunDispatcher
+    {
+        public int Calls { get; private set; }
+        public Task<bool> DispatchAsync(Guid runId, CancellationToken cancellationToken)
+        {
+            Calls++;
+            return Task.FromResult(true);
+        }
+    }
+
+    private sealed class IngressWarnings : ILogger<ExternalTriggerIngress>
+    {
+        public List<string> Warnings { get; } = [];
+        public IDisposable? BeginScope<TState>(TState state) where TState : notnull => null;
+        public bool IsEnabled(LogLevel logLevel) => true;
+        public void Log<TState>(LogLevel logLevel, EventId eventId, TState state, Exception? exception, Func<TState, Exception?, string> formatter)
+        {
+            if (logLevel == LogLevel.Warning) Warnings.Add(formatter(state, exception));
+        }
     }
 
     [Theory]
@@ -187,7 +264,8 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
             if (completion)
             {
                 var workflow = await db.Workflow.SingleAsync(w => w.Id == seed.WorkflowId);
-                var definition = JsonSerializer.Serialize(WorkflowsTestSeed.MinimalDefinition() with { CompletionMode = WorkflowDefinition.CompletionModeEnforced }, WorkflowJson.Options);
+                var graph = JsonSerializer.Deserialize<WorkflowDefinition>(workflow.DefinitionJson, WorkflowJson.Options)!;
+                var definition = JsonSerializer.Serialize(graph with { CompletionMode = WorkflowDefinition.CompletionModeEnforced }, WorkflowJson.Options);
                 workflow.LatestVersion = 2;
                 workflow.DefinitionJson = definition;
                 db.WorkflowVersion.Add(new WorkflowVersion { WorkflowId = seed.WorkflowId, Version = 2, DefinitionJson = definition, DefinitionHash = "legacy", CommittedAt = DateTimeOffset.UtcNow, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = seed.UserId });
@@ -206,7 +284,8 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         var audit = (await verify.Resolve<CodeSpaceDbContext>().WorkflowRunRequest.Where(r => r.TeamId == seed.TeamId).ToListAsync()).ShouldHaveSingleItem();
         audit.Status.ShouldBe(WorkflowRunRequestStatus.Rejected);
         audit.SourceType.ShouldBe("trigger.external");
-        audit.Error.ShouldContain(reason);
+        audit.Error.ShouldNotBeNull();
+        audit.Error!.ShouldContain(reason);
         audit.IdempotencyKey.ShouldBe($"rejected:{seed.Slug}:refused");
     }
 

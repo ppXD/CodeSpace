@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Completion.Exceptions;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Constants;
+using CodeSpace.Messages.Dtos.Workflows;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 
@@ -18,6 +19,8 @@ namespace CodeSpace.Core.Services.Workflows.ExternalTriggers;
 /// SourceType must equal the activation TypeKey: ActivationTypeFor only translates cron, so any other value fails
 /// VerifyActivation with trigger-snapshot-mismatch. Anonymous runs also need the activation's id and authority snapshot.
 /// Each call resolves the live activation afresh because ReplaceActivationsAsync rebuilds every row on workflow save.
+/// The latest version's node id binds the credential to its original node; replacing a node must not revive its old key.
+/// Its node config also supplies the input contract so identity and validation use the same definition version.
 /// No Idempotency-Key means no deduplication: identical bodies can represent distinct real events, not just retries.
 /// </summary>
 public sealed class ExternalTriggerIngress(
@@ -46,6 +49,15 @@ public sealed class ExternalTriggerIngress(
         }
         var activation = activations[0];
 
+        var definitionJson = await db.WorkflowVersion.AsNoTracking()
+            .Where(v => v.WorkflowId == activation.WorkflowId && v.Version == activation.Workflow.LatestVersion)
+            .Select(v => v.DefinitionJson).SingleOrDefaultAsync(ct).ConfigureAwait(false);
+        if (definitionJson is null) return Outcome(ExternalTriggerOutcomeKind.NotFound);
+        var definition = JsonSerializer.Deserialize<WorkflowDefinition>(definitionJson, WorkflowJson.Options);
+        var nodes = definition?.Nodes.Where(n => n.TypeKey == ExternalTriggerSlug.TypeKey).ToList();
+        if (nodes is not { Count: 1 } || nodes[0].Id != trigger.NodeId) return Outcome(ExternalTriggerOutcomeKind.NotFound);
+        var config = nodes[0].Config;
+
         if (call.PresentedKey is null || !CryptographicOperations.FixedTimeEquals(
                 Encoding.ASCII.GetBytes(ExternalTriggerKeySealer.Digest(call.PresentedKey)), Encoding.ASCII.GetBytes(trigger.KeyDigest)))
             return Outcome(ExternalTriggerOutcomeKind.Unauthorized);
@@ -60,10 +72,9 @@ public sealed class ExternalTriggerIngress(
         using (body)
         {
             if (body.RootElement.ValueKind != JsonValueKind.Object) return InvalidBody();
-            using var config = JsonDocument.Parse(activation.ConfigJson);
             using var fallback = JsonDocument.Parse("""{"type":"object"}""");
-            var schema = config.RootElement.ValueKind == JsonValueKind.Object
-                && config.RootElement.TryGetProperty("inputSchema", out var declared) && declared.ValueKind == JsonValueKind.Object
+            var schema = config.ValueKind == JsonValueKind.Object
+                && config.TryGetProperty("inputSchema", out var declared) && declared.ValueKind == JsonValueKind.Object
                 ? declared : fallback.RootElement;
             var errors = ExternalTriggerPayloadValidator.Validate(body.RootElement, schema);
             if (errors.Count != 0) return Outcome(ExternalTriggerOutcomeKind.InvalidPayload, errors: errors);
