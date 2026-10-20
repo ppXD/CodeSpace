@@ -104,6 +104,17 @@ describe("ExternalTriggerInspector", () => {
     expect(screen.getByText("/api/ext/prod-alerts/run")).toBeInTheDocument();
   });
 
+  it("explains an unusable draft slug in an already-open rename confirmation instead of naming an empty target", () => {
+    renderInspector("prod-alerts", "New Alerts");
+    fireEvent.click(screen.getByRole("button", { name: /^rename/i }));
+    fireEvent.change(screen.getByRole("textbox", { name: /draft slug/i }), { target: { value: "!!!" } });
+    const group = screen.getByRole("group", { name: /confirm.*rename/i });
+    expect(within(group).getByText(/use an english/i)).toBeInTheDocument();
+    expect(within(group).queryByText(/existing url will stop working/i)).not.toBeInTheDocument();
+    expect(within(group).getByRole("button", { name: /confirm/i })).toBeDisabled();
+    expect(REQUESTS).not.toHaveBeenCalled();
+  });
+
   it("shows a save-first state without any live credential actions", () => {
     renderInspector(null);
     expect(screen.getByText(/save the workflow to create this endpoint/i)).toBeInTheDocument();

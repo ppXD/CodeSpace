@@ -15,6 +15,8 @@ interface IExternalTriggerInspectorProps {
   onConfigChange: (next: Record<string, unknown>) => void;
 }
 
+const UNUSABLE_SLUG_GUIDANCE = "Cannot derive a usable slug. Use an English name with ASCII letters, digits or underscores.";
+
 function asObject(value: unknown): Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 }
@@ -102,7 +104,7 @@ export function ExternalTriggerInspector({ config, nodeId, currentSlug, onConfig
           <input className="wf-form-input" value={draft} aria-invalid={!usable} aria-describedby={`${nodeId}-slug-status`} onChange={(event) => onConfigChange({ ...config, slug: event.target.value })} />
         </label>
         <p id={`${nodeId}-slug-status`} className="wf-retry-hint" role={usable ? undefined : "alert"}>
-          {usable ? `Derived slug: ${derived}` : "Cannot derive a usable slug. Use an English name with ASCII letters, digits or underscores."}
+          {usable ? `Derived slug: ${derived}` : UNUSABLE_SLUG_GUIDANCE}
         </p>
       </section>
 
@@ -124,7 +126,9 @@ export function ExternalTriggerInspector({ config, nodeId, currentSlug, onConfig
             </div>
             {confirming && (
               <div role="group" aria-label={`Confirm ${confirming === "rotate" ? "regenerate" : "rename"}`} className="wf-retry-hint">
-                <p>{confirming === "rotate" ? "The old key stops working immediately. Existing callers must use the new key." : `The existing URL will stop working. Rename the live endpoint to ${derived}?`}</p>
+                <p>{confirming === "rotate"
+                  ? "The old key stops working immediately. Existing callers must use the new key."
+                  : usable ? `The existing URL will stop working. Rename the live endpoint to ${derived}?` : UNUSABLE_SLUG_GUIDANCE}</p>
                 <div style={{ display: "flex", gap: 8 }}>
                   <button type="button" className="btn btn-primary" disabled={pending || (confirming === "rename" && (!usable || derived === currentSlug))} onClick={confirm}>Confirm {confirming === "rotate" ? "regenerate" : "rename"}</button>
                   <button type="button" className="btn" disabled={pending} onClick={() => setConfirming(null)}>Cancel</button>
