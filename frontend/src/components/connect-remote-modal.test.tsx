@@ -1110,6 +1110,17 @@ describe("edit provider base URL", () => {
     expect((screen.getByRole("button", { name: /Save/ }) as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("saves a base URL change on a token-only provider without an OAuth client pair", async () => {
+    const patches = renderEditing({ id: "pi1", teamId: "t1", provider: "GitLab", displayName: "Acme GitLab", baseUrl: "https://gitlab.acme.test", createdDate: "2026-01-01T00:00:00Z", oauthEnabled: false });
+    await openEditSettings();
+
+    fireEvent.change(screen.getByDisplayValue("https://gitlab.acme.test"), { target: { value: "https://gitlab.moved.test" } });
+    fireEvent.click(screen.getByRole("button", { name: /Save/ }));
+
+    await waitFor(() => expect(patches.length).toBe(1));
+    expect(patches[0]).toEqual({ baseUrl: "https://gitlab.moved.test" });
+  });
+
   it("never sends the masked base URL back when only the name changes", async () => {
     const patches = renderEditing({ id: "pi1", teamId: "t1", provider: "GitLab", displayName: "Acme GitLab", baseUrl: "https://***:***@gitlab.acme.test", createdDate: "2026-01-01T00:00:00Z", oauthEnabled: true });
     await openEditSettings();
