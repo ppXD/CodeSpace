@@ -2,6 +2,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows.ExternalTriggers;
 using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Dtos.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -47,5 +48,31 @@ public sealed class RenameExternalTriggerCommandHandler(IExternalTriggerStore st
             ?? throw new KeyNotFoundException("External trigger not found in this team.");
         await store.RenameAsync(trigger.Id, team.Id.Value, request.DesiredSlug, actor.Id!.Value, cancellationToken).ConfigureAwait(false);
         return Unit.Value;
+    }
+}
+
+public sealed class ReceiveExternalTriggerCommandHandler(IExternalTriggerIngress ingress)
+    : IRequestHandler<ReceiveExternalTriggerCommand, ExternalTriggerDeliveryOutcome>
+{
+    public async Task<ExternalTriggerDeliveryOutcome> Handle(ReceiveExternalTriggerCommand request, CancellationToken cancellationToken)
+    {
+        var outcome = await ingress.ReceiveAsync(new ExternalTriggerCall(
+                request.Slug, request.PresentedKey, request.IdempotencyKey, request.RawBody, request.IdempotencyRejected),
+            cancellationToken).ConfigureAwait(false);
+
+        return new ExternalTriggerDeliveryOutcome
+        {
+            Kind = outcome.Kind switch
+            {
+                ExternalTriggerOutcomeKind.Accepted => ExternalTriggerDeliveryKind.Accepted,
+                ExternalTriggerOutcomeKind.Deduplicated => ExternalTriggerDeliveryKind.Deduplicated,
+                ExternalTriggerOutcomeKind.NotFound => ExternalTriggerDeliveryKind.NotFound,
+                ExternalTriggerOutcomeKind.Unauthorized => ExternalTriggerDeliveryKind.Unauthorized,
+                ExternalTriggerOutcomeKind.InvalidPayload => ExternalTriggerDeliveryKind.InvalidPayload,
+                _ => throw new InvalidOperationException($"Unknown external trigger outcome: {outcome.Kind}"),
+            },
+            RunId = outcome.RunId,
+            Errors = outcome.Errors,
+        };
     }
 }

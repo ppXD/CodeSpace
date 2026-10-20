@@ -1,6 +1,9 @@
 using CodeSpace.Api.Extensions;
 using CodeSpace.Api.Http;
 using CodeSpace.Core.Services.Workflows.ExternalTriggers;
+using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Dtos.Workflows;
+using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.RateLimiting;
@@ -20,9 +23,9 @@ namespace CodeSpace.Api.Controllers;
 [EnableRateLimiting(WebhookIngressRateLimitExtension.PolicyName)]
 public class ExternalTriggersController : ControllerBase
 {
-    private readonly IExternalTriggerIngress _ingress;
+    private readonly IMediator _mediator;
 
-    public ExternalTriggersController(IExternalTriggerIngress ingress) { _ingress = ingress; }
+    public ExternalTriggersController(IMediator mediator) { _mediator = mediator; }
 
     [HttpPost("{slug}/run")]
     [RequestSizeLimit(MaxDeliveryBodyBytes)]
@@ -39,15 +42,22 @@ public class ExternalTriggersController : ControllerBase
         var idempotencyHeader = Request.Headers["Idempotency-Key"].ToString();
         var idempotencyKey = string.IsNullOrWhiteSpace(idempotencyHeader) ? null : idempotencyHeader;
         var idempotencyRejected = idempotencyKey != null && !ExternalTriggerIdempotency.IsWellFormed(idempotencyKey);
-        var outcome = await _ingress.ReceiveAsync(new ExternalTriggerCall(slug, presentedKey, idempotencyKey, body, idempotencyRejected), cancellationToken).ConfigureAwait(false);
+        var outcome = await _mediator.Send(new ReceiveExternalTriggerCommand
+        {
+            Slug = slug,
+            PresentedKey = presentedKey,
+            IdempotencyKey = idempotencyKey,
+            IdempotencyRejected = idempotencyRejected,
+            RawBody = body,
+        }, cancellationToken).ConfigureAwait(false);
 
         return outcome.Kind switch
         {
-            ExternalTriggerOutcomeKind.NotFound => NotFound(),
-            ExternalTriggerOutcomeKind.Unauthorized => Unauthorized(),
-            ExternalTriggerOutcomeKind.InvalidPayload => BadRequest(new { errors = outcome.Errors }),
-            ExternalTriggerOutcomeKind.Deduplicated => Ok(new { runId = outcome.RunId, deduplicated = true }),
-            ExternalTriggerOutcomeKind.Accepted => StatusCode(StatusCodes.Status202Accepted, new { runId = outcome.RunId == Guid.Empty ? (Guid?)null : outcome.RunId, deduplicated = false }),
+            ExternalTriggerDeliveryKind.NotFound => NotFound(),
+            ExternalTriggerDeliveryKind.Unauthorized => Unauthorized(),
+            ExternalTriggerDeliveryKind.InvalidPayload => BadRequest(new { errors = outcome.Errors }),
+            ExternalTriggerDeliveryKind.Deduplicated => Ok(new { runId = outcome.RunId, deduplicated = true }),
+            ExternalTriggerDeliveryKind.Accepted => StatusCode(StatusCodes.Status202Accepted, new { runId = outcome.RunId == Guid.Empty ? (Guid?)null : outcome.RunId, deduplicated = false }),
             _ => throw new InvalidOperationException($"Unknown external trigger outcome: {outcome.Kind}"),
         };
     }
