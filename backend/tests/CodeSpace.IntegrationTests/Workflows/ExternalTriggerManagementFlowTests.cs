@@ -64,6 +64,32 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task An_unusable_draft_is_refused_without_damaging_the_live_endpoint()
+    {
+        var seed = await SeedAsync();
+        (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        var before = await RowAsync(seed);
+
+        var error = await Should.ThrowAsync<ArgumentException>(() => UpdateAsync(seed, Definition("告警")));
+
+        var after = await RowAsync(seed);
+        after.Id.ShouldBe(before.Id);
+        after.Slug.ShouldBe(before.Slug);
+        after.KeyDigest.ShouldBe(before.KeyDigest);
+        after.KeyCiphertext.ShouldBe(before.KeyCiphertext);
+        var outcome = await ReceiveAsync(seed);
+        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        outcome.RunId.ShouldNotBe(Guid.Empty);
+        using var scope = fixture.BeginScope();
+        var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.SingleAsync(r => r.Id == outcome.RunId);
+        run.WorkflowId.ShouldBe(seed.WorkflowId);
+
+        error.ParamName.ShouldBe("slug");
+        error.Message.ShouldContain("slug");
+        error.Message.ShouldContain("Hyphens and underscores are allowed");
+    }
+
+    [Fact]
     public async Task Reveal_hands_back_the_minted_key()
     {
         var seed = await SeedAsync();

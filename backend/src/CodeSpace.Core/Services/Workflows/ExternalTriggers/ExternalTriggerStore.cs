@@ -19,7 +19,7 @@ public sealed class ExternalTriggerStore(CodeSpaceDbContext db, ExternalTriggerK
     /// </summary>
     public async Task<ExternalTriggerView> EnsureForNodeAsync(Guid workflowId, Guid teamId, string nodeId, string? desiredSlug, Guid actorId, CancellationToken cancellationToken)
     {
-        var slug = DeriveRequiredSlug(desiredSlug);
+        var slug = DeriveRequiredSlug(desiredSlug, "slug");
         var row = await db.WorkflowExternalTrigger.SingleOrDefaultAsync(
             t => t.WorkflowId == workflowId && t.TeamId == teamId && t.NodeId == nodeId && t.DeletedDate == null, cancellationToken).ConfigureAwait(false);
         if (row is not null) return View(row);
@@ -52,7 +52,7 @@ public sealed class ExternalTriggerStore(CodeSpaceDbContext db, ExternalTriggerK
     public async Task RenameAsync(Guid triggerId, Guid teamId, string desiredSlug, Guid actorId, CancellationToken cancellationToken)
     {
         var row = await LoadAsync(triggerId, teamId, cancellationToken).ConfigureAwait(false);
-        row.Slug = DeriveRequiredSlug(desiredSlug);
+        row.Slug = DeriveRequiredSlug(desiredSlug, nameof(desiredSlug));
         row.LastModifiedBy = actorId;
         await SaveAsync(row.Slug, cancellationToken).ConfigureAwait(false);
     }
@@ -70,11 +70,11 @@ public sealed class ExternalTriggerStore(CodeSpaceDbContext db, ExternalTriggerK
         }
     }
 
-    private static string DeriveRequiredSlug(string? desiredSlug)
+    private static string DeriveRequiredSlug(string? desiredSlug, string parameterName)
     {
         var slug = ExternalTriggerSlug.Derive(desiredSlug);
         if (!ExternalTriggerSlug.IsUsable(slug))
-            throw new ArgumentException("External trigger slug must contain ASCII letters or digits. Choose a usable ASCII name.", nameof(desiredSlug));
+            throw new ArgumentException("The name you entered must produce a non-empty external trigger slug. ASCII letters and digits are supported. Hyphens and underscores are allowed. Choose a usable ASCII name.", parameterName);
         return slug;
     }
 
