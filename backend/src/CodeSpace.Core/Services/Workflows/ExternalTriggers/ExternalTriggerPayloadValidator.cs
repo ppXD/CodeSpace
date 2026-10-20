@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Numerics;
 
 namespace CodeSpace.Core.Services.Workflows.ExternalTriggers;
 
@@ -76,12 +77,30 @@ public static class ExternalTriggerPayloadValidator
         "object" => value.ValueKind == JsonValueKind.Object,
         "array" => value.ValueKind == JsonValueKind.Array,
         "string" => value.ValueKind == JsonValueKind.String,
-        "integer" => value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var number) && number == Math.Truncate(number),
+        "integer" => value.ValueKind == JsonValueKind.Number && IsInteger(value.GetRawText()),
         "number" => value.ValueKind == JsonValueKind.Number,
         "boolean" => value.ValueKind is JsonValueKind.True or JsonValueKind.False,
         "null" => value.ValueKind == JsonValueKind.Null,
         _ => true,
     };
+
+    private static bool IsInteger(string rawNumber)
+    {
+        var exponentIndex = rawNumber.IndexOfAny(['e', 'E']);
+        var mantissa = exponentIndex < 0 ? rawNumber : rawNumber[..exponentIndex];
+        var exponent = exponentIndex < 0 ? BigInteger.Zero : BigInteger.Parse(rawNumber[(exponentIndex + 1)..], System.Globalization.CultureInfo.InvariantCulture);
+        var decimalIndex = mantissa.IndexOf('.');
+        var fractionalDigits = decimalIndex < 0 ? 0 : mantissa.Length - decimalIndex - 1;
+        var digits = mantissa.Replace(".", "", StringComparison.Ordinal).TrimStart('-');
+        var significantDigits = digits.TrimEnd('0');
+        if (significantDigits.Length == 0) return true;
+
+        // JSON Schema treats 5.0 as an integer: accept a decimal token when its exact value has no fractional
+        // part after applying the exponent. Checking token digits avoids double rounding away a non-zero fraction.
+        var remainingFractionalDigits = new BigInteger(fractionalDigits) - exponent;
+        if (remainingFractionalDigits <= BigInteger.Zero) return true;
+        return remainingFractionalDigits <= digits.Length - significantDigits.Length;
+    }
 
     private static bool JsonValueEquals(JsonElement left, JsonElement right)
     {
