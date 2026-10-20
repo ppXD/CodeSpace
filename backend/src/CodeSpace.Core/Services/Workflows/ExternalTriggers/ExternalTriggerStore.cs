@@ -7,6 +7,13 @@ namespace CodeSpace.Core.Services.Workflows.ExternalTriggers;
 
 public sealed class ExternalTriggerStore(CodeSpaceDbContext db, ExternalTriggerKeySealer sealer) : IExternalTriggerStore
 {
+    public async Task<IReadOnlyList<ExternalTriggerView>> ListForWorkflowAsync(Guid workflowId, Guid teamId, CancellationToken cancellationToken) =>
+        await db.WorkflowExternalTrigger.AsNoTracking()
+            .Where(t => t.WorkflowId == workflowId && t.TeamId == teamId && t.DeletedDate == null)
+            .OrderBy(t => t.NodeId)
+            .Select(t => new ExternalTriggerView(t.Id, t.TeamId, t.WorkflowId, t.NodeId, t.Slug))
+            .ToArrayAsync(cancellationToken).ConfigureAwait(false);
+
     public async Task<ExternalTriggerView?> FindAsync(string slug, Guid teamId, CancellationToken cancellationToken) =>
         await db.WorkflowExternalTrigger.AsNoTracking()
             .Where(t => t.Slug == slug && t.TeamId == teamId && t.DeletedDate == null)

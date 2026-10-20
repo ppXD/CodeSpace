@@ -22,6 +22,53 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     private sealed record Seed(Guid UserId, Guid TeamId, Guid WorkflowId, string Slug, string Key);
 
     [Fact]
+    public async Task Metadata_lists_only_public_live_fields_and_allows_viewers()
+    {
+        var seed = await SeedAsync();
+        var harness = new TenantHarness(factory);
+        var viewer = await harness.AccountAsync();
+        await harness.AddMemberAsync(seed.TeamId, viewer, TeamRole.Viewer);
+        using var response = await harness.SendAsync(HttpMethod.Get,
+            $"/api/workflows/external-triggers?workflowId={seed.WorkflowId}", viewer, seed.TeamId);
+
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, await TenantHarness.DescribeAsync(response));
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        payload.EnumerateObject().Select(p => p.Name).ShouldBe(new[] { "triggers" });
+        var trigger = payload.GetProperty("triggers").EnumerateArray().ShouldHaveSingleItem();
+        trigger.EnumerateObject().Select(p => p.Name).Order().ShouldBe(new[] { "id", "nodeId", "slug", "workflowId" });
+        trigger.GetProperty("id").GetGuid().ShouldNotBe(Guid.Empty);
+        trigger.GetProperty("workflowId").GetGuid().ShouldBe(seed.WorkflowId);
+        trigger.GetProperty("nodeId").GetString().ShouldBe("trigger");
+        trigger.GetProperty("slug").GetString().ShouldBe(seed.Slug);
+    }
+
+    [Fact]
+    public async Task Metadata_returns_404_for_a_missing_workflow_and_401_for_anonymous_callers()
+    {
+        var seed = await SeedAsync();
+        var harness = new TenantHarness(factory);
+        using var missing = await harness.SendAsync(HttpMethod.Get,
+            $"/api/workflows/external-triggers?workflowId={Guid.NewGuid()}", seed.UserId, seed.TeamId);
+        missing.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+        using var anonymous = await harness.Client().GetAsync($"/api/workflows/external-triggers?workflowId={seed.WorkflowId}");
+        anonymous.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Metadata_returns_an_empty_list_when_the_workflow_has_no_live_trigger()
+    {
+        var seed = await SeedAsync();
+        var harness = new TenantHarness(factory);
+        await harness.DbAsync(db => db.WorkflowExternalTrigger.Where(t => t.WorkflowId == seed.WorkflowId)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.DeletedDate, DateTimeOffset.UtcNow)));
+        using var response = await harness.SendAsync(HttpMethod.Get,
+            $"/api/workflows/external-triggers?workflowId={seed.WorkflowId}", seed.UserId, seed.TeamId);
+        response.StatusCode.ShouldBe(HttpStatusCode.OK, await TenantHarness.DescribeAsync(response));
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        payload.GetProperty("triggers").EnumerateArray().ShouldBeEmpty();
+    }
+
+    [Fact]
     public async Task Management_reveals_rotates_and_renames_the_saved_endpoint()
     {
         var seed = await SeedAsync();

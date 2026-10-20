@@ -12,6 +12,7 @@ using CodeSpace.Messages.Commands.Workflows;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using CodeSpace.Messages.Failures;
+using CodeSpace.Messages.Queries.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Shouldly;
@@ -23,6 +24,79 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
 {
     private sealed record Seed(Guid TeamId, Guid UserId, Guid WorkflowId, string Slug, string Key);
+
+    [Fact]
+    public async Task Metadata_returns_the_live_rename_after_a_stale_draft_save()
+    {
+        var seed = await SeedAsync();
+        var renamed = "live-" + Guid.NewGuid().ToString("N");
+        using (var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId))
+            await scope.Resolve<IMediator>().Send(new RenameExternalTriggerCommand { Slug = seed.Slug, DesiredSlug = renamed });
+        await UpdateAsync(seed, Definition(seed.Slug));
+        using var read = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
+        var result = await read.Resolve<IMediator>().Send(new ListWorkflowExternalTriggersQuery { WorkflowId = seed.WorkflowId });
+        var trigger = result!.Triggers.ShouldHaveSingleItem();
+        trigger.Id.ShouldBe((await RowAsync(seed)).Id);
+        trigger.WorkflowId.ShouldBe(seed.WorkflowId);
+        trigger.NodeId.ShouldBe("start");
+        trigger.Slug.ShouldBe(renamed);
+    }
+
+    [Fact]
+    public async Task Metadata_does_not_return_another_teams_workflow()
+    {
+        var seed = await SeedAsync();
+        var other = await SeedAsync();
+        using var scope = fixture.BeginScopeAs(other.UserId, other.TeamId);
+        (await scope.Resolve<IMediator>().Send(new ListWorkflowExternalTriggersQuery { WorkflowId = seed.WorkflowId })).ShouldBeNull();
+        var own = await scope.Resolve<IMediator>().Send(new ListWorkflowExternalTriggersQuery { WorkflowId = other.WorkflowId });
+        own!.Triggers.ShouldHaveSingleItem().WorkflowId.ShouldBe(other.WorkflowId);
+    }
+
+    [Fact]
+    public async Task Metadata_is_empty_for_a_workflow_that_never_had_an_external_trigger()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture, false);
+        using var scope = fixture.BeginScopeAs(userId, teamId);
+        var workflowId = await CreateAsync(scope, WorkflowsTestSeed.MinimalDefinition());
+        var result = await scope.Resolve<IMediator>().Send(new ListWorkflowExternalTriggersQuery { WorkflowId = workflowId });
+        result.ShouldNotBeNull();
+        result.Triggers.ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Metadata_lists_every_live_row_without_assuming_a_single_trigger()
+    {
+        var seed = await SeedAsync();
+        using var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
+        await scope.Resolve<IExternalTriggerStore>().EnsureForNodeAsync(seed.WorkflowId, seed.TeamId,
+            "second", "second-" + Guid.NewGuid().ToString("N"), seed.UserId, CancellationToken.None);
+        var result = await scope.Resolve<IMediator>().Send(new ListWorkflowExternalTriggersQuery { WorkflowId = seed.WorkflowId });
+        result!.Triggers.Select(t => t.NodeId).Order().ShouldBe(new[] { "second", "start" });
+        result.Triggers.ShouldAllBe(t => t.WorkflowId == seed.WorkflowId);
+    }
+
+    [Fact]
+    public async Task Metadata_excludes_retired_nodes_and_deleted_workflows()
+    {
+        var seed = await SeedAsync();
+        using (var setup = fixture.BeginScope())
+        {
+            var db = setup.Resolve<CodeSpaceDbContext>();
+            await db.WorkflowExternalTrigger.Where(t => t.WorkflowId == seed.WorkflowId)
+                .ExecuteUpdateAsync(s => s.SetProperty(t => t.DeletedDate, DateTimeOffset.UtcNow));
+        }
+        using (var read = fixture.BeginScopeAs(seed.UserId, seed.TeamId))
+        {
+            var result = await read.Resolve<IMediator>().Send(new ListWorkflowExternalTriggersQuery { WorkflowId = seed.WorkflowId });
+            result!.Triggers.ShouldBeEmpty();
+        }
+        using (var setup = fixture.BeginScope())
+            await setup.Resolve<CodeSpaceDbContext>().Workflow.Where(w => w.Id == seed.WorkflowId)
+                .ExecuteUpdateAsync(s => s.SetProperty(w => w.DeletedDate, DateTimeOffset.UtcNow));
+        using var verify = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
+        (await verify.Resolve<IMediator>().Send(new ListWorkflowExternalTriggersQuery { WorkflowId = seed.WorkflowId })).ShouldBeNull();
+    }
 
     [Theory]
     [InlineData(false)]
