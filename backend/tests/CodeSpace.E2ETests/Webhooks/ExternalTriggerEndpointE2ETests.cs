@@ -18,7 +18,7 @@ namespace CodeSpace.E2ETests.Webhooks;
 [Trait("Surface", "Http")]
 public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) : IClassFixture<WebhookApiFactory>
 {
-    private const string Body = """{"service":"a"}""";
+    private const string BODY = """{"service":"a"}""";
     private sealed record Seed(Guid UserId, Guid TeamId, Guid WorkflowId, string Slug, string Key);
 
     [Fact]
@@ -61,7 +61,7 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         };
         var apiKey = form is "api-key" or "empty-bearer-fallback" or "wrong-scheme-fallback" or "api-key-before-query" ? seed.Key : null;
         var url = Url(seed) + (form == "query" ? "?key=" + seed.Key : form == "api-key-before-query" ? "?key=wrong" : "");
-        using var response = await PostAsync(url, Body, authorization, apiKey);
+        using var response = await PostAsync(url, BODY, authorization, apiKey);
         response.StatusCode.ShouldBe(HttpStatusCode.Accepted, await TenantHarness.DescribeAsync(response));
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
         payload.GetProperty("deduplicated").GetBoolean().ShouldBeFalse();
@@ -73,7 +73,7 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     public async Task A_bearer_key_takes_precedence_over_other_key_forms()
     {
         var seed = await SeedAsync();
-        using var response = await PostAsync(Url(seed) + "?key=" + seed.Key, Body, "Bearer ext_wrong", seed.Key);
+        using var response = await PostAsync(Url(seed) + "?key=" + seed.Key, BODY, "Bearer ext_wrong", seed.Key);
         response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
         await ShouldHaveNoRequestsAsync(seed);
     }
@@ -91,14 +91,28 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     public async Task A_contract_violation_is_400_with_the_ingress_errors_unchanged()
     {
         var seed = await SeedAsync();
-        const string invalidBody = """{"service":7}""";
+        const string INVALID_BODY = """{"service":7}""";
         using var scope = factory.Services.CreateScope();
-        var expected = await scope.ServiceProvider.GetRequiredService<IExternalTriggerIngress>().ReceiveAsync(new(seed.Slug, seed.Key, null, invalidBody, false), CancellationToken.None);
-        using var response = await PostAsync(Url(seed), invalidBody, apiKey: seed.Key);
+        var expected = await scope.ServiceProvider.GetRequiredService<IExternalTriggerIngress>().ReceiveAsync(new(seed.Slug, seed.Key, null, INVALID_BODY, false), CancellationToken.None);
+        using var response = await PostAsync(Url(seed), INVALID_BODY, apiKey: seed.Key);
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
         payload.GetProperty("errors").EnumerateArray().Select(e => e.GetString()).ShouldBe(expected.Errors);
         (await response.Content.ReadAsStringAsync()).ShouldContain("$.service");
+        await ShouldHaveNoRequestsAsync(seed);
+    }
+
+    [Theory]
+    [InlineData("not json")]
+    [InlineData("[]")]
+    [InlineData("7")]
+    public async Task An_authenticated_malformed_or_non_object_body_is_400_and_writes_nothing(string body)
+    {
+        var seed = await SeedAsync();
+        using var response = await PostAsync(Url(seed), body, apiKey: seed.Key);
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        payload.GetProperty("errors").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "$: body must be a JSON object" });
         await ShouldHaveNoRequestsAsync(seed);
     }
 
@@ -108,7 +122,7 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     public async Task An_invalid_idempotency_key_is_400_and_starts_nothing(bool oversized)
     {
         var seed = await SeedAsync();
-        using var response = await PostAsync(Url(seed), Body, apiKey: seed.Key, idempotencyKey: oversized ? new string('a', 201) : "bad key");
+        using var response = await PostAsync(Url(seed), BODY, apiKey: seed.Key, idempotencyKey: oversized ? new string('a', 201) : "bad key");
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
         payload.GetProperty("errors").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "Idempotency-Key must be at most 200 characters from [A-Za-z0-9._~-]" });
@@ -124,7 +138,7 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         var seed = await SeedAsync();
         for (var i = 0; i < 2; i++)
         {
-            using var response = await PostAsync(Url(seed), Body, apiKey: seed.Key, idempotencyKey: idempotencyKey);
+            using var response = await PostAsync(Url(seed), BODY, apiKey: seed.Key, idempotencyKey: idempotencyKey);
             response.StatusCode.ShouldBe(HttpStatusCode.Accepted);
         }
         (await RunsAsync(seed)).Length.ShouldBe(2);
@@ -134,8 +148,8 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     public async Task A_deduplicated_delivery_answers_200_with_the_first_run_id()
     {
         var seed = await SeedAsync();
-        using var first = await PostAsync(Url(seed), Body, apiKey: seed.Key, idempotencyKey: "evt-1");
-        using var second = await PostAsync(Url(seed), Body, apiKey: seed.Key, idempotencyKey: "evt-1");
+        using var first = await PostAsync(Url(seed), BODY, apiKey: seed.Key, idempotencyKey: "evt-1");
+        using var second = await PostAsync(Url(seed), BODY, apiKey: seed.Key, idempotencyKey: "evt-1");
         first.StatusCode.ShouldBe(HttpStatusCode.Accepted);
         second.StatusCode.ShouldBe(HttpStatusCode.OK);
         var accepted = await first.Content.ReadFromJsonAsync<JsonElement>();
@@ -150,7 +164,7 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     {
         var seed = await SeedAsync();
         await new TenantHarness(factory).DbAsync(db => db.TeamMembership.Where(m => m.TeamId == seed.TeamId).ExecuteDeleteAsync());
-        using var response = await PostAsync(Url(seed), Body, apiKey: seed.Key);
+        using var response = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
         response.StatusCode.ShouldBe(HttpStatusCode.Accepted);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
         payload.GetProperty("runId").ValueKind.ShouldBe(JsonValueKind.Null);
