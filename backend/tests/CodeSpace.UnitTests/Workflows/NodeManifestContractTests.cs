@@ -27,6 +27,7 @@ public class NodeManifestContractTests
         yield return new object[] { new TriggerPushNode() };
         yield return new object[] { new TriggerScheduleNode() };
         yield return new object[] { new TriggerManualNode() };
+        yield return new object[] { new TriggerExternalNode() };
         yield return new object[] { new TerminalNode() };
     }
 
@@ -80,6 +81,7 @@ public class NodeManifestContractTests
         new TriggerPushNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
         new TriggerScheduleNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
         new TriggerManualNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
+        new TriggerExternalNode().Manifest.Kind.ShouldBe(NodeKind.Trigger);
     }
 
     [Fact]
@@ -103,6 +105,8 @@ public class NodeManifestContractTests
             "event triggers subscribe to webhooks and MUST keep IsManual=false so deriveActivations still emits their activation");
         new TriggerScheduleNode().Manifest.IsManual.ShouldBeFalse(
             "the schedule trigger MUST keep IsManual=false so deriveActivations emits the activation row the producer queries");
+        new TriggerExternalNode().Manifest.IsManual.ShouldBeFalse(
+            "anonymous runs must carry activation lineage, so deriveActivations MUST project this trigger's activation row");
     }
 
     [Fact]
@@ -125,6 +129,29 @@ public class NodeManifestContractTests
         };
 
         var result = await new TriggerManualNode().RunAsync(context, CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Success);
+        result.Outputs["ticket"].GetString().ShouldBe("ABC-123");
+    }
+
+    [Fact]
+    public async Task External_trigger_echoes_run_payload_as_outputs()
+    {
+        var payload = JsonDocument.Parse("""{"ticket":"ABC-123"}""").RootElement
+            .EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
+
+        var context = new NodeRunContext
+        {
+            Inputs = new Dictionary<string, JsonElement>(),
+            Config = new Dictionary<string, JsonElement>(),
+            RawInputs = JsonDocument.Parse("{}").RootElement,
+            RawConfig = JsonDocument.Parse("{}").RootElement,
+            Scope = new NodeRunScope { Trigger = payload },
+            Logger = NullLogger.Instance,
+            Observability = NodeObservability.NoOp,
+        };
+
+        var result = await new TriggerExternalNode().RunAsync(context, CancellationToken.None);
 
         result.Status.ShouldBe(NodeStatus.Success);
         result.Outputs["ticket"].GetString().ShouldBe("ABC-123");
