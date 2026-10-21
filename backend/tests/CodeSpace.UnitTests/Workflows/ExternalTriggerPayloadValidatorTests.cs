@@ -109,5 +109,28 @@ public class ExternalTriggerPayloadValidatorTests
         errors.ShouldContain(e => e.Contains("$[1]"));
     }
 
+    [Theory]
+    [InlineData("\"text\"", true)]
+    [InlineData("7", true)]
+    [InlineData("true", true)]
+    [InlineData("null", false)]
+    [InlineData("{}", false)]
+    public void Array_items_accept_a_union_of_json_types(string json, bool isValid)
+    {
+        var errors = ExternalTriggerPayloadValidator.Validate(
+            Schema($"[{json}]"),
+            Schema("""{ "type": "array", "items": { "type": ["string", "number", "boolean"] } }"""));
+        (errors.Count == 0).ShouldBe(isValid);
+    }
+
+    [Fact]
+    public void An_empty_type_union_is_refused_with_a_usable_error()
+    {
+        var errors = ExternalTriggerPayloadValidator.Validate(
+            Schema("\"text\""),
+            Schema("""{ "type": [] }"""));
+        errors.ShouldHaveSingleItem().ShouldContain("the schema declares none");
+    }
+
     private static JsonElement Schema(string json) => JsonDocument.Parse(json).RootElement.Clone();
 }

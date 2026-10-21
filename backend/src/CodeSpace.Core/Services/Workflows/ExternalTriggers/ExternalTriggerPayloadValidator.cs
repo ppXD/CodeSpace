@@ -20,10 +20,9 @@ public static class ExternalTriggerPayloadValidator
     {
         if (schema.ValueKind != JsonValueKind.Object) return;
 
-        if (schema.TryGetProperty("type", out var type) && type.ValueKind == JsonValueKind.String &&
-            !TypeMatches(value, type.GetString()!))
+        if (schema.TryGetProperty("type", out var type) && !TypeMatches(value, type))
         {
-            errors.Add($"{path}: expected type '{type.GetString()}' but got {KindName(value.ValueKind)}");
+            errors.Add($"{path}: expected type '{DescribeType(type)}' but got {KindName(value.ValueKind)}");
             return;
         }
 
@@ -72,6 +71,13 @@ public static class ExternalTriggerPayloadValidator
         }
     }
 
+    private static bool TypeMatches(JsonElement value, JsonElement type) => type.ValueKind switch
+    {
+        JsonValueKind.String => TypeMatches(value, type.GetString()!),
+        JsonValueKind.Array => type.EnumerateArray().Any(candidate => candidate.ValueKind == JsonValueKind.String && TypeMatches(value, candidate.GetString()!)),
+        _ => true,
+    };
+
     private static bool TypeMatches(JsonElement value, string type) => type switch
     {
         "object" => value.ValueKind == JsonValueKind.Object,
@@ -83,6 +89,15 @@ public static class ExternalTriggerPayloadValidator
         "null" => value.ValueKind == JsonValueKind.Null,
         _ => true,
     };
+
+    private static string DescribeType(JsonElement type)
+    {
+        var names = type.ValueKind == JsonValueKind.Array
+            ? type.EnumerateArray().Where(candidate => candidate.ValueKind == JsonValueKind.String).Select(candidate => candidate.GetString()).ToArray()
+            : type.ValueKind == JsonValueKind.String ? [type.GetString()!] : [];
+
+        return names.Length == 0 ? "a valid JSON type (the schema declares none)" : string.Join(" | ", names);
+    }
 
     private static bool IsInteger(string rawNumber)
     {
