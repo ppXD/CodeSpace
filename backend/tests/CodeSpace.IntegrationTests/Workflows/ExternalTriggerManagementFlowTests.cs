@@ -304,7 +304,8 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         var db = audit.Resolve<CodeSpaceDbContext>();
         var row = await db.WorkflowExternalTrigger.AsNoTracking().SingleAsync(t => t.WorkflowId == seed.WorkflowId);
         row.DeletedDate.ShouldNotBeNull();
-        audit.Resolve<ExternalTriggerKeySealer>().Open(row.KeyCiphertext).ShouldBe(seed.Key);
+        row.KeyDigest.ShouldBe(ExternalTriggerKeySealer.Digest(seed.Key));
+        row.KeyCiphertext.ShouldBeEmpty();
         (await db.WorkflowExternalTrigger.CountAsync(t => t.Slug == seed.Slug && t.DeletedDate == null)).ShouldBe(0);
     }
 
@@ -364,7 +365,10 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         (await ReceiveAsync(seed)).Kind.ShouldBe(replace ? ExternalTriggerOutcomeKind.Unauthorized : ExternalTriggerOutcomeKind.NotFound);
         using var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
         var rows = await scope.Resolve<CodeSpaceDbContext>().WorkflowExternalTrigger.Where(t => t.WorkflowId == seed.WorkflowId).ToArrayAsync();
-        rows.Single(t => t.NodeId == "start").DeletedDate.ShouldNotBeNull();
+        var retired = rows.Single(t => t.NodeId == "start");
+        retired.DeletedDate.ShouldNotBeNull();
+        retired.KeyDigest.ShouldBe(ExternalTriggerKeySealer.Digest(seed.Key));
+        retired.KeyCiphertext.ShouldBeEmpty();
         if (replace)
         {
             var fresh = await scope.Resolve<IMediator>().Send(new RevealExternalTriggerKeyCommand { Slug = seed.Slug });

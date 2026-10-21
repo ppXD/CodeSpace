@@ -14,7 +14,11 @@ public sealed class ExternalTriggerDefinitionSync(CodeSpaceDbContext db, IExtern
         var nodeIds = nodes.Select(n => n.Id).ToArray();
         var retired = await db.WorkflowExternalTrigger.Where(t => t.WorkflowId == workflowId && t.TeamId == teamId && t.DeletedDate == null && !nodeIds.Contains(t.NodeId))
             .ToListAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var row in retired) row.DeletedDate = DateTimeOffset.UtcNow;
+        foreach (var row in retired)
+        {
+            row.DeletedDate = DateTimeOffset.UtcNow;
+            row.KeyCiphertext = string.Empty;
+        }
 
         // Release the partial unique slug before a replacement claims it. The command transaction keeps both atomic.
         if (retired.Count != 0) await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);

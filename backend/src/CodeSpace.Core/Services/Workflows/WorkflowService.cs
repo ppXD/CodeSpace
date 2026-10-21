@@ -281,11 +281,14 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         foreach (var a in activations) a.DeletedDate = now;
 
         // Retiring the trigger row is what actually kills the credential: reveal/rotate/rename resolve the slug
-        // through workflow_external_trigger alone, so a live row here would keep handing out the plaintext key for
-        // a workflow nobody can list any more. Soft-delete keeps the audit trail and releases the slug, because
-        // uq_wet_slug is partial on deleted_date IS NULL.
+        // through workflow_external_trigger alone. The digest and row keep the audit trail; the ciphertext does not
+        // outlive the endpoint.
         var triggers = await _db.WorkflowExternalTrigger.Where(t => t.WorkflowId == workflowId && t.DeletedDate == null).ToListAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var t in triggers) t.DeletedDate = now;
+        foreach (var t in triggers)
+        {
+            t.DeletedDate = now;
+            t.KeyCiphertext = string.Empty;
+        }
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
