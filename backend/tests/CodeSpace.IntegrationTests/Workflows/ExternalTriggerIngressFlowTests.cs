@@ -270,9 +270,10 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Theory]
-    [InlineData(false, "agent.authority_denied")]
-    [InlineData(true, "completion_admission_refused")]
-    public async Task An_admission_refusal_is_accepted_without_a_run_and_durably_audited(bool completion, string reason)
+    [InlineData(false, "agent.authority_denied", ExternalTriggerOutcomeKind.Forbidden)]
+    [InlineData(true, "completion_admission_refused", ExternalTriggerOutcomeKind.Unprocessable)]
+    public async Task A_deterministic_admission_refusal_is_classified_without_a_run_and_durably_audited(
+        bool completion, string reason, ExternalTriggerOutcomeKind expectedKind)
     {
         var seed = await SeedAsync();
         using (var scope = fixture.BeginScope())
@@ -293,7 +294,7 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         for (var i = 0; i < 2; i++)
         {
             var outcome = await ReceiveAsync(seed, idempotencyKey: "refused");
-            outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+            outcome.Kind.ShouldBe(expectedKind);
             outcome.RunId.ShouldBe(Guid.Empty);
         }
         (await RunsAsync(seed)).ShouldBeEmpty();

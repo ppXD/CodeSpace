@@ -68,6 +68,8 @@ public sealed class ReceiveExternalTriggerCommandHandler(IExternalTriggerIngress
                 ExternalTriggerOutcomeKind.Deduplicated => ExternalTriggerDeliveryKind.Deduplicated,
                 ExternalTriggerOutcomeKind.NotFound => ExternalTriggerDeliveryKind.NotFound,
                 ExternalTriggerOutcomeKind.Unauthorized => ExternalTriggerDeliveryKind.Unauthorized,
+                ExternalTriggerOutcomeKind.Forbidden => ExternalTriggerDeliveryKind.Forbidden,
+                ExternalTriggerOutcomeKind.Unprocessable => ExternalTriggerDeliveryKind.Unprocessable,
                 ExternalTriggerOutcomeKind.InvalidPayload => ExternalTriggerDeliveryKind.InvalidPayload,
                 ExternalTriggerOutcomeKind.RateLimited => ExternalTriggerDeliveryKind.RateLimited,
                 _ => throw new InvalidOperationException($"Unknown external trigger outcome: {outcome.Kind}"),

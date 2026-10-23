@@ -126,12 +126,12 @@ public sealed class ExternalTriggerIngress(
             catch (AgentAuthorityDeniedException ex)
             {
                 await AuditRefusalAsync(verification, call, ex.Code, ex.Reason, ct).ConfigureAwait(false);
-                return Outcome(ExternalTriggerOutcomeKind.Accepted);
+                return Outcome(ExternalTriggerOutcomeKind.Forbidden, errors: [ex.Message]);
             }
             catch (CompletionAdmissionRefusedException ex)
             {
                 await AuditRefusalAsync(verification, call, WorkflowRunRequestRejectionReasons.CompletionAdmissionRefused, ex.Message, ct).ConfigureAwait(false);
-                return Outcome(ExternalTriggerOutcomeKind.Accepted);
+                return Outcome(ExternalTriggerOutcomeKind.Unprocessable, errors: [ex.Message]);
             }
 
             if (runId == Guid.Empty)

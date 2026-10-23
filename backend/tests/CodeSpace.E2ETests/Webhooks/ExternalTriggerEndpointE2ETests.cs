@@ -5,8 +5,10 @@ using System.Text.Json;
 using CodeSpace.Api.Controllers;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
+using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Core.Services.Workflows.ExternalTriggers;
 using CodeSpace.E2ETests.Infrastructure;
+using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
@@ -293,15 +295,46 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     }
 
     [Fact]
-    public async Task An_admission_refusal_is_202_with_a_null_run_id()
+    public async Task An_authority_refusal_is_403_without_a_run()
     {
         var seed = await SeedAsync();
         await new TenantHarness(factory).DbAsync(db => db.TeamMembership.Where(m => m.TeamId == seed.TeamId).ExecuteDeleteAsync());
         using var response = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
-        response.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+        response.StatusCode.ShouldBe(HttpStatusCode.Forbidden);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
-        payload.GetProperty("runId").ValueKind.ShouldBe(JsonValueKind.Null);
-        payload.GetProperty("deduplicated").GetBoolean().ShouldBeFalse();
+        payload.GetProperty("errors").EnumerateArray().ShouldNotBeEmpty();
+        (await RunsAsync(seed)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_completion_policy_refusal_is_422_without_a_run()
+    {
+        var seed = await SeedAsync();
+        await new TenantHarness(factory).DbAsync(async db =>
+        {
+            var workflow = await db.Workflow.SingleAsync(w => w.Id == seed.WorkflowId);
+            var graph = JsonSerializer.Deserialize<WorkflowDefinition>(workflow.DefinitionJson, WorkflowJson.Options)!;
+            var definition = JsonSerializer.Serialize(graph with { CompletionMode = WorkflowDefinition.CompletionModeEnforced }, WorkflowJson.Options);
+            workflow.LatestVersion = 2;
+            workflow.DefinitionJson = definition;
+            db.WorkflowVersion.Add(new WorkflowVersion
+            {
+                WorkflowId = seed.WorkflowId,
+                Version = 2,
+                DefinitionJson = definition,
+                DefinitionHash = "legacy",
+                CommittedAt = DateTimeOffset.UtcNow,
+                CreatedDate = DateTimeOffset.UtcNow,
+                CreatedBy = seed.UserId,
+            });
+            await db.SaveChangesAsync();
+            return true;
+        });
+
+        using var response = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
+        response.StatusCode.ShouldBe(HttpStatusCode.UnprocessableEntity);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        payload.GetProperty("errors").EnumerateArray().ShouldNotBeEmpty();
         (await RunsAsync(seed)).ShouldBeEmpty();
     }
 

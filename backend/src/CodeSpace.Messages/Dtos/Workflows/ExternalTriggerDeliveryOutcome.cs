@@ -2,9 +2,9 @@ namespace CodeSpace.Messages.Dtos.Workflows;
 
 /// <summary>
 /// What an anonymous external trigger delivery produced. Mirrors the ingress's own outcome so the
-/// controller can map it to a status without the outcome type having to cross from <c>CodeSpace.Core</c>:
-/// <see cref="ExternalTriggerDeliveryKind.Accepted"/> is 202 even when admission refused to stage a run,
-/// and only <see cref="ExternalTriggerDeliveryKind.Deduplicated"/> carries a run id the caller already has.
+/// controller can map it to a status without the outcome type having to cross from <c>CodeSpace.Core</c>.
+/// A staged run is <see cref="ExternalTriggerDeliveryKind.Accepted"/>; a deterministic admission
+/// refusal is <see cref="ExternalTriggerDeliveryKind.Forbidden"/> or <see cref="ExternalTriggerDeliveryKind.Unprocessable"/>.
 /// </summary>
 public sealed record ExternalTriggerDeliveryOutcome
 {
@@ -23,6 +23,8 @@ public enum ExternalTriggerDeliveryKind
     Deduplicated,
     NotFound,
     Unauthorized,
+    Forbidden,
+    Unprocessable,
     InvalidPayload,
     RateLimited,
 }

@@ -14,7 +14,7 @@ namespace CodeSpace.Api.Controllers;
 /// <summary>
 /// Anonymous ingress: the per-node key is the only credential, not a user or team session. Slugs are enumerable;
 /// every unavailable endpoint therefore has the same 404, revealing none of its deletion or activation state.
-/// Accepted calls remain 2xx even when admission cannot stage a run, so an unfixable refusal does not invite retries.
+/// Capacity admission answers 429 with Retry-After; deterministic authority or completion-policy refusals answer 403 or 422.
 /// Payload rejection still answers 400, with the ingress's errors rather than a second validation contract here.
 /// </summary>
 [ApiController]
@@ -59,6 +59,8 @@ public class ExternalTriggersController : ControllerBase
         {
             ExternalTriggerDeliveryKind.NotFound => NotFound(),
             ExternalTriggerDeliveryKind.Unauthorized => Unauthorized(),
+            ExternalTriggerDeliveryKind.Forbidden => StatusCode(StatusCodes.Status403Forbidden, new { errors = outcome.Errors }),
+            ExternalTriggerDeliveryKind.Unprocessable => StatusCode(StatusCodes.Status422UnprocessableEntity, new { errors = outcome.Errors }),
             ExternalTriggerDeliveryKind.InvalidPayload => BadRequest(new { errors = outcome.Errors }),
             ExternalTriggerDeliveryKind.RateLimited => RateLimited(),
             ExternalTriggerDeliveryKind.Deduplicated => Ok(new { runId = outcome.RunId, deduplicated = true }),

@@ -26,4 +26,4 @@ public sealed record ExternalTriggerCall(string Slug, string? PresentedKey, stri
 
 public sealed record ExternalTriggerOutcome(ExternalTriggerOutcomeKind Kind, Guid RunId, IReadOnlyList<string> Errors);
 
-public enum ExternalTriggerOutcomeKind { Accepted, Deduplicated, NotFound, Unauthorized, InvalidPayload, RateLimited }
+public enum ExternalTriggerOutcomeKind { Accepted, Deduplicated, NotFound, Unauthorized, Forbidden, Unprocessable, InvalidPayload, RateLimited }
