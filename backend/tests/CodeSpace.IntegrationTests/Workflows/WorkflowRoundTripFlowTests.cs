@@ -459,6 +459,7 @@ public class WorkflowRoundTripFlowTests
     [InlineData("Node Manifests", "node-manifests-2")]      // shadows api/workflows/node-manifests
     [InlineData("System Variables", "system-variables-2")]  // shadows api/workflows/system-variables
     [InlineData("Decisions", "decisions-2")]                // shadows api/workflows/decisions
+    [InlineData("External Triggers", "external-triggers-2")] // shadows api/workflows/external-triggers
     public async Task Create_forces_a_suffix_when_the_slug_would_shadow_a_literal_route(string name, string expectedSlug)
     {
         // A workflow slugged to a literal sibling GET route (runs / node-manifests / system-variables / decisions)

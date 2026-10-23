@@ -10,6 +10,7 @@ using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Slugs;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.Engine;
+using CodeSpace.Core.Services.Workflows.ExternalTriggers;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Core.Services.Workflows.RunSources.Matchers;
@@ -50,6 +51,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     private readonly Rerun.IRerunCellSeeder _cellSeeder;
     private readonly Engine.IRunCancellationRegistry _cancellationRegistry;
     private readonly ILogger<WorkflowService> _logger;
+    private readonly ExternalTriggerDefinitionSync _externalTriggers;
 
     /// <summary>Reason stamped on a branch agent run aborted by the kill-wave when an operator cancels its parent workflow run.</summary>
     private const string OperatorCancelledAgentReason = "Cancelled because its parent workflow run was cancelled by an operator.";
@@ -63,7 +65,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// <summary>What someone answering the question of a run that ended — its card or its Room decision — is told. The run's end closed the wait unanswered (Discarded): an operator's stop, or the engine's own cleanup when the run failed. Continue re-runs the step, which asks again: telling them the question was "already resolved" would say someone answered it.</summary>
     public const string EndedRunQuestionMessage = "This run ended (it was stopped or failed), so its question closed unanswered. It opens again when the run is continued.";
 
-    public WorkflowService(CodeSpaceDbContext db, WorkflowDefinitionServices definition, WorkflowLaunchServices launch, WorkflowControlServices control, ILogger<WorkflowService> logger)
+    public WorkflowService(CodeSpaceDbContext db, WorkflowDefinitionServices definition, WorkflowLaunchServices launch, WorkflowControlServices control, ILogger<WorkflowService> logger, ExternalTriggerDefinitionSync externalTriggers)
     {
         _db = db;
         _validator = definition.Validator;
@@ -81,6 +83,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         _cellSeeder = control.Cells;
         _cancellationRegistry = control.Cancellation;
         _logger = logger;
+        _externalTriggers = externalTriggers;
     }
 
     public async Task<IReadOnlyList<WorkflowSummary>> ListAsync(Guid teamId, CancellationToken cancellationToken)
@@ -164,6 +167,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     public async Task<Guid> CreateAsync(Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, bool enabled, CancellationToken cancellationToken)
     {
+        definition = definition with { Inputs = ExternalTriggerInputProjection.Apply(definition.Inputs, definition) };
+        ExternalTriggerDefinitionSync.ValidateSchemas(definition);
         EnsureValidDefinition(definition);
         await EnsureActivationRepositoriesHeldAsync(teamId, activations, cancellationToken).ConfigureAwait(false);
 
@@ -213,6 +218,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
             throw new InvalidOperationException($"A workflow with slug '{slug}' was created concurrently in this team. Please retry.", ex);
         }
 
+        await _externalTriggers.SyncAsync(workflowId, teamId, definition, _author.Id ?? Guid.Empty, cancellationToken).ConfigureAwait(false);
+
         _logger.LogInformation(
             "Workflow created. WorkflowId={WorkflowId} TeamId={TeamId} Slug={Slug} Name={Name} Nodes={NodeCount} Edges={EdgeCount} Activations={ActivationCount} Enabled={Enabled}",
             workflowId, teamId, slug, name, definition.Nodes.Count, definition.Edges.Count, activations.Count, enabled);
@@ -222,6 +229,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     public async Task UpdateAsync(Guid workflowId, Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, CancellationToken cancellationToken)
     {
+        definition = definition with { Inputs = ExternalTriggerInputProjection.Apply(definition.Inputs, definition) };
+        ExternalTriggerDefinitionSync.ValidateSchemas(definition);
         EnsureValidDefinition(definition);
         await EnsureActivationRepositoriesHeldAsync(teamId, activations, cancellationToken).ConfigureAwait(false);
 
@@ -253,6 +262,8 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
         await ReplaceActivationsAsync(workflowId, activations, cancellationToken).ConfigureAwait(false);
 
+        await _externalTriggers.SyncAsync(workflowId, teamId, definition, _author.Id ?? Guid.Empty, cancellationToken).ConfigureAwait(false);
+
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
@@ -265,16 +276,27 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
         var workflow = await LoadWorkflowAsync(workflowId, teamId, cancellationToken).ConfigureAwait(false);
         if (workflow == null) return;
 
-        workflow.DeletedDate = DateTimeOffset.UtcNow;
+        var now = DateTimeOffset.UtcNow;
+        workflow.DeletedDate = now;
 
         var activations = await _db.WorkflowActivation.Where(a => a.WorkflowId == workflowId && a.DeletedDate == null).ToListAsync(cancellationToken).ConfigureAwait(false);
-        foreach (var a in activations) a.DeletedDate = DateTimeOffset.UtcNow;
+        foreach (var a in activations) a.DeletedDate = now;
+
+        // Retiring the trigger row is what actually kills the credential: reveal/rotate/rename resolve the slug
+        // through workflow_external_trigger alone. The digest and row keep the audit trail; the ciphertext does not
+        // outlive the endpoint.
+        var triggers = await _db.WorkflowExternalTrigger.Where(t => t.WorkflowId == workflowId && t.DeletedDate == null).ToListAsync(cancellationToken).ConfigureAwait(false);
+        foreach (var t in triggers)
+        {
+            t.DeletedDate = now;
+            t.KeyCiphertext = string.Empty;
+        }
 
         await _db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
 
         _logger.LogInformation(
-            "Workflow soft-deleted. WorkflowId={WorkflowId} TeamId={TeamId} ActivationsRemoved={ActivationCount}",
-            workflowId, teamId, activations.Count);
+            "Workflow soft-deleted. WorkflowId={WorkflowId} TeamId={TeamId} ActivationsRemoved={ActivationCount} TriggersRemoved={TriggerCount}",
+            workflowId, teamId, activations.Count, triggers.Count);
     }
 
     public async Task SetEnabledAsync(Guid workflowId, Guid teamId, bool enabled, CancellationToken cancellationToken)
@@ -2211,10 +2233,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// <summary>
     /// Slugs that would be shadowed by a literal <c>api/workflows/…</c> GET route — ASP.NET gives those
     /// literals precedence over the <c>{idOrSlug}</c> parameter, so a workflow slugged to one would be
-    /// unreachable. Forced to a <c>-N</c> variant at derivation. Keep in sync with the 0099 backfill list.
+    /// unreachable. Forced to a <c>-N</c> variant at derivation. <c>external-triggers</c> was added after
+    /// the 0099 backfill and is repaired by 0252 for existing rows.
     /// </summary>
     private static readonly HashSet<string> ReservedSlugs =
-        new(new[] { "runs", "node-manifests", "system-variables", "decisions" }, StringComparer.Ordinal);
+        new(new[] { "runs", "node-manifests", "system-variables", "decisions", "external-triggers" }, StringComparer.Ordinal);
 
     private static bool IsWorkflowSlugUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is Npgsql.PostgresException { SqlState: "23505" } pg

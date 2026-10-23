@@ -20,6 +20,7 @@ public class BuiltinPluginModuleTests
 
         module.Name.ShouldBe("Core Flow");
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerManualNode));
+        module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerExternalNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TriggerScheduleNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.TerminalNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.LogicIfNode));
@@ -37,7 +38,7 @@ public class BuiltinPluginModuleTests
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowTryStartNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowMapNode));
         module.Nodes.ShouldContain(typeof(CodeSpace.Core.Services.Workflows.Nodes.Builtin.FlowMapStartNode));
-        module.Nodes.Count.ShouldBe(18);
+        module.Nodes.Count.ShouldBe(19);
         module.RunSourceMatchers.ShouldBeEmpty("manual + schedule triggers subscribe to no inbound event (schedule is producer-driven), so Core Flow still ships zero matchers");
     }
 
@@ -122,6 +123,6 @@ public class BuiltinPluginModuleTests
         };
 
         var total = all.SelectMany(p => p.Nodes).Distinct().Count();
-        total.ShouldBe(43, "43 builtin node types across 6 domain plugins — incl. the Git plugin's git.integrate_run run-sourced integrate (P4) — adjust this number when adding a builtin");
+        total.ShouldBe(44, "44 builtin node types across 6 domain plugins — adjust this number when adding a builtin");
     }
 }
