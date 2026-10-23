@@ -326,6 +326,29 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task An_unsupported_schema_keyword_is_refused_at_save_without_creating_a_workflow()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture, false);
+        using var scope = fixture.BeginScopeAs(userId, teamId);
+        var config = JsonSerializer.SerializeToElement(new
+        {
+            slug = "unsupported-schema-" + Guid.NewGuid().ToString("N"),
+            inputSchema = new { type = "object", properties = new { service = new { type = "string", pattern = "^a" } } },
+        });
+        var definition = Definition("unused") with
+        {
+            Nodes = Definition("unused").Nodes.Select(n => n.Id == "start" ? n with { Config = config } : n).ToArray(),
+        };
+
+        var error = await Record.ExceptionAsync(() => CreateAsync(scope, definition));
+
+        error.ShouldNotBeNull();
+        FailureClassifier.Classify(error).Kind.ShouldBe(FailureKind.Unprocessable);
+        using var verify = fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().Workflow.CountAsync(w => w.TeamId == teamId)).ShouldBe(0);
+    }
+
+    [Fact]
     public async Task An_underivable_rename_is_refused_and_keeps_the_old_endpoint()
     {
         var seed = await SeedAsync();

@@ -8,6 +8,23 @@ namespace CodeSpace.Core.Services.Workflows.ExternalTriggers;
 
 public sealed class ExternalTriggerDefinitionSync(CodeSpaceDbContext db, IExternalTriggerStore store) : IScopedDependency
 {
+    /// <summary>
+    /// Save-time schema validation runs before any workflow row is written, so an unsupported keyword cannot leave
+    /// a half-created workflow behind.
+    /// </summary>
+    public static void ValidateSchemas(WorkflowDefinition definition)
+    {
+        var schemaErrors = definition.Nodes
+            .Where(n => n.TypeKey == ExternalTriggerSlug.TypeKey)
+            .SelectMany(node => node.Config.ValueKind == JsonValueKind.Object
+                && node.Config.TryGetProperty("inputSchema", out var schema)
+                ? ExternalTriggerPayloadValidator.ValidateSchema(schema)
+                : [])
+            .ToArray();
+        if (schemaErrors.Length != 0)
+            throw new WorkflowValidationException(schemaErrors);
+    }
+
     public async Task SyncAsync(Guid workflowId, Guid teamId, WorkflowDefinition definition, Guid actorId, CancellationToken cancellationToken)
     {
         var nodes = definition.Nodes.Where(n => n.TypeKey == ExternalTriggerSlug.TypeKey).ToArray();

@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents.Authority.Exceptions;
 using CodeSpace.Core.Services.Completion.Exceptions;
+using CodeSpace.Core.Services.Webhooks;
 using CodeSpace.Core.Services.Workflows.Dispatch;
 using CodeSpace.Core.Services.Workflows.RunSources;
 using CodeSpace.Messages.Constants;
@@ -29,13 +30,14 @@ public sealed class ExternalTriggerIngress(
     IWorkflowRunDispatcher runDispatcher,
     IPostCommitActions postCommit,
     IIngestionAuditor auditor,
+    ExternalTriggerRunAdmission admission,
     ILogger<ExternalTriggerIngress> logger) : IExternalTriggerIngress
 {
-    public async Task<ExternalTriggerOutcome> ReceiveAsync(ExternalTriggerCall call, CancellationToken ct)
+    public async Task<ExternalTriggerVerification> VerifyAsync(string slug, string? presentedKey, CancellationToken ct)
     {
         var trigger = await db.WorkflowExternalTrigger.AsNoTracking()
-            .SingleOrDefaultAsync(t => t.Slug == call.Slug && t.DeletedDate == null, ct).ConfigureAwait(false);
-        if (trigger is null) return Outcome(ExternalTriggerOutcomeKind.NotFound);
+            .SingleOrDefaultAsync(t => t.Slug == slug && t.DeletedDate == null, ct).ConfigureAwait(false);
+        if (trigger is null) return Verification(ExternalTriggerOutcomeKind.NotFound);
 
         var activations = await db.WorkflowActivation.AsNoTracking().Include(a => a.Workflow)
             .Where(a => a.WorkflowId == trigger.WorkflowId && a.TypeKey == ExternalTriggerSlug.TypeKey
@@ -45,22 +47,43 @@ public sealed class ExternalTriggerIngress(
         {
             if (activations.Count > 1)
                 logger.LogWarning("External trigger workflow {WorkflowId} has {Count} live activations; refusing ambiguous endpoint", trigger.WorkflowId, activations.Count);
-            return Outcome(ExternalTriggerOutcomeKind.NotFound);
+            return Verification(ExternalTriggerOutcomeKind.NotFound);
         }
         var activation = activations[0];
 
         var definitionJson = await db.WorkflowVersion.AsNoTracking()
             .Where(v => v.WorkflowId == activation.WorkflowId && v.Version == activation.Workflow.LatestVersion)
             .Select(v => v.DefinitionJson).SingleOrDefaultAsync(ct).ConfigureAwait(false);
-        if (definitionJson is null) return Outcome(ExternalTriggerOutcomeKind.NotFound);
+        if (definitionJson is null) return Verification(ExternalTriggerOutcomeKind.NotFound);
         var definition = JsonSerializer.Deserialize<WorkflowDefinition>(definitionJson, WorkflowJson.Options);
         var nodes = definition?.Nodes.Where(n => n.TypeKey == ExternalTriggerSlug.TypeKey).ToList();
-        if (nodes is not { Count: 1 } || nodes[0].Id != trigger.NodeId) return Outcome(ExternalTriggerOutcomeKind.NotFound);
+        if (nodes is not { Count: 1 } || nodes[0].Id != trigger.NodeId) return Verification(ExternalTriggerOutcomeKind.NotFound);
         var config = nodes[0].Config;
 
-        if (call.PresentedKey is null || !CryptographicOperations.FixedTimeEquals(
-                Encoding.ASCII.GetBytes(ExternalTriggerKeySealer.Digest(call.PresentedKey)), Encoding.ASCII.GetBytes(trigger.KeyDigest)))
-            return Outcome(ExternalTriggerOutcomeKind.Unauthorized);
+        if (presentedKey is null || !CryptographicOperations.FixedTimeEquals(
+                Encoding.ASCII.GetBytes(ExternalTriggerKeySealer.Digest(presentedKey)), Encoding.ASCII.GetBytes(trigger.KeyDigest)))
+            return Verification(ExternalTriggerOutcomeKind.Unauthorized);
+
+        var schema = config.ValueKind == JsonValueKind.Object
+            && config.TryGetProperty("inputSchema", out var declared) && declared.ValueKind == JsonValueKind.Object
+            ? declared : default;
+
+        return new ExternalTriggerVerification(
+            ExternalTriggerOutcomeKind.Accepted,
+            trigger.Id,
+            activation.Id,
+            activation.WorkflowId,
+            activation.Workflow.TeamId,
+            activation.Workflow.LatestVersion,
+            ActivationAuthoritySnapshot.Serialize(activation),
+            schema);
+    }
+
+    public async Task<ExternalTriggerOutcome> ReceiveAsync(ExternalTriggerCall call, CancellationToken ct)
+    {
+        var verification = await VerifyAsync(call.Slug, call.PresentedKey, ct).ConfigureAwait(false);
+        if (verification.Kind != ExternalTriggerOutcomeKind.Accepted)
+            return Outcome(verification.Kind);
 
         if (call.IdempotencyRejected)
             return Outcome(ExternalTriggerOutcomeKind.InvalidPayload,
@@ -73,37 +96,41 @@ public sealed class ExternalTriggerIngress(
         {
             if (body.RootElement.ValueKind != JsonValueKind.Object) return InvalidBody();
             using var fallback = JsonDocument.Parse("""{"type":"object"}""");
-            var schema = config.ValueKind == JsonValueKind.Object
-                && config.TryGetProperty("inputSchema", out var declared) && declared.ValueKind == JsonValueKind.Object
-                ? declared : fallback.RootElement;
+            var schema = verification.InputSchema.ValueKind == JsonValueKind.Object ? verification.InputSchema : fallback.RootElement;
             var errors = ExternalTriggerPayloadValidator.Validate(body.RootElement, schema);
             if (errors.Count != 0) return Outcome(ExternalTriggerOutcomeKind.InvalidPayload, errors: errors);
 
             var envelope = new RunSourceEnvelope
             {
-                TeamId = activation.Workflow.TeamId,
-                WorkflowId = activation.WorkflowId,
-                WorkflowVersion = activation.Workflow.LatestVersion,
+                TeamId = verification.TeamId,
+                WorkflowId = verification.WorkflowId,
+                WorkflowVersion = verification.WorkflowVersion,
                 SourceType = ExternalTriggerSlug.TypeKey,
                 ActorType = WorkflowRunActorTypes.Webhook,
                 ActorId = null,
                 CreatedBy = SystemUsers.SeederId,
-                ActivationId = activation.Id,
-                ActivationSnapshotJson = ActivationAuthoritySnapshot.Serialize(activation),
+                ActivationId = verification.ActivationId,
+                ActivationSnapshotJson = verification.ActivationSnapshotJson,
                 NormalizedPayloadJson = body.RootElement.GetRawText(),
-                IdempotencyKey = call.IdempotencyKey is null ? null : ExternalTriggerIdempotency.KeyFor(call.IdempotencyKey, activation.Id),
+                IdempotencyKey = call.IdempotencyKey is null ? null : ExternalTriggerIdempotency.KeyFor(call.IdempotencyKey, verification.TriggerId),
             };
+
+            if (!admission.TryAcquire(verification.TriggerId))
+            {
+                await AuditRefusalAsync(verification, call, WorkflowRunRequestRejectionReasons.TriggerRateLimited, "per-trigger run admission refused", ct).ConfigureAwait(false);
+                return Outcome(ExternalTriggerOutcomeKind.RateLimited);
+            }
 
             Guid runId;
             try { runId = await runStarter.StartAsync(envelope, ct).ConfigureAwait(false); }
             catch (AgentAuthorityDeniedException ex)
             {
-                await AuditRefusalAsync(activation, call, ex.Code, ex.Reason, ct).ConfigureAwait(false);
+                await AuditRefusalAsync(verification, call, ex.Code, ex.Reason, ct).ConfigureAwait(false);
                 return Outcome(ExternalTriggerOutcomeKind.Accepted);
             }
             catch (CompletionAdmissionRefusedException ex)
             {
-                await AuditRefusalAsync(activation, call, WorkflowRunRequestRejectionReasons.CompletionAdmissionRefused, ex.Message, ct).ConfigureAwait(false);
+                await AuditRefusalAsync(verification, call, WorkflowRunRequestRejectionReasons.CompletionAdmissionRefused, ex.Message, ct).ConfigureAwait(false);
                 return Outcome(ExternalTriggerOutcomeKind.Accepted);
             }
 
@@ -123,19 +150,25 @@ public sealed class ExternalTriggerIngress(
         }
     }
 
-    private async Task AuditRefusalAsync(WorkflowActivation activation, ExternalTriggerCall call, string reason, string detail, CancellationToken ct)
+    private async Task AuditRefusalAsync(ExternalTriggerVerification verification, ExternalTriggerCall call, string reason, string detail, CancellationToken ct)
     {
-        logger.LogWarning("External trigger activation {ActivationId} workflow {WorkflowId} refused: {Reason} {Detail}", activation.Id, activation.WorkflowId, reason, detail);
+        logger.LogWarning("External trigger activation {ActivationId} workflow {WorkflowId} refused: {Reason} {Detail}", verification.ActivationId, verification.WorkflowId, reason, detail);
         await auditor.WriteWebhookRejectedAsync(new WebhookRejectionContext
         {
-            TeamId = activation.Workflow.TeamId,
+            TeamId = verification.TeamId,
             SourceType = ExternalTriggerSlug.TypeKey,
             ExternalEventId = call.IdempotencyKey,
             Reason = reason,
-            Detail = $"Activation {activation.Id} workflow {activation.WorkflowId}: {detail}",
-            DedupKey = $"rejected:{call.Slug}:{call.IdempotencyKey}",
+            Detail = $"Activation {verification.ActivationId} workflow {verification.WorkflowId}: {detail}",
+            DedupKey = BuildRefusalWindowKey(verification.TriggerId, reason, DateTimeOffset.UtcNow),
         }, ct).ConfigureAwait(false);
     }
+
+    private static string BuildRefusalWindowKey(Guid triggerId, string reason, DateTimeOffset now) =>
+        $"refused:{triggerId:N}:{reason}:{now.UtcTicks / WebhookIngestionService.RefusalAuditWindow.Ticks}";
+
+    private static ExternalTriggerVerification Verification(ExternalTriggerOutcomeKind kind) =>
+        new(kind, Guid.Empty, Guid.Empty, Guid.Empty, Guid.Empty, 0, string.Empty, default);
 
     private static ExternalTriggerOutcome InvalidBody() => Outcome(ExternalTriggerOutcomeKind.InvalidPayload, errors: ["$: body must be a JSON object"]);
 

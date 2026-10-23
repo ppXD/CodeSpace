@@ -149,10 +149,8 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     [InlineData("bearer")]
     [InlineData("mixed-bearer")]
     [InlineData("api-key")]
-    [InlineData("query")]
     [InlineData("empty-bearer-fallback")]
     [InlineData("wrong-scheme-fallback")]
-    [InlineData("api-key-before-query")]
     public async Task The_supported_key_forms_start_a_run(string form)
     {
         var seed = await SeedAsync();
@@ -165,13 +163,21 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
             _ => null,
         };
         var apiKey = form is "api-key" or "empty-bearer-fallback" or "wrong-scheme-fallback" or "api-key-before-query" ? seed.Key : null;
-        var url = Url(seed) + (form == "query" ? "?key=" + seed.Key : form == "api-key-before-query" ? "?key=wrong" : "");
-        using var response = await PostAsync(url, BODY, authorization, apiKey);
+        using var response = await PostAsync(Url(seed), BODY, authorization, apiKey);
         response.StatusCode.ShouldBe(HttpStatusCode.Accepted, await TenantHarness.DescribeAsync(response));
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
         payload.GetProperty("deduplicated").GetBoolean().ShouldBeFalse();
         var runs = await RunsAsync(seed);
         payload.GetProperty("runId").GetGuid().ShouldBe(runs.ShouldHaveSingleItem());
+    }
+
+    [Fact]
+    public async Task A_key_in_the_query_string_is_not_accepted()
+    {
+        var seed = await SeedAsync();
+        using var response = await PostAsync(Url(seed) + "?key=" + seed.Key, BODY);
+        response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        await ShouldHaveNoRequestsAsync(seed);
     }
 
     [Fact]
@@ -219,6 +225,28 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
         payload.GetProperty("errors").EnumerateArray().Select(e => e.GetString()).ShouldBe(new[] { "$: body must be a JSON object" });
         await ShouldHaveNoRequestsAsync(seed);
+    }
+
+    [Fact]
+    public async Task An_unknown_slug_is_404_without_reading_the_body()
+    {
+        using var response = await PostAsync($"/api/ext/missing-{Guid.NewGuid():N}/run", new string('x', 1024 * 1024));
+        response.StatusCode.ShouldBe(HttpStatusCode.NotFound);
+    }
+
+    [Fact]
+    public async Task A_validated_endpoint_asks_for_retry_after_when_its_run_budget_is_exhausted()
+    {
+        var seed = await SeedAsync();
+        for (var i = 0; i < ExternalTriggerRunAdmission.PermitsPerWindow; i++)
+        {
+            using var admitted = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
+            admitted.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+        }
+
+        using var refused = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
+        refused.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+        refused.Headers.RetryAfter!.Delta.ShouldBe(ExternalTriggerRunAdmission.Window);
     }
 
     [Theory]
@@ -275,6 +303,24 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         payload.GetProperty("runId").ValueKind.ShouldBe(JsonValueKind.Null);
         payload.GetProperty("deduplicated").GetBoolean().ShouldBeFalse();
         (await RunsAsync(seed)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task A_refusal_is_audited_once_per_trigger_reason_and_day()
+    {
+        var seed = await SeedAsync();
+        await new TenantHarness(factory).DbAsync(db => db.TeamMembership.Where(m => m.TeamId == seed.TeamId).ExecuteDeleteAsync());
+
+        using (await PostAsync(Url(seed), BODY, apiKey: seed.Key))
+        using (await PostAsync(Url(seed), BODY, apiKey: seed.Key))
+        using (await PostAsync(Url(seed), BODY, apiKey: seed.Key, idempotencyKey: "first"))
+        using (await PostAsync(Url(seed), BODY, apiKey: seed.Key, idempotencyKey: "second"))
+        {
+            var rows = await new TenantHarness(factory).DbAsync(db => db.WorkflowRunRequest.AsNoTracking()
+                .Where(r => r.TeamId == seed.TeamId && r.Status == WorkflowRunRequestStatus.Rejected)
+                .Select(r => r.IdempotencyKey).ToArrayAsync());
+            rows.ShouldHaveSingleItem().ShouldStartWith("refused:");
+        }
     }
 
     private static string Url(Seed seed) => $"/api/ext/{seed.Slug}/run";

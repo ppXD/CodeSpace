@@ -168,6 +168,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     public async Task<Guid> CreateAsync(Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, bool enabled, CancellationToken cancellationToken)
     {
         definition = definition with { Inputs = ExternalTriggerInputProjection.Apply(definition.Inputs, definition) };
+        ExternalTriggerDefinitionSync.ValidateSchemas(definition);
         EnsureValidDefinition(definition);
         await EnsureActivationRepositoriesHeldAsync(teamId, activations, cancellationToken).ConfigureAwait(false);
 
@@ -229,6 +230,7 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     public async Task UpdateAsync(Guid workflowId, Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, CancellationToken cancellationToken)
     {
         definition = definition with { Inputs = ExternalTriggerInputProjection.Apply(definition.Inputs, definition) };
+        ExternalTriggerDefinitionSync.ValidateSchemas(definition);
         EnsureValidDefinition(definition);
         await EnsureActivationRepositoriesHeldAsync(teamId, activations, cancellationToken).ConfigureAwait(false);
 
@@ -2231,10 +2233,11 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
     /// <summary>
     /// Slugs that would be shadowed by a literal <c>api/workflows/…</c> GET route — ASP.NET gives those
     /// literals precedence over the <c>{idOrSlug}</c> parameter, so a workflow slugged to one would be
-    /// unreachable. Forced to a <c>-N</c> variant at derivation. Keep in sync with the 0099 backfill list.
+    /// unreachable. Forced to a <c>-N</c> variant at derivation. <c>external-triggers</c> was added after
+    /// the 0099 backfill and is repaired by 0252 for existing rows.
     /// </summary>
     private static readonly HashSet<string> ReservedSlugs =
-        new(new[] { "runs", "node-manifests", "system-variables", "decisions" }, StringComparer.Ordinal);
+        new(new[] { "runs", "node-manifests", "system-variables", "decisions", "external-triggers" }, StringComparer.Ordinal);
 
     private static bool IsWorkflowSlugUniqueViolation(DbUpdateException ex) =>
         ex.InnerException is Npgsql.PostgresException { SqlState: "23505" } pg

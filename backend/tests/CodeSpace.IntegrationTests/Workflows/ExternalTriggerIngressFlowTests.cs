@@ -200,6 +200,23 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task An_authenticated_delivery_cannot_exceed_the_per_trigger_run_budget()
+    {
+        var seed = await SeedAsync();
+        using var scope = fixture.BeginScope(b => b.RegisterInstance(new ExternalTriggerRunAdmission()).As<ExternalTriggerRunAdmission>().SingleInstance());
+        var ingress = scope.Resolve<IExternalTriggerIngress>();
+        var admitted = 0;
+        for (var i = 0; i < ExternalTriggerRunAdmission.PermitsPerWindow + 1; i++)
+        {
+            var outcome = await ingress.ReceiveAsync(new ExternalTriggerCall(seed.Slug, seed.Key, null, """{"service":"api"}""", false), CancellationToken.None);
+            if (outcome.Kind == ExternalTriggerOutcomeKind.Accepted) admitted++;
+        }
+
+        admitted.ShouldBe(ExternalTriggerRunAdmission.PermitsPerWindow);
+        (await RunsAsync(seed)).Length.ShouldBe(ExternalTriggerRunAdmission.PermitsPerWindow);
+    }
+
+    [Fact]
     public async Task The_same_idempotency_key_twice_starts_one_run_and_returns_the_first_run_id()
     {
         var seed = await SeedAsync();
@@ -223,7 +240,7 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
-    public async Task A_recreated_activation_is_resolved_fresh_even_in_the_same_scope()
+    public async Task A_recreated_activation_is_resolved_fresh_and_the_trigger_still_deduplicates()
     {
         var seed = await SeedAsync();
         using var scope = fixture.BeginScope();
@@ -239,8 +256,8 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
             await db.SaveChangesAsync();
         }
         var outcome = await ingress.ReceiveAsync(call, CancellationToken.None);
-        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
-        (await RunsAsync(seed)).Single(r => r.Id == outcome.RunId).RunRequest.ActivationId.ShouldBe(replacement);
+        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.Deduplicated);
+        (await RunsAsync(seed)).ShouldHaveSingleItem().RunRequest.ActivationId.ShouldBe(seed.ActivationId);
     }
 
     [Theory]
@@ -286,7 +303,8 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         audit.SourceType.ShouldBe("trigger.external");
         audit.Error.ShouldNotBeNull();
         audit.Error!.ShouldContain(reason);
-        audit.IdempotencyKey.ShouldBe($"rejected:{seed.Slug}:refused");
+        audit.IdempotencyKey.ShouldStartWith($"refused:");
+        audit.IdempotencyKey.ShouldContain($":{reason}:");
     }
 
     [Fact]

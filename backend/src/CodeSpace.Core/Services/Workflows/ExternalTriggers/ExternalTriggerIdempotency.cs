@@ -12,5 +12,9 @@ public static class ExternalTriggerIdempotency
         !string.IsNullOrEmpty(value) && value.Length <= MaxLength &&
         value.All(c => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_' or '~' or '-');
 
-    public static string KeyFor(string value, Guid activationId) => $"{ExternalTriggerSlug.TypeKey}:{value}:{activationId:N}";
+    /// <summary>
+    /// Scope follows the durable trigger row, not the activation row: ReplaceActivationsAsync recreates activations on
+    /// every workflow save, so an activation-scoped key would stop deduplicating after an ordinary edit.
+    /// </summary>
+    public static string KeyFor(string value, Guid triggerId) => $"{ExternalTriggerSlug.TypeKey}:{value}:{triggerId:N}";
 }

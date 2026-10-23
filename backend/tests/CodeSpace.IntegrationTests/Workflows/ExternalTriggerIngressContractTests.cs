@@ -23,8 +23,10 @@ public sealed class ExternalTriggerIngressContractTests
         controller.GetCustomAttribute<AllowAnonymousAttribute>().ShouldNotBeNull();
         controller.GetCustomAttribute<RouteAttribute>().ShouldNotBeNull().Template.ShouldBe("api/ext");
         var method = controller.GetMethod("Run").ShouldNotBeNull();
-        method.GetCustomAttribute<HttpPostAttribute>().ShouldNotBeNull().Template.ShouldBe("{slug}/run");
+        method.GetCustomAttribute<HttpPostAttribute>().ShouldNotBeNull().Template.ShouldBe("{slug:length(1,64)}/run");
         ((IRequestSizeLimitMetadata)method.GetCustomAttribute<RequestSizeLimitAttribute>().ShouldNotBeNull()).MaxRequestBodySize.ShouldBe(WebhooksController.MaxDeliveryBodyBytes);
+        method.GetParameters().ShouldNotContain(p => p.Name == "key" && p.GetCustomAttributes<FromQueryAttribute>().Any(),
+            "a credential in the query string lands in access logs; the route admits headers only");
         var policy = method.GetCustomAttribute<EnableRateLimitingAttribute>() ?? controller.GetCustomAttribute<EnableRateLimitingAttribute>();
         policy.ShouldNotBeNull().PolicyName.ShouldBe(WebhookIngressRateLimitExtension.PolicyName);
     }

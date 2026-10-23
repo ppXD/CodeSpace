@@ -27,17 +27,21 @@ public class ExternalTriggersController : ControllerBase
 
     public ExternalTriggersController(IMediator mediator) { _mediator = mediator; }
 
-    [HttpPost("{slug}/run")]
+    [HttpPost("{slug:length(1,64)}/run")]
     [RequestSizeLimit(MaxDeliveryBodyBytes)]
-    public async Task<IActionResult> Run([FromRoute] string slug, [FromQuery] string? key, CancellationToken cancellationToken)
+    public async Task<IActionResult> Run([FromRoute] string slug, CancellationToken cancellationToken)
     {
-        var body = await Request.ReadBoundedBodyAsync(MaxDeliveryBodyBytes, cancellationToken).ConfigureAwait(false);
-        if (body == null) return StatusCode(StatusCodes.Status413PayloadTooLarge);
-
         var authorization = Request.Headers.Authorization.ToString();
         var bearer = authorization.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase) ? authorization[7..].Trim() : null;
         var apiKey = Request.Headers["X-Api-Key"].ToString();
-        var presentedKey = !string.IsNullOrEmpty(bearer) ? bearer : !string.IsNullOrEmpty(apiKey) ? apiKey : string.IsNullOrEmpty(key) ? null : key;
+        var presentedKey = !string.IsNullOrEmpty(bearer) ? bearer : !string.IsNullOrEmpty(apiKey) ? apiKey : null;
+
+        var verification = await _mediator.Send(new VerifyExternalTriggerCommand { Slug = slug, PresentedKey = presentedKey }, cancellationToken).ConfigureAwait(false);
+        if (verification.Kind is ExternalTriggerDeliveryKind.NotFound or ExternalTriggerDeliveryKind.Unauthorized)
+            return verification.Kind == ExternalTriggerDeliveryKind.NotFound ? NotFound() : Unauthorized();
+
+        var body = await Request.ReadBoundedBodyAsync(MaxDeliveryBodyBytes, cancellationToken).ConfigureAwait(false);
+        if (body == null) return StatusCode(StatusCodes.Status413PayloadTooLarge);
 
         var idempotencyHeader = Request.Headers["Idempotency-Key"].ToString();
         var idempotencyKey = string.IsNullOrWhiteSpace(idempotencyHeader) ? null : idempotencyHeader;
@@ -56,9 +60,16 @@ public class ExternalTriggersController : ControllerBase
             ExternalTriggerDeliveryKind.NotFound => NotFound(),
             ExternalTriggerDeliveryKind.Unauthorized => Unauthorized(),
             ExternalTriggerDeliveryKind.InvalidPayload => BadRequest(new { errors = outcome.Errors }),
+            ExternalTriggerDeliveryKind.RateLimited => RateLimited(),
             ExternalTriggerDeliveryKind.Deduplicated => Ok(new { runId = outcome.RunId, deduplicated = true }),
             ExternalTriggerDeliveryKind.Accepted => StatusCode(StatusCodes.Status202Accepted, new { runId = outcome.RunId == Guid.Empty ? (Guid?)null : outcome.RunId, deduplicated = false }),
             _ => throw new InvalidOperationException($"Unknown external trigger outcome: {outcome.Kind}"),
         };
+    }
+
+    private IActionResult RateLimited()
+    {
+        Response.Headers.RetryAfter = ((int)ExternalTriggerRunAdmission.Window.TotalSeconds).ToString();
+        return StatusCode(StatusCodes.Status429TooManyRequests, new { retryAfterSeconds = (int)ExternalTriggerRunAdmission.Window.TotalSeconds });
     }
 }

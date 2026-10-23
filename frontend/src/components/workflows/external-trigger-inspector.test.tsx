@@ -65,8 +65,10 @@ describe("ExternalTriggerInspector", () => {
     fireEvent.click(screen.getByRole("button", { name: /copy key/i }));
     await waitFor(() => expect(writeText).toHaveBeenCalledWith("ext_secret"));
     fireEvent.click(screen.getByRole("button", { name: /copy curl/i }));
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/api/ext/prod-alerts/run?key=ext_secret")));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/api/ext/prod-alerts/run")));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("curl -X POST"));
+    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Authorization: Bearer ext_secret"));
+    expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("?key="));
   });
 
   it("requires confirmation before rotating and warns that the old key stops working immediately", async () => {

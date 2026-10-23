@@ -24,4 +24,5 @@ public enum ExternalTriggerDeliveryKind
     NotFound,
     Unauthorized,
     InvalidPayload,
+    RateLimited,
 }

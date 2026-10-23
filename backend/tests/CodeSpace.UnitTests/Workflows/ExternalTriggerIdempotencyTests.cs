@@ -25,7 +25,7 @@ public class ExternalTriggerIdempotencyTests
     public void A_maximum_length_key_passes() => ExternalTriggerIdempotency.IsWellFormed(new string('a', 200)).ShouldBeTrue();
 
     [Fact]
-    public void The_key_scopes_to_the_activation_so_two_triggers_never_share_it()
+    public void The_key_scopes_to_the_trigger_so_two_triggers_never_share_it()
     {
         var a = ExternalTriggerIdempotency.KeyFor("evt-1", Guid.Parse("11111111-1111-1111-1111-111111111111"));
         var b = ExternalTriggerIdempotency.KeyFor("evt-1", Guid.Parse("22222222-2222-2222-2222-222222222222"));

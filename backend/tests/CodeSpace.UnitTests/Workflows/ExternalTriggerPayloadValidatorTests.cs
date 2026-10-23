@@ -132,5 +132,101 @@ public class ExternalTriggerPayloadValidatorTests
         errors.ShouldHaveSingleItem().ShouldContain("the schema declares none");
     }
 
-    private static JsonElement Schema(string json) => JsonDocument.Parse(json).RootElement.Clone();
+    [Fact]
+    public void An_unknown_type_keyword_is_refused_instead_of_silently_matching()
+    {
+        var errors = ExternalTriggerPayloadValidator.ValidateSchema(Schema("""{ "type": "sting" }"""));
+        errors.ShouldContain(e => e.Contains("sting") && e.Contains("not supported"));
+    }
+
+    [Fact]
+    public void Validation_stops_after_a_bounded_number_of_errors()
+    {
+        var errors = ExternalTriggerPayloadValidator.Validate(
+            Schema("[" + string.Join(",", Enumerable.Repeat("1", 100)) + "]"),
+            Schema("""{ "type": "array", "items": { "type": "string" } }"""));
+        errors.Count.ShouldBe(ExternalTriggerPayloadValidator.MaxErrors);
+    }
+
+    [Fact]
+    public void An_excessively_long_integer_exponent_is_refused_without_parsing_it()
+    {
+        var exponent = new string('9', 100_000);
+        var errors = ExternalTriggerPayloadValidator.Validate(
+            Schema("1e" + exponent),
+            Schema("""{ "type": "integer" }"""));
+        errors.ShouldContain(e => e.Contains("number") && e.Contains("too long"));
+    }
+
+    [Fact]
+    public void A_number_postgres_cannot_represent_is_refused()
+    {
+        var errors = ExternalTriggerPayloadValidator.Validate(
+            Schema("1e200000"),
+            Schema("""{ "type": "object" }"""));
+        errors.ShouldContain(e => e.Contains("not representable"));
+    }
+
+    [Fact]
+    public void An_unpaired_surrogate_is_refused_without_reading_an_invalid_string()
+    {
+        var errors = ExternalTriggerPayloadValidator.Validate(
+            Schema("\"\\uD800\""),
+            Schema("""{ "type": "string", "maxLength": 10 }"""));
+        errors.ShouldContain(e => e.Contains("not representable"));
+    }
+
+    [Fact]
+    public void An_unpaired_surrogate_does_not_turn_enum_validation_into_a_server_error()
+    {
+        var errors = ExternalTriggerPayloadValidator.Validate(
+            Schema("\"\\uD800\""),
+            Schema("""{ "type": "string", "enum": ["ok"] }"""));
+        errors.ShouldContain(e => e.Contains("not representable"));
+    }
+
+    [Fact]
+    public void An_unpaired_surrogate_nested_in_an_enum_value_does_not_escape_as_a_server_error()
+    {
+        var errors = ExternalTriggerPayloadValidator.Validate(
+            Schema("""[{ "text": "\uD800" }]"""),
+            Schema("""{ "type": "array", "items": { "type": "object", "enum": [{ "text": "ok" }] } }"""));
+        errors.ShouldContain(e => e.Contains("not representable"));
+    }
+
+    [Theory]
+    [InlineData("""{ "type": "object", "properties": { "x": { "pattern": "^a" } } }""")]
+    [InlineData("""{ "type": "object", "properties": { "x": { "oneOf": [{ "type": "string" }] } } }""")]
+    [InlineData("""{ "type": "object", "properties": { "x": { "$ref": "#/$defs/x" } } }""")]
+    [InlineData("""{ "type": "object", "additionalProperties": { "type": "string", "pattern": "^a" } }""")]
+    public void Unsupported_schema_keywords_are_refused_at_save_validation(string schema)
+    {
+        var errors = ExternalTriggerPayloadValidator.ValidateSchema(Schema(schema));
+        errors.ShouldContain(e => e.Contains("not supported"));
+    }
+
+    [Fact]
+    public void A_schema_deeper_than_the_limit_is_refused()
+    {
+        var schema = """{ "type": "object", "properties": { "x": """
+            + string.Concat(Enumerable.Repeat("""{ "type": "array", "items": """, ExternalTriggerPayloadValidator.MaxSchemaDepth + 1))
+            + """{ "type": "string" }"""
+            + string.Concat(Enumerable.Repeat(" }", ExternalTriggerPayloadValidator.MaxSchemaDepth + 1))
+            + """ } }""";
+        ExternalTriggerPayloadValidator.ValidateSchema(Schema(schema, maxDepth: 256)).ShouldContain(e => e.Contains("too deep"));
+    }
+
+    [Fact]
+    public void A_payload_deeper_than_the_limit_is_refused_before_representability_recursion()
+    {
+        var body = string.Concat(Enumerable.Repeat("[", ExternalTriggerPayloadValidator.MaxSchemaDepth + 2))
+            + string.Concat(Enumerable.Repeat("]", ExternalTriggerPayloadValidator.MaxSchemaDepth + 2));
+        var errors = ExternalTriggerPayloadValidator.Validate(
+            Schema(body, maxDepth: 256),
+            Schema("""{ "type": "array" }"""));
+        errors.ShouldContain(e => e.Contains("too deep"));
+    }
+
+    private static JsonElement Schema(string json, int maxDepth = 64) =>
+        JsonDocument.Parse(json, new JsonDocumentOptions { MaxDepth = maxDepth }).RootElement.Clone();
 }

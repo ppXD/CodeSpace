@@ -13,7 +13,7 @@ public sealed record ReceiveExternalTriggerCommand : ICommand<ExternalTriggerDel
 {
     public required string Slug { get; init; }
 
-    /// <summary>The key as presented, already normalized from Bearer / <c>X-Api-Key</c> / <c>?key=</c>. Null when none was sent.</summary>
+    /// <summary>The key as presented, already normalized from Bearer / <c>X-Api-Key</c>. Null when none was sent.</summary>
     public required string? PresentedKey { get; init; }
 
     /// <summary>Null when the caller sent no <c>Idempotency-Key</c>, or sent only whitespace — deduplication is then the caller's business.</summary>
@@ -25,3 +25,13 @@ public sealed record ReceiveExternalTriggerCommand : ICommand<ExternalTriggerDel
     /// <summary>The delivery body, already bounded by the endpoint's size limit.</summary>
     public required string RawBody { get; init; }
 }
+
+/// <summary>Anonymous identity check only; the controller sends this before reading any request body.</summary>
+public sealed record VerifyExternalTriggerCommand : ICommand<ExternalTriggerVerificationOutcome>
+{
+    public required string Slug { get; init; }
+    public required string? PresentedKey { get; init; }
+}
+
+/// <summary>Wire-safe verification result, mirroring the ingress kind without exposing its internal identity record.</summary>
+public sealed record ExternalTriggerVerificationOutcome(ExternalTriggerDeliveryKind Kind);

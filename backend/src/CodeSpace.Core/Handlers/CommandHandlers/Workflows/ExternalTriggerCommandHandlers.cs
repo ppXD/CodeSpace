@@ -69,10 +69,28 @@ public sealed class ReceiveExternalTriggerCommandHandler(IExternalTriggerIngress
                 ExternalTriggerOutcomeKind.NotFound => ExternalTriggerDeliveryKind.NotFound,
                 ExternalTriggerOutcomeKind.Unauthorized => ExternalTriggerDeliveryKind.Unauthorized,
                 ExternalTriggerOutcomeKind.InvalidPayload => ExternalTriggerDeliveryKind.InvalidPayload,
+                ExternalTriggerOutcomeKind.RateLimited => ExternalTriggerDeliveryKind.RateLimited,
                 _ => throw new InvalidOperationException($"Unknown external trigger outcome: {outcome.Kind}"),
             },
             RunId = outcome.RunId,
             Errors = outcome.Errors,
         };
+    }
+}
+
+public sealed class VerifyExternalTriggerCommandHandler(IExternalTriggerIngress ingress)
+    : IRequestHandler<VerifyExternalTriggerCommand, ExternalTriggerVerificationOutcome>
+{
+    public async Task<ExternalTriggerVerificationOutcome> Handle(VerifyExternalTriggerCommand request, CancellationToken cancellationToken)
+    {
+        var verification = await ingress.VerifyAsync(request.Slug, request.PresentedKey, cancellationToken).ConfigureAwait(false);
+        var kind = verification.Kind switch
+        {
+            ExternalTriggerOutcomeKind.Accepted => ExternalTriggerDeliveryKind.Accepted,
+            ExternalTriggerOutcomeKind.NotFound => ExternalTriggerDeliveryKind.NotFound,
+            ExternalTriggerOutcomeKind.Unauthorized => ExternalTriggerDeliveryKind.Unauthorized,
+            _ => throw new InvalidOperationException($"Unexpected external trigger verification outcome: {verification.Kind}"),
+        };
+        return new ExternalTriggerVerificationOutcome(kind);
     }
 }
