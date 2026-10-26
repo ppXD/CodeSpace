@@ -6,7 +6,6 @@ public class WorkflowExternalTrigger : IEntity<Guid>, IAuditable
     public Guid TeamId { get; set; }
     public Guid WorkflowId { get; set; }
     public string NodeId { get; set; } = default!;
-    public string Slug { get; set; } = default!;
     public string KeyDigest { get; set; } = default!;
     public string KeyCiphertext { get; set; } = default!;
     public DateTimeOffset CreatedDate { get; set; }

@@ -23,10 +23,8 @@ public sealed class TriggerExternalNode : INodeRuntime
             {
               "type": "object",
               "properties": {
-                "slug": { "type": "string" },
                 "inputSchema": { "type": "object" }
               },
-              "required": ["slug"],
               "additionalProperties": false
             }
             """),

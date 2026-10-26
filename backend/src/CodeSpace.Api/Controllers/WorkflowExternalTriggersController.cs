@@ -16,24 +16,20 @@ public sealed class WorkflowExternalTriggersController(IMediator mediator) : Con
         return result == null ? NotFound() : Ok(result);
     }
 
-    [HttpGet("{slug}/key")]
-    public async Task<IActionResult> Reveal([FromRoute] string slug, CancellationToken cancellationToken)
+    [HttpGet("{triggerId:guid}/key")]
+    public async Task<IActionResult> Reveal([FromRoute] Guid triggerId, CancellationToken cancellationToken)
     {
-        var key = await mediator.Send(new RevealExternalTriggerKeyCommand { Slug = slug }, cancellationToken).ConfigureAwait(false);
+        Response.Headers.CacheControl = "private, no-store";
+        var key = await mediator.Send(new RevealExternalTriggerKeyCommand { TriggerId = triggerId }, cancellationToken).ConfigureAwait(false);
         return Ok(new { key });
     }
 
-    [HttpPost("{slug}/rotate-key")]
-    public async Task<IActionResult> Rotate([FromRoute] string slug, CancellationToken cancellationToken)
+    [HttpPost("{triggerId:guid}/rotate-key")]
+    public async Task<IActionResult> Rotate([FromRoute] Guid triggerId, CancellationToken cancellationToken)
     {
-        var key = await mediator.Send(new RotateExternalTriggerKeyCommand { Slug = slug }, cancellationToken).ConfigureAwait(false);
+        Response.Headers.CacheControl = "private, no-store";
+        var key = await mediator.Send(new RotateExternalTriggerKeyCommand { TriggerId = triggerId }, cancellationToken).ConfigureAwait(false);
         return Ok(new { key });
     }
 
-    [HttpPost("{slug}/rename")]
-    public async Task<IActionResult> Rename([FromRoute] string slug, [FromBody] RenameExternalTriggerCommand command, CancellationToken cancellationToken)
-    {
-        await mediator.Send(command with { Slug = slug }, cancellationToken).ConfigureAwait(false);
-        return NoContent();
-    }
 }

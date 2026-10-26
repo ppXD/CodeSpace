@@ -21,6 +21,96 @@ public class ExternalTriggerPayloadValidatorTests
             Schema("""{ "service": "checkout", "count": 3 }"""), Schema(Shape)).ShouldBeEmpty();
     }
 
+    [Theory]
+    [InlineData("{\"a\":1,\"a\":2}")]
+    [InlineData("{\"a\\u0000\":1}")]
+    [InlineData("{\"a\":\"\\u0000\"}")]
+    [InlineData("{\"\\uD800\":1}")]
+    [InlineData("{\"a\":1e-331}")]
+    [InlineData("{\"a\":0e331}")]
+    public void Unsafe_payloads_are_rejected_before_schema_checks(string body) =>
+        ExternalTriggerPayloadValidator.Validate(Schema(body), Schema("{\"type\":\"object\"}")).ShouldNotBeEmpty();
+
+    [Fact]
+    public void Representability_and_schema_have_independent_node_budgets()
+    {
+        var body = "[" + string.Join(",", Enumerable.Repeat("1", 9999)) + "]";
+        ExternalTriggerPayloadValidator.Validate(Schema(body), Schema("{\"type\":\"array\",\"items\":{\"type\":\"integer\"}}")).ShouldBeEmpty();
+    }
+
+    [Theory]
+    [InlineData("{\"type\":\"object\",\"required\":3}")]
+    [InlineData("{\"type\":\"object\",\"enum\":[]}")]
+    [InlineData("{\"type\":\"object\",\"properties\":[]}")]
+    [InlineData("{\"type\":\"object\",\"items\":7}")]
+    [InlineData("{\"type\":\"object\",\"additionalProperties\":7}")]
+    [InlineData("{\"type\":\"object\",\"maxLength\":-1}")]
+    [InlineData("{\"type\":\"object\",\"description\":1}")]
+    [InlineData("{\"type\":\"object\",\"type\":\"object\"}")]
+    [InlineData("[]")]
+    public void Malformed_schema_shapes_cannot_be_saved(string schema) =>
+        ExternalTriggerPayloadValidator.ValidateSchema(Schema(schema)).ShouldNotBeEmpty();
+
+    [Fact]
+    public void Editor_annotations_are_accepted() => ExternalTriggerPayloadValidator.ValidateSchema(Schema(
+        "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\",\"x-long\":true,\"x-hidden\":true,\"x-selector\":\"repository\"}}}")).ShouldBeEmpty();
+
+    [Theory]
+    [InlineData("{\"type\":\"object\",\"additionalProperties\":{\"type\":\"string\"}}")]
+    [InlineData("{\"type\":\"object\",\"properties\":{\"a\":false}}")]
+    public void Additional_properties_and_boolean_schemas_are_enforced(string schema) =>
+        ExternalTriggerPayloadValidator.Validate(Schema("{\"a\":1}"), Schema(schema)).ShouldNotBeEmpty();
+
+    [Fact]
+    public void Numeric_enum_comparison_does_not_round_large_fractional_values() =>
+        ExternalTriggerPayloadValidator.Validate(Schema("9007199254740992.1"),
+            Schema("{\"type\":\"number\",\"enum\":[9007199254740992]}")).ShouldNotBeEmpty();
+
+    [Theory]
+    [InlineData(256, true)]
+    [InlineData(257, false)]
+    public void Number_token_length_is_bounded_before_integer_validation(int length, bool valid)
+    {
+        var number = "1" + new string('0', length - 1);
+        (ExternalTriggerPayloadValidator.Validate(Schema(number), Schema("{\"type\":\"integer\"}")).Count == 0).ShouldBe(valid);
+    }
+
+    [Theory]
+    [InlineData("1e-330", true)]
+    [InlineData("0e330", true)]
+    [InlineData("1e-331", false)]
+    [InlineData("0e331", false)]
+    [InlineData("1e000000000000000000000000000001", true)]
+    public void Explicit_exponent_values_have_a_bounded_range(string token, bool valid) =>
+        (ExternalTriggerPayloadValidator.Validate(Schema(token), Schema("{\"type\":\"number\"}")).Count == 0).ShouldBe(valid);
+
+    [Fact]
+    public void A_payload_over_the_node_budget_is_refused()
+    {
+        var body = "[" + string.Join(",", Enumerable.Repeat("1", 10_000)) + "]";
+        ExternalTriggerPayloadValidator.ValidatePayload(Schema(body)).ShouldContain(e => e.Contains("too many nodes"));
+    }
+
+    [Fact]
+    public void Schema_errors_are_also_bounded()
+    {
+        var properties = string.Join(",", Enumerable.Range(0, 100).Select(i => $"\"x{i}\":{{\"unsupported\":true}}"));
+        ExternalTriggerPayloadValidator.ValidateSchema(Schema($"{{\"type\":\"object\",\"properties\":{{{properties}}}}}"))
+            .Count.ShouldBeLessThanOrEqualTo(20);
+    }
+
+    [Fact]
+    public void Enum_comparisons_have_a_bounded_total_work_budget()
+    {
+        const int enumSize = 6_000;
+        var values = string.Join(",", Enumerable.Range(0, enumSize));
+        var payload = "[" + string.Join(",", Enumerable.Repeat("-1", enumSize)) + "]";
+        var schema = "{\"type\":\"array\",\"items\":{\"type\":\"integer\",\"enum\":[" + values + "]}}";
+        var errors = ExternalTriggerPayloadValidator.Validate(Schema(payload), Schema(schema));
+        errors.ShouldContain(e => e.Contains("enum comparison budget"));
+        errors.Count.ShouldBeLessThanOrEqualTo(ExternalTriggerPayloadValidator.MaxErrors);
+    }
+
     [Fact]
     public void A_missing_required_field_is_named()
     {

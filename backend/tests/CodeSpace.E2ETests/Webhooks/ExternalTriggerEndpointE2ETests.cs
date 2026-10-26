@@ -3,6 +3,7 @@ using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
 using CodeSpace.Api.Controllers;
+using CodeSpace.Api.Extensions;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Workflows;
@@ -21,7 +22,7 @@ namespace CodeSpace.E2ETests.Webhooks;
 public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) : IClassFixture<WebhookApiFactory>
 {
     private const string BODY = """{"service":"a"}""";
-    private sealed record Seed(Guid UserId, Guid TeamId, Guid WorkflowId, string Slug, string Key);
+    private sealed record Seed(Guid UserId, Guid TeamId, Guid WorkflowId, Guid TriggerId, string Key);
 
     [Fact]
     public async Task Metadata_lists_only_public_live_fields_and_allows_viewers()
@@ -37,11 +38,10 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
         payload.EnumerateObject().Select(p => p.Name).ShouldBe(new[] { "triggers" });
         var trigger = payload.GetProperty("triggers").EnumerateArray().ShouldHaveSingleItem();
-        trigger.EnumerateObject().Select(p => p.Name).Order().ShouldBe(new[] { "id", "nodeId", "slug", "workflowId" });
-        trigger.GetProperty("id").GetGuid().ShouldNotBe(Guid.Empty);
+        trigger.EnumerateObject().Select(p => p.Name).Order().ShouldBe(new[] { "id", "nodeId", "workflowId" });
+        trigger.GetProperty("id").GetGuid().ShouldBe(seed.TriggerId);
         trigger.GetProperty("workflowId").GetGuid().ShouldBe(seed.WorkflowId);
         trigger.GetProperty("nodeId").GetString().ShouldBe("trigger");
-        trigger.GetProperty("slug").GetString().ShouldBe(seed.Slug);
     }
 
     [Fact]
@@ -71,57 +71,53 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     }
 
     [Fact]
-    public async Task Management_reveals_rotates_and_renames_the_saved_endpoint()
+    public async Task Management_reveals_and_rotates_without_changing_the_endpoint()
     {
         var seed = await SeedAsync();
         var harness = new TenantHarness(factory);
-        using var reveal = await harness.SendAsync(HttpMethod.Get, $"/api/workflows/external-triggers/{seed.Slug}/key", seed.UserId, seed.TeamId);
+        using var reveal = await harness.SendAsync(HttpMethod.Get, $"/api/workflows/external-triggers/{seed.TriggerId}/key", seed.UserId, seed.TeamId);
         reveal.StatusCode.ShouldBe(HttpStatusCode.OK, await TenantHarness.DescribeAsync(reveal));
+        reveal.Headers.CacheControl!.Private.ShouldBeTrue();
+        reveal.Headers.CacheControl.NoStore.ShouldBeTrue();
         (await reveal.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("key").GetString().ShouldBe(seed.Key);
-        using var rotate = await harness.SendAsync(HttpMethod.Post, $"/api/workflows/external-triggers/{seed.Slug}/rotate-key", seed.UserId, seed.TeamId);
+        using var rotate = await harness.SendAsync(HttpMethod.Post, $"/api/workflows/external-triggers/{seed.TriggerId}/rotate-key", seed.UserId, seed.TeamId);
         rotate.StatusCode.ShouldBe(HttpStatusCode.OK, await TenantHarness.DescribeAsync(rotate));
+        rotate.Headers.CacheControl!.Private.ShouldBeTrue();
+        rotate.Headers.CacheControl.NoStore.ShouldBeTrue();
         var fresh = (await rotate.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("key").GetString();
         fresh.ShouldNotBeNullOrEmpty();
         fresh.ShouldNotBe(seed.Key);
         using var oldKey = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
         oldKey.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
-        var renamed = "prod-alerts-v2-" + Guid.NewGuid().ToString("N");
-        using var rename = await harness.SendAsync(HttpMethod.Post, $"/api/workflows/external-triggers/{seed.Slug}/rename", seed.UserId, seed.TeamId, new { desiredSlug = renamed });
-        rename.StatusCode.ShouldBe(HttpStatusCode.NoContent, await TenantHarness.DescribeAsync(rename));
-        using var oldUrl = await PostAsync(Url(seed), BODY, apiKey: fresh);
-        oldUrl.StatusCode.ShouldBe(HttpStatusCode.NotFound);
-        using var newUrl = await PostAsync($"/api/ext/{renamed}/run", BODY, apiKey: fresh);
+        using var newUrl = await PostAsync(Url(seed), BODY, apiKey: fresh);
         newUrl.StatusCode.ShouldBe(HttpStatusCode.Accepted);
     }
 
     [Theory]
     [InlineData("key", "GET")]
     [InlineData("rotate-key", "POST")]
-    [InlineData("rename", "POST")]
     public async Task Management_is_team_scoped_and_denies_viewers(string action, string method)
     {
         var seed = await SeedAsync();
         var harness = new TenantHarness(factory);
         var viewer = await harness.AccountAsync();
         await harness.AddMemberAsync(seed.TeamId, viewer, TeamRole.Viewer);
-        var url = $"/api/workflows/external-triggers/{seed.Slug}/{action}";
+        var url = $"/api/workflows/external-triggers/{seed.TriggerId}/{action}";
         using var denied = await harness.SendAsync(new HttpMethod(method), url, viewer, seed.TeamId, method == "POST" ? new { desiredSlug = "unused" } : null);
         denied.StatusCode.ShouldBe(HttpStatusCode.Forbidden);
         var other = await harness.TeamAsync((seed.UserId, TeamRole.Member));
         using var absent = await harness.SendAsync(new HttpMethod(method), url, seed.UserId, other, method == "POST" ? new { desiredSlug = "unused" } : null);
         absent.StatusCode.ShouldBe(HttpStatusCode.NotFound);
-        using var anonymous = await harness.Client().GetAsync($"/api/workflows/external-triggers/{seed.Slug}/key");
+        using var anonymous = await harness.Client().GetAsync($"/api/workflows/external-triggers/{seed.TriggerId}/key");
         anonymous.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
     }
 
     [Fact]
-    public async Task A_slug_conflict_answers_409_without_breaking_either_endpoint()
+    public async Task Independent_trigger_identities_have_independent_endpoints()
     {
         var first = await SeedAsync();
         var other = await SeedAsync();
-        using var conflict = await new TenantHarness(factory).SendAsync(HttpMethod.Post,
-            $"/api/workflows/external-triggers/{other.Slug}/rename", other.UserId, other.TeamId, new { desiredSlug = first.Slug });
-        conflict.StatusCode.ShouldBe(HttpStatusCode.Conflict, await TenantHarness.DescribeAsync(conflict));
+        first.TriggerId.ShouldNotBe(other.TriggerId);
         using var firstCall = await PostAsync(Url(first), BODY, apiKey: first.Key);
         using var otherCall = await PostAsync(Url(other), BODY, apiKey: other.Key);
         firstCall.StatusCode.ShouldBe(HttpStatusCode.Accepted);
@@ -195,9 +191,40 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     public async Task A_body_over_the_limit_is_413()
     {
         var seed = await SeedAsync();
-        using var response = await PostAsync(Url(seed), new string('x', (int)WebhooksController.MaxDeliveryBodyBytes + 1), apiKey: seed.Key);
+        using var response = await PostAsync(Url(seed), new string('x', 1_048_577), apiKey: seed.Key);
         response.StatusCode.ShouldBe(HttpStatusCode.RequestEntityTooLarge);
         await ShouldHaveNoRequestsAsync(seed);
+    }
+
+    [Theory]
+    [InlineData(0, HttpStatusCode.Accepted)]
+    [InlineData(1, HttpStatusCode.RequestEntityTooLarge)]
+    public async Task The_actual_body_byte_limit_is_one_MiB(int extra, HttpStatusCode expected)
+    {
+        var seed = await SeedAsync();
+        var body = BODY + new string(' ', 1_048_576 - Encoding.UTF8.GetByteCount(BODY) + extra);
+        using var response = await PostAsync(Url(seed), body, apiKey: seed.Key);
+        response.StatusCode.ShouldBe(expected);
+        if (extra != 0) await ShouldHaveNoRequestsAsync(seed);
+    }
+
+    [Fact]
+    public async Task Unknown_retired_missing_and_wrong_keys_have_the_same_public_failure()
+    {
+        var seed = await SeedAsync();
+        using var missing = await PostAsync(Url(seed), "bad");
+        using var wrong = await PostAsync(Url(seed), "bad", apiKey: "wrong");
+        using var unknown = await PostAsync($"/api/ext/{Guid.NewGuid()}/run", "bad", apiKey: seed.Key);
+        await new TenantHarness(factory).DbAsync(db => db.WorkflowExternalTrigger.Where(t => t.Id == seed.TriggerId)
+            .ExecuteUpdateAsync(s => s.SetProperty(t => t.DeletedDate, DateTimeOffset.UtcNow)));
+        using var retired = await PostAsync(Url(seed), "bad", apiKey: seed.Key);
+        foreach (var response in new[] { missing, wrong, unknown, retired })
+        {
+            response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+            var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+            payload.GetProperty("code").GetString().ShouldBe("unauthorized");
+            payload.GetProperty("message").GetString().ShouldBe("Invalid external trigger credentials.");
+        }
     }
 
     [Fact]
@@ -206,7 +233,7 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         var seed = await SeedAsync();
         const string INVALID_BODY = """{"service":7}""";
         using var scope = factory.Services.CreateScope();
-        var expected = await scope.ServiceProvider.GetRequiredService<IExternalTriggerIngress>().ReceiveAsync(new(seed.Slug, seed.Key, null, INVALID_BODY, false), CancellationToken.None);
+        var expected = await scope.ServiceProvider.GetRequiredService<IExternalTriggerIngress>().ReceiveAsync(new(seed.TriggerId, seed.Key, null, INVALID_BODY, false), CancellationToken.None);
         using var response = await PostAsync(Url(seed), INVALID_BODY, apiKey: seed.Key);
         response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
@@ -249,6 +276,22 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         using var refused = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
         refused.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
         refused.Headers.RetryAfter!.Delta.ShouldBe(ExternalTriggerRunAdmission.Window);
+    }
+
+    [Fact]
+    public async Task The_request_limiter_returns_retry_after_for_canonical_UUID_targets()
+    {
+        var id = Guid.NewGuid();
+        for (var i = 0; i < WebhookIngressRateLimitExtension.PermitsPerWindow; i++)
+        {
+            using var response = await PostAsync($"/api/ext/{id:D}/run", "{}");
+            response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        }
+        using var refused = await PostAsync($"/api/ext/{id.ToString("N").ToUpperInvariant()}/run", "{}");
+        refused.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests);
+        refused.Headers.RetryAfter.ShouldNotBeNull().Delta.ShouldNotBeNull().ShouldBeGreaterThanOrEqualTo(TimeSpan.Zero);
+        var body = await refused.Content.ReadFromJsonAsync<JsonElement>();
+        body.GetProperty("code").GetString().ShouldBe("rate_limited");
     }
 
     [Theory]
@@ -302,7 +345,9 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         using var response = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
         response.StatusCode.ShouldBe(HttpStatusCode.Forbidden);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
-        payload.GetProperty("errors").EnumerateArray().ShouldNotBeEmpty();
+        payload.GetProperty("code").GetString().ShouldBe("forbidden");
+        payload.GetProperty("message").GetString().ShouldBe("External trigger execution is forbidden.");
+        (await response.Content.ReadAsStringAsync()).ShouldNotContain("membership-revoked");
         (await RunsAsync(seed)).ShouldBeEmpty();
     }
 
@@ -334,7 +379,9 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         using var response = await PostAsync(Url(seed), BODY, apiKey: seed.Key);
         response.StatusCode.ShouldBe(HttpStatusCode.UnprocessableEntity);
         var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
-        payload.GetProperty("errors").EnumerateArray().ShouldNotBeEmpty();
+        payload.GetProperty("code").GetString().ShouldBe("external_trigger_completion_refused");
+        payload.GetProperty("message").GetString().ShouldBe("External trigger execution was refused.");
+        (await response.Content.ReadAsStringAsync()).ShouldNotContain("ModeProfileRegistry");
         (await RunsAsync(seed)).ShouldBeEmpty();
     }
 
@@ -356,7 +403,7 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         }
     }
 
-    private static string Url(Seed seed) => $"/api/ext/{seed.Slug}/run";
+    private static string Url(Seed seed) => $"/api/ext/{seed.TriggerId}/run";
 
     private async Task<HttpResponseMessage> PostAsync(string url, string body, string? authorization = null, string? apiKey = null, string? idempotencyKey = null)
     {
@@ -401,7 +448,7 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         var db = scope.ServiceProvider.GetRequiredService<CodeSpaceDbContext>();
         var row = await db.WorkflowExternalTrigger.AsNoTracking().SingleAsync(t => t.WorkflowId == workflowId && t.TeamId == teamId && t.DeletedDate == null);
         var key = scope.ServiceProvider.GetRequiredService<ExternalTriggerKeySealer>().Open(row.KeyCiphertext);
-        return new(userId, teamId, workflowId, slug, key);
+        return new(userId, teamId, workflowId, row.Id, key);
     }
 
     private Task<Guid[]> RunsAsync(Seed seed) => new TenantHarness(factory).DbAsync(db => db.WorkflowRun.AsNoTracking().Where(r => r.WorkflowId == seed.WorkflowId).Select(r => r.Id).ToArrayAsync());

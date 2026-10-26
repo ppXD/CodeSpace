@@ -2,6 +2,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Services.Identity;
 using CodeSpace.Core.Services.Workflows.ExternalTriggers;
 using CodeSpace.Messages.Commands.Workflows;
+using CodeSpace.Messages.Queries.Workflows;
 using CodeSpace.Messages.Dtos.Workflows;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -16,7 +17,7 @@ public sealed class RevealExternalTriggerKeyCommandHandler(
 {
     public async Task<string> Handle(RevealExternalTriggerKeyCommand request, CancellationToken cancellationToken)
     {
-        var trigger = await store.FindAsync(request.Slug, team.Id!.Value, cancellationToken).ConfigureAwait(false)
+        var trigger = await store.FindAsync(request.TriggerId, team.Id!.Value, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException("External trigger not found in this team.");
         var ciphertext = await db.WorkflowExternalTrigger.AsNoTracking()
             .Where(t => t.Id == trigger.Id && t.TeamId == team.Id.Value && t.DeletedDate == null)
@@ -33,21 +34,9 @@ public sealed class RotateExternalTriggerKeyCommandHandler(IExternalTriggerStore
 {
     public async Task<string> Handle(RotateExternalTriggerKeyCommand request, CancellationToken cancellationToken)
     {
-        var trigger = await store.FindAsync(request.Slug, team.Id!.Value, cancellationToken).ConfigureAwait(false)
+        var trigger = await store.FindAsync(request.TriggerId, team.Id!.Value, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException("External trigger not found in this team.");
         return await store.RotateKeyAsync(trigger.Id, team.Id.Value, actor.Id!.Value, cancellationToken).ConfigureAwait(false);
-    }
-}
-
-public sealed class RenameExternalTriggerCommandHandler(IExternalTriggerStore store, ICurrentTeam team, ICurrentUser actor)
-    : IRequestHandler<RenameExternalTriggerCommand, Unit>
-{
-    public async Task<Unit> Handle(RenameExternalTriggerCommand request, CancellationToken cancellationToken)
-    {
-        var trigger = await store.FindAsync(request.Slug, team.Id!.Value, cancellationToken).ConfigureAwait(false)
-            ?? throw new KeyNotFoundException("External trigger not found in this team.");
-        await store.RenameAsync(trigger.Id, team.Id.Value, request.DesiredSlug, actor.Id!.Value, cancellationToken).ConfigureAwait(false);
-        return Unit.Value;
     }
 }
 
@@ -57,7 +46,7 @@ public sealed class ReceiveExternalTriggerCommandHandler(IExternalTriggerIngress
     public async Task<ExternalTriggerDeliveryOutcome> Handle(ReceiveExternalTriggerCommand request, CancellationToken cancellationToken)
     {
         var outcome = await ingress.ReceiveAsync(new ExternalTriggerCall(
-                request.Slug, request.PresentedKey, request.IdempotencyKey, request.RawBody, request.IdempotencyRejected),
+                request.TriggerId, request.PresentedKey, request.IdempotencyKey, string.Empty, request.IdempotencyRejected, request.Body),
             cancellationToken).ConfigureAwait(false);
 
         return new ExternalTriggerDeliveryOutcome
@@ -76,16 +65,17 @@ public sealed class ReceiveExternalTriggerCommandHandler(IExternalTriggerIngress
             },
             RunId = outcome.RunId,
             Errors = outcome.Errors,
+            Code = outcome.Code,
         };
     }
 }
 
-public sealed class VerifyExternalTriggerCommandHandler(IExternalTriggerIngress ingress)
-    : IRequestHandler<VerifyExternalTriggerCommand, ExternalTriggerVerificationOutcome>
+public sealed class VerifyExternalTriggerQueryHandler(IExternalTriggerIngress ingress)
+    : IRequestHandler<VerifyExternalTriggerQuery, ExternalTriggerVerificationOutcome>
 {
-    public async Task<ExternalTriggerVerificationOutcome> Handle(VerifyExternalTriggerCommand request, CancellationToken cancellationToken)
+    public async Task<ExternalTriggerVerificationOutcome> Handle(VerifyExternalTriggerQuery request, CancellationToken cancellationToken)
     {
-        var verification = await ingress.VerifyAsync(request.Slug, request.PresentedKey, cancellationToken).ConfigureAwait(false);
+        var verification = await ingress.VerifyAsync(request.TriggerId, request.PresentedKey, cancellationToken).ConfigureAwait(false);
         var kind = verification.Kind switch
         {
             ExternalTriggerOutcomeKind.Accepted => ExternalTriggerDeliveryKind.Accepted,

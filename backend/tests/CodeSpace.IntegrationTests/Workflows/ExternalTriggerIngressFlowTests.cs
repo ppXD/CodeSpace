@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Autofac;
+using CodeSpace.Core.Failures;
 using CodeSpace.Core.Middlewares.Transactional;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -13,6 +14,7 @@ using CodeSpace.IntegrationTests.Workflows.Infrastructure;
 using CodeSpace.Messages.Constants;
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Enums;
+using CodeSpace.Messages.Failures;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Shouldly;
@@ -24,7 +26,8 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
 {
     private const string Config = """{"slug":"alerts","inputSchema":{"type":"object","properties":{"service":{"type":"string"}},"required":["service"]}}""";
-    private sealed record Seed(Guid TeamId, Guid UserId, Guid WorkflowId, Guid ActivationId, string Slug, string Key);
+    private sealed record Seed(Guid TeamId, Guid UserId, Guid WorkflowId, Guid ActivationId, Guid TriggerId, string Slug, string Key);
+    private sealed record RollbackProbe : CodeSpace.Messages.Mediation.ICommand<ExternalTriggerOutcome>;
 
     [Fact]
     public async Task A_correct_key_starts_a_run_that_carries_the_activation_lineage()
@@ -81,10 +84,45 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
-    public async Task An_unknown_slug_is_not_found()
+    public async Task An_unknown_trigger_is_unauthorized()
     {
         var seed = await SeedAsync();
-        (await ReceiveAsync(seed with { Slug = "nope" })).Kind.ShouldBe(ExternalTriggerOutcomeKind.NotFound);
+        (await ReceiveAsync(seed with { TriggerId = Guid.NewGuid() })).Kind.ShouldBe(ExternalTriggerOutcomeKind.Unauthorized);
+    }
+
+    [Fact]
+    public async Task Cheap_verification_does_not_require_a_definition_or_activation()
+    {
+        var seed = await SeedAsync();
+        using var scope = fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        await db.Workflow.Where(w => w.Id == seed.WorkflowId).ExecuteUpdateAsync(s => s.SetProperty(w => w.LatestVersion, 999));
+        await db.WorkflowActivation.Where(a => a.WorkflowId == seed.WorkflowId).ExecuteDeleteAsync();
+        (await scope.Resolve<IExternalTriggerIngress>().VerifyAsync(seed.TriggerId, seed.Key, CancellationToken.None))
+            .Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        db.Database.CurrentTransaction.ShouldBeNull();
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task A_ticket_cannot_bypass_a_rotation_or_retirement_during_body_read(bool retire)
+    {
+        var seed = await SeedAsync();
+        using var scope = fixture.BeginScope();
+        var ingress = scope.Resolve<IExternalTriggerIngress>();
+        (await ingress.VerifyAsync(seed.TriggerId, seed.Key, CancellationToken.None)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        using (var edit = fixture.BeginScope())
+        {
+            var db = edit.Resolve<CodeSpaceDbContext>();
+            var row = await db.WorkflowExternalTrigger.SingleAsync(t => t.Id == seed.TriggerId);
+            if (retire) row.DeletedDate = DateTimeOffset.UtcNow;
+            else row.KeyDigest = ExternalTriggerKeySealer.Digest("rotated");
+            await db.SaveChangesAsync();
+        }
+        (await ingress.ReceiveAsync(new(seed.TriggerId, seed.Key, null, "{}", false), CancellationToken.None))
+            .Kind.ShouldBe(ExternalTriggerOutcomeKind.Unauthorized);
+        (await RunsAsync(seed)).ShouldBeEmpty();
     }
 
     [Theory]
@@ -96,19 +134,19 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         using (var edit = fixture.BeginScope())
         {
             var db = edit.Resolve<CodeSpaceDbContext>();
-            var trigger = await db.WorkflowExternalTrigger.SingleAsync(t => t.Slug == seed.Slug);
+            var trigger = await db.WorkflowExternalTrigger.SingleAsync(t => t.Id == seed.TriggerId);
             trigger.NodeId = "removed-node";
             await db.SaveChangesAsync();
         }
 
         var outcome = await ReceiveAsync(seed, presentedKey: correctKey ? seed.Key : "wrong");
-        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.NotFound);
+        outcome.Kind.ShouldBe(correctKey ? ExternalTriggerOutcomeKind.NotFound : ExternalTriggerOutcomeKind.Unauthorized);
         (await RunsAsync(seed)).ShouldBeEmpty();
         (await RequestsAsync(seed)).ShouldBeEmpty();
     }
 
     [Fact]
-    public async Task A_deduplicated_delivery_without_a_matching_run_is_accepted_and_warned_without_dispatch()
+    public async Task A_deduplicated_delivery_without_a_matching_run_is_a_server_error_without_dispatch()
     {
         var seed = await SeedAsync();
         var logger = new IngressWarnings();
@@ -122,16 +160,15 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         var jobs = scope.Resolve<InMemoryBackgroundJobClient>();
         var before = jobs.Calls.Count;
 
-        var outcome = await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(
-            new(seed.Slug, seed.Key, "missing-run", """{"service":"api"}""", false), CancellationToken.None);
-
-        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
-        outcome.RunId.ShouldBe(Guid.Empty);
+        var error = await Record.ExceptionAsync(() => scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(
+            new(seed.TriggerId, seed.Key, "missing-run", """{"service":"api"}""", false), CancellationToken.None));
+        error.ShouldNotBeNull();
+        FailureClassifier.Classify(error).Kind.ShouldBe(FailureKind.Internal);
+        FailureClassifier.Classify(error).ClientMessage.ShouldBe(FailureClassifier.MaskedMessage);
         dispatcher.Calls.ShouldBe(0);
         jobs.Calls.Count.ShouldBe(before);
         (await RunsAsync(seed)).ShouldBeEmpty();
         (await RequestsAsync(seed)).ShouldBeEmpty();
-        logger.Warnings.ShouldContain(w => w.Contains(seed.Slug) && w.Contains("run could not be found"));
     }
 
     private sealed class EmptyRunStarter : IRunStarter
@@ -181,12 +218,13 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
                 case "deleted-activation": activation.DeletedDate = DateTimeOffset.UtcNow; break;
                 case "disabled-workflow": workflow.Enabled = false; break;
                 case "deleted-workflow": workflow.DeletedDate = DateTimeOffset.UtcNow; break;
-                case "deleted-trigger": (await db.WorkflowExternalTrigger.SingleAsync(t => t.Slug == seed.Slug)).DeletedDate = DateTimeOffset.UtcNow; break;
+                case "deleted-trigger": (await db.WorkflowExternalTrigger.SingleAsync(t => t.Id == seed.TriggerId)).DeletedDate = DateTimeOffset.UtcNow; break;
                 case "multiple-activations": db.WorkflowActivation.Add(Activation(seed, Guid.NewGuid(), Config)); break;
             }
             await db.SaveChangesAsync();
         }
-        (await ReceiveAsync(seed, presentedKey: "wrong", body: "bad")).Kind.ShouldBe(ExternalTriggerOutcomeKind.NotFound);
+        (await ReceiveAsync(seed, presentedKey: "wrong", body: "bad")).Kind.ShouldBe(ExternalTriggerOutcomeKind.Unauthorized);
+        (await ReceiveAsync(seed)).Kind.ShouldBe(state == "deleted-trigger" ? ExternalTriggerOutcomeKind.Unauthorized : ExternalTriggerOutcomeKind.NotFound);
         (await RequestsAsync(seed)).ShouldBeEmpty();
     }
 
@@ -208,7 +246,7 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         var admitted = 0;
         for (var i = 0; i < ExternalTriggerRunAdmission.PermitsPerWindow + 1; i++)
         {
-            var outcome = await ingress.ReceiveAsync(new ExternalTriggerCall(seed.Slug, seed.Key, null, """{"service":"api"}""", false), CancellationToken.None);
+            var outcome = await ingress.ReceiveAsync(new ExternalTriggerCall(seed.TriggerId, seed.Key, null, """{"service":"api"}""", false), CancellationToken.None);
             if (outcome.Kind == ExternalTriggerOutcomeKind.Accepted) admitted++;
         }
 
@@ -229,6 +267,54 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Reusing_an_idempotency_key_with_different_content_is_a_conflict()
+    {
+        var seed = await SeedAsync();
+        var first = await ReceiveAsync(seed, idempotencyKey: "conflict");
+        var second = await ReceiveAsync(seed, idempotencyKey: "conflict", body: "{\"service\":\"different\"}");
+        second.Kind.ShouldBe(ExternalTriggerOutcomeKind.Unprocessable);
+        (await RunsAsync(seed)).ShouldHaveSingleItem().Id.ShouldBe(first.RunId);
+    }
+
+    [Fact]
+    public async Task Replays_do_not_consume_the_next_new_event_capacity()
+    {
+        var seed = await SeedAsync();
+        var first = await ReceiveAsync(seed, idempotencyKey: "replay");
+        for (var i = 0; i < ExternalTriggerRunAdmission.PermitsPerWindow; i++)
+        {
+            var replay = await ReceiveAsync(seed, idempotencyKey: "replay");
+            replay.Kind.ShouldBe(ExternalTriggerOutcomeKind.Deduplicated);
+            replay.RunId.ShouldBe(first.RunId);
+        }
+        (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+    }
+
+    [Fact]
+    public async Task An_equivalent_replay_precedes_the_current_schema()
+    {
+        var seed = await SeedAsync();
+        var first = await ReceiveAsync(seed, idempotencyKey: "same", body: "{\"service\":\"api\",\"count\":1}");
+        using (var edit = fixture.BeginScope())
+        {
+            var db = edit.Resolve<CodeSpaceDbContext>();
+            var workflow = await db.Workflow.SingleAsync(w => w.Id == seed.WorkflowId);
+            var definition = JsonSerializer.Deserialize<WorkflowDefinition>(workflow.DefinitionJson, WorkflowJson.Options)!;
+            definition = definition with { Nodes = definition.Nodes.Select(n => n.Id == "start" ? n with
+            {
+                Config = WorkflowsTestSeed.Json("{\"inputSchema\":{\"type\":\"object\",\"required\":[\"newField\"]}}"),
+            } : n).ToArray() };
+            workflow.LatestVersion = 2;
+            workflow.DefinitionJson = JsonSerializer.Serialize(definition, WorkflowJson.Options);
+            db.WorkflowVersion.Add(new WorkflowVersion { WorkflowId = seed.WorkflowId, Version = 2, DefinitionJson = workflow.DefinitionJson, DefinitionHash = "test", CommittedAt = DateTimeOffset.UtcNow, CreatedBy = seed.UserId });
+            await db.SaveChangesAsync();
+        }
+        var replay = await ReceiveAsync(seed, idempotencyKey: "same", body: "{\"count\":1.0, \"service\":\"a\\u0070i\"}");
+        replay.Kind.ShouldBe(ExternalTriggerOutcomeKind.Deduplicated);
+        replay.RunId.ShouldBe(first.RunId);
+    }
+
+    [Fact]
     public async Task Concurrent_deliveries_of_one_key_start_exactly_one_run()
     {
         var seed = await SeedAsync();
@@ -240,12 +326,56 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Concurrent_different_payloads_with_one_key_have_one_winner()
+    {
+        var seed = await SeedAsync();
+        var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => ReceiveAsync(seed,
+            idempotencyKey: "different", body: $"{{\"service\":\"{i}\"}}")));
+        outcomes.Count(o => o.Kind == ExternalTriggerOutcomeKind.Accepted).ShouldBe(1);
+        outcomes.Count(o => o.Kind == ExternalTriggerOutcomeKind.Unprocessable).ShouldBe(7);
+        (await RunsAsync(seed)).ShouldHaveSingleItem();
+    }
+
+    [Fact]
+    public async Task Tiny_json_numbers_round_trip_without_becoming_zero()
+    {
+        var seed = await SeedAsync();
+        (await ReceiveAsync(seed, body: "{\"service\":\"api\",\"tiny\":1e-330}")).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        using var persisted = JsonDocument.Parse((await RunsAsync(seed)).ShouldHaveSingleItem().RunRequest.NormalizedPayloadJson);
+        using var expected = JsonDocument.Parse("1e-330");
+        JsonElement.DeepEquals(persisted.RootElement.GetProperty("tiny"), expected.RootElement).ShouldBeTrue();
+    }
+
+    [Fact]
+    public async Task An_outer_rollback_releases_capacity_and_does_not_dispatch()
+    {
+        var seed = await SeedAsync();
+        using var scope = fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var behavior = new TransactionalBehavior<RollbackProbe, ExternalTriggerOutcome>(
+            db, scope.Resolve<IPostCommitActions>(), Microsoft.Extensions.Logging.Abstractions.NullLogger<TransactionalBehavior<RollbackProbe, ExternalTriggerOutcome>>.Instance,
+            scope.Resolve<TransactionCompletionCallbacks>());
+        var request = new RollbackProbe();
+        var error = await Record.ExceptionAsync(() => behavior.Handle(request, async ct =>
+        {
+            (await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(seed.TriggerId, seed.Key, null, "{\"service\":\"api\"}", false), ct)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+            throw new OperationCanceledException();
+        }, CancellationToken.None));
+        error.ShouldBeOfType<OperationCanceledException>();
+        (await RunsAsync(seed)).ShouldBeEmpty();
+        var admission = scope.Resolve<ExternalTriggerRunAdmission>();
+        var reservations = Enumerable.Range(0, 60).Select(_ => admission.Reserve(seed.TriggerId)).ToArray();
+        try { reservations.ShouldAllBe(r => r != null); }
+        finally { foreach (var reservation in reservations) reservation?.Release(); }
+    }
+
+    [Fact]
     public async Task A_recreated_activation_is_resolved_fresh_and_the_trigger_still_deduplicates()
     {
         var seed = await SeedAsync();
         using var scope = fixture.BeginScope();
         var ingress = scope.Resolve<IExternalTriggerIngress>();
-        var call = new ExternalTriggerCall(seed.Slug, seed.Key, "evt-1", """{"service":"api"}""", false);
+        var call = new ExternalTriggerCall(seed.TriggerId, seed.Key, "evt-1", """{"service":"api"}""", false);
         (await ingress.ReceiveAsync(call, CancellationToken.None)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
         var replacement = Guid.NewGuid();
         using (var edit = fixture.BeginScope())
@@ -317,7 +447,7 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         Guid runId;
         await using (var transaction = await db.Database.BeginTransactionAsync())
         {
-            var outcome = await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(seed.Slug, seed.Key, null, """{"service":"api"}""", false), CancellationToken.None);
+            var outcome = await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(seed.TriggerId, seed.Key, null, """{"service":"api"}""", false), CancellationToken.None);
             runId = outcome.RunId;
             (await db.WorkflowRun.AsNoTracking().SingleAsync(r => r.Id == runId)).Status.ShouldBe(WorkflowRunStatus.Pending);
             (await RunsAsync(seed)).ShouldBeEmpty();
@@ -333,7 +463,7 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         using var scope = fixture.BeginScopeAs(userId, teamId);
         var db = scope.Resolve<CodeSpaceDbContext>();
         var key = scope.Resolve<ExternalTriggerKeySealer>().Mint();
-        var seed = new Seed(teamId, userId, Guid.NewGuid(), Guid.NewGuid(), "alerts-" + Guid.NewGuid().ToString("N"), key.Key);
+        var seed = new Seed(teamId, userId, Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), "alerts-" + Guid.NewGuid().ToString("N"), key.Key);
         var graph = WorkflowsTestSeed.MinimalDefinition() with
         {
             Nodes = new[]
@@ -346,7 +476,7 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         db.Workflow.Add(new Workflow { Id = seed.WorkflowId, TeamId = teamId, Slug = seed.Slug, Name = "External ingress", DefinitionJson = definition, Enabled = true, CreatedBy = userId, LastModifiedBy = userId });
         db.WorkflowVersion.Add(new WorkflowVersion { WorkflowId = seed.WorkflowId, Version = 1, DefinitionJson = definition, DefinitionHash = "test", CommittedAt = DateTimeOffset.UtcNow, CreatedDate = DateTimeOffset.UtcNow, CreatedBy = userId });
         db.WorkflowActivation.Add(Activation(seed, seed.ActivationId, config));
-        db.WorkflowExternalTrigger.Add(new WorkflowExternalTrigger { Id = Guid.NewGuid(), TeamId = teamId, WorkflowId = seed.WorkflowId, NodeId = "start", Slug = seed.Slug, KeyDigest = key.Digest, KeyCiphertext = key.Ciphertext, CreatedBy = userId, LastModifiedBy = userId });
+        db.WorkflowExternalTrigger.Add(new WorkflowExternalTrigger { Id = seed.TriggerId, TeamId = teamId, WorkflowId = seed.WorkflowId, NodeId = "start", KeyDigest = key.Digest, KeyCiphertext = key.Ciphertext, CreatedBy = userId, LastModifiedBy = userId });
         await db.SaveChangesAsync();
         return seed;
     }
@@ -360,7 +490,7 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     private async Task<ExternalTriggerOutcome> ReceiveAsync(Seed seed, string? presentedKey = "use-seeded-key", string? idempotencyKey = null, string body = "{\"service\": \"api\"}", bool rejected = false)
     {
         using var scope = fixture.BeginScope();
-        return await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(seed.Slug, presentedKey == "use-seeded-key" ? seed.Key : presentedKey, idempotencyKey, body, rejected), CancellationToken.None);
+        return await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(seed.TriggerId, presentedKey == "use-seeded-key" ? seed.Key : presentedKey, idempotencyKey, body, rejected), CancellationToken.None);
     }
 
     private async Task<WorkflowRun[]> RunsAsync(Seed seed)

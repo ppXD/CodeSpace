@@ -30,6 +30,33 @@ public class TransactionalBehaviorPostCommitTests
 
     private sealed record SweepProbeCommand : ICommand<Unit>, INonTransactionalCommand;
 
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task Completion_callbacks_follow_the_outer_transaction_even_on_cancellation(bool cancel)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var callbacks = scope.Resolve<TransactionCompletionCallbacks>();
+        var behavior = new TransactionalBehavior<ProbeCommand, Unit>(db,
+            scope.Resolve<IPostCommitActions>(), NullLogger<TransactionalBehavior<ProbeCommand, Unit>>.Instance, callbacks);
+        var committed = false;
+        var released = false;
+        using var cancellation = new CancellationTokenSource();
+        Task<Unit> Next(CancellationToken ct)
+        {
+            callbacks.RegisterAfterCommit(_ => { committed = true; return Task.CompletedTask; });
+            callbacks.RegisterAfterRollback(() => released = true);
+            if (cancel) { cancellation.Cancel(); ct.ThrowIfCancellationRequested(); }
+            return Task.FromResult(Unit.Value);
+        }
+        var error = await Record.ExceptionAsync(() => behavior.Handle(new ProbeCommand(), Next, cancellation.Token));
+        committed.ShouldBe(!cancel);
+        released.ShouldBe(cancel);
+        if (cancel) error.ShouldBeAssignableTo<OperationCanceledException>();
+        else error.ShouldBeNull();
+    }
+
     [Fact]
     public async Task A_non_transactional_command_reaches_its_handler_with_no_ambient_transaction()
     {

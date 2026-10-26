@@ -9,7 +9,6 @@ CREATE TABLE workflow_external_trigger (
     team_id            UUID NOT NULL REFERENCES team(id),
     workflow_id        UUID NOT NULL REFERENCES workflow(id),
     node_id            TEXT NOT NULL,
-    slug               TEXT NOT NULL,
     key_digest         TEXT NOT NULL,
     key_ciphertext     TEXT NOT NULL,
     created_date       TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -18,7 +17,6 @@ CREATE TABLE workflow_external_trigger (
     last_modified_by   UUID NOT NULL,
     deleted_date       TIMESTAMPTZ NULL
 );
-CREATE UNIQUE INDEX uq_wet_slug ON workflow_external_trigger (slug) WHERE deleted_date IS NULL;
 CREATE INDEX idx_wet_key_digest ON workflow_external_trigger (key_digest);
 CREATE INDEX idx_wet_workflow_node ON workflow_external_trigger (workflow_id, node_id);
 CREATE INDEX idx_wet_team ON workflow_external_trigger (team_id);

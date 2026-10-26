@@ -20,6 +20,6 @@ export function ExternalTriggerEditor({ workflowId, nodeId, config, onConfigChan
     </section>
   );
 
-  const currentSlug = triggers.data.triggers.find((trigger) => trigger.nodeId === nodeId)?.slug ?? null;
-  return <ExternalTriggerInspector key={`${workflowId}:${nodeId}:${currentSlug}`} config={config} nodeId={nodeId} currentSlug={currentSlug} onConfigChange={onConfigChange} />;
+  const currentTriggerId = triggers.data.triggers.find((trigger) => trigger.nodeId === nodeId)?.id ?? null;
+  return <ExternalTriggerInspector key={`${workflowId}:${nodeId}:${currentTriggerId}`} config={config} currentTriggerId={currentTriggerId} onConfigChange={onConfigChange} />;
 }

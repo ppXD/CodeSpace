@@ -7,11 +7,10 @@ namespace CodeSpace.UnitTests.Workflows;
 public class TriggerExternalNodeTests
 {
     [Fact]
-    public void The_manifest_declares_a_slug_and_an_input_schema_for_the_editor()
+    public void The_manifest_declares_an_input_schema_without_a_route_name()
     {
         var config = new TriggerExternalNode().Manifest.ConfigSchema;
-        config.GetProperty("properties").GetProperty("slug").GetProperty("type").GetString().ShouldBe("string");
-        config.GetProperty("required").EnumerateArray().Any(e => e.GetString() == "slug").ShouldBeTrue();
+        config.GetProperty("properties").TryGetProperty("slug", out _).ShouldBeFalse();
         config.GetProperty("properties").TryGetProperty("inputSchema", out _).ShouldBeTrue();
     }
 }

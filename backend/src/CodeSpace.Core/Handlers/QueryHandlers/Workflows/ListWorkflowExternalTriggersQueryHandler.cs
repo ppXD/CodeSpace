@@ -19,6 +19,6 @@ public sealed class ListWorkflowExternalTriggersQueryHandler(CodeSpaceDbContext 
 
         var triggers = await store.ListForWorkflowAsync(request.WorkflowId, teamId, cancellationToken).ConfigureAwait(false);
         return new WorkflowExternalTriggersResult(triggers
-            .Select(t => new WorkflowExternalTriggerSummary(t.Id, t.WorkflowId, t.NodeId, t.Slug)).ToArray());
+            .Select(t => new WorkflowExternalTriggerSummary(t.Id, t.WorkflowId, t.NodeId)).ToArray());
     }
 }

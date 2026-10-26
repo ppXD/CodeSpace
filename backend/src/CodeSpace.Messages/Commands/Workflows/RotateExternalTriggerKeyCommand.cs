@@ -8,5 +8,5 @@ namespace CodeSpace.Messages.Commands.Workflows;
 public sealed record RotateExternalTriggerKeyCommand : ICommand<string>, IRequireTeamPermission
 {
     public string RequiredPermission => TeamPermissions.WorkflowsWrite;
-    public string Slug { get; init; } = string.Empty;
+    public required Guid TriggerId { get; init; }
 }

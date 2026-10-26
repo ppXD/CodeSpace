@@ -69,19 +69,11 @@ export function useWorkflowExternalTriggers(workflowId: string) {
 }
 
 export function useRevealExternalTriggerKey() {
-  return useMutation({ mutationFn: (slug: string) => workflowsApi.revealExternalTriggerKey(slug), gcTime: 0 });
+  return useMutation({ mutationFn: (triggerId: string) => workflowsApi.revealExternalTriggerKey(triggerId), gcTime: 0 });
 }
 
 export function useRotateExternalTriggerKey() {
-  return useMutation({ mutationFn: (slug: string) => workflowsApi.rotateExternalTriggerKey(slug), gcTime: 0 });
-}
-
-export function useRenameExternalTrigger() {
-  const qc = useQueryClient();
-  return useMutation({
-    mutationFn: ({ slug, desiredSlug }: { slug: string; desiredSlug: string }) => workflowsApi.renameExternalTrigger(slug, desiredSlug),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["workflow-external-triggers"] }),
-  });
+  return useMutation({ mutationFn: (triggerId: string) => workflowsApi.rotateExternalTriggerKey(triggerId), gcTime: 0 });
 }
 
 export function useDeleteWorkflow() {

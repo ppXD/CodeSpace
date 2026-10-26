@@ -23,15 +23,12 @@ namespace CodeSpace.IntegrationTests.Workflows;
 [Trait("Category", "Integration")]
 public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
 {
-    private sealed record Seed(Guid TeamId, Guid UserId, Guid WorkflowId, string Slug, string Key);
+    private sealed record Seed(Guid TeamId, Guid UserId, Guid WorkflowId, Guid TriggerId, string Slug, string Key);
 
     [Fact]
-    public async Task Metadata_returns_the_live_rename_after_a_stale_draft_save()
+    public async Task Metadata_returns_the_stable_trigger_identity_without_a_slug()
     {
         var seed = await SeedAsync();
-        var renamed = "live-" + Guid.NewGuid().ToString("N");
-        using (var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId))
-            await scope.Resolve<IMediator>().Send(new RenameExternalTriggerCommand { Slug = seed.Slug, DesiredSlug = renamed });
         await UpdateAsync(seed, Definition(seed.Slug));
         using var read = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
         var result = await read.Resolve<IMediator>().Send(new ListWorkflowExternalTriggersQuery { WorkflowId = seed.WorkflowId });
@@ -39,7 +36,38 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         trigger.Id.ShouldBe((await RowAsync(seed)).Id);
         trigger.WorkflowId.ShouldBe(seed.WorkflowId);
         trigger.NodeId.ShouldBe("start");
-        trigger.Slug.ShouldBe(renamed);
+        JsonSerializer.SerializeToElement(trigger, WorkflowJson.Options).TryGetProperty("slug", out _).ShouldBeFalse();
+    }
+
+    [Fact]
+    public async Task Saving_a_legacy_slug_removes_it_without_changing_the_trigger_credential()
+    {
+        var seed = await SeedAsync();
+        var before = await RowAsync(seed);
+        string originalDefinition;
+        string originalHash;
+        using (var history = fixture.BeginScope())
+        {
+            var original = await history.Resolve<CodeSpaceDbContext>().WorkflowVersion.AsNoTracking()
+                .SingleAsync(v => v.WorkflowId == seed.WorkflowId && v.Version == 1);
+            originalDefinition = original.DefinitionJson;
+            originalHash = original.DefinitionHash;
+        }
+        await UpdateAsync(seed, Definition("legacy-name"));
+        var after = await RowAsync(seed);
+        after.Id.ShouldBe(before.Id);
+        after.KeyDigest.ShouldBe(before.KeyDigest);
+        after.KeyCiphertext.ShouldBe(before.KeyCiphertext);
+        using var scope = fixture.BeginScope();
+        var version = await scope.Resolve<CodeSpaceDbContext>().WorkflowVersion.AsNoTracking()
+            .SingleAsync(v => v.WorkflowId == seed.WorkflowId && v.Version == 2);
+        var definition = JsonSerializer.Deserialize<WorkflowDefinition>(version.DefinitionJson, WorkflowJson.Options)!;
+        definition.Nodes.Single(n => n.Id == "start").Config.TryGetProperty("slug", out _).ShouldBeFalse();
+        version.DefinitionHash.ShouldBe(DefinitionHash.Compute(definition));
+        var preserved = await scope.Resolve<CodeSpaceDbContext>().WorkflowVersion.AsNoTracking()
+            .SingleAsync(v => v.WorkflowId == seed.WorkflowId && v.Version == 1);
+        preserved.DefinitionJson.ShouldBe(originalDefinition);
+        preserved.DefinitionHash.ShouldBe(originalHash);
     }
 
     [Fact]
@@ -70,7 +98,7 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         var seed = await SeedAsync();
         using var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
         await scope.Resolve<IExternalTriggerStore>().EnsureForNodeAsync(seed.WorkflowId, seed.TeamId,
-            "second", "second-" + Guid.NewGuid().ToString("N"), seed.UserId, CancellationToken.None);
+            "second", seed.UserId, CancellationToken.None);
         var result = await scope.Resolve<IMediator>().Send(new ListWorkflowExternalTriggersQuery { WorkflowId = seed.WorkflowId });
         result!.Triggers.Select(t => t.NodeId).Order().ShouldBe(new[] { "second", "start" });
         result.Triggers.ShouldAllBe(t => t.WorkflowId == seed.WorkflowId);
@@ -158,7 +186,6 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         after.Id.ShouldBe(before.Id);
         after.KeyDigest.ShouldBe(before.KeyDigest);
         after.KeyCiphertext.ShouldBe(before.KeyCiphertext);
-        after.Slug.ShouldBe(seed.Slug);
         (await ReceiveAsync(seed, body: edit == "schema" ? "{\"service\":7}" : "{\"service\":\"api\"}")).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
         if (edit == "schema")
             (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.InvalidPayload);
@@ -172,17 +199,16 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
-    public async Task An_unusable_draft_is_refused_without_damaging_the_live_endpoint()
+    public async Task A_legacy_name_does_not_affect_the_live_endpoint()
     {
         var seed = await SeedAsync();
         (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
         var before = await RowAsync(seed);
 
-        var error = await Should.ThrowAsync<ArgumentException>(() => UpdateAsync(seed, Definition("告警")));
+        await UpdateAsync(seed, Definition("告警"));
 
         var after = await RowAsync(seed);
         after.Id.ShouldBe(before.Id);
-        after.Slug.ShouldBe(before.Slug);
         after.KeyDigest.ShouldBe(before.KeyDigest);
         after.KeyCiphertext.ShouldBe(before.KeyCiphertext);
         var outcome = await ReceiveAsync(seed);
@@ -192,9 +218,6 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         var run = await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.SingleAsync(r => r.Id == outcome.RunId);
         run.WorkflowId.ShouldBe(seed.WorkflowId);
 
-        error.ParamName.ShouldBe("slug");
-        error.Message.ShouldContain("slug");
-        error.Message.ShouldContain("Hyphens and underscores are allowed");
     }
 
     [Fact]
@@ -202,16 +225,14 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
     {
         var seed = await SeedAsync();
         using var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
-        (await scope.Resolve<IMediator>().Send(new RevealExternalTriggerKeyCommand { Slug = seed.Slug })).ShouldBe(seed.Key);
+        (await scope.Resolve<IMediator>().Send(new RevealExternalTriggerKeyCommand { TriggerId = seed.TriggerId })).ShouldBe(seed.Key);
     }
 
     [Theory]
     [InlineData(TeamRole.Viewer, "reveal")]
     [InlineData(TeamRole.Viewer, "rotate")]
-    [InlineData(TeamRole.Viewer, "rename")]
     [InlineData(TeamRole.Member, "reveal")]
     [InlineData(TeamRole.Member, "rotate")]
-    [InlineData(TeamRole.Member, "rename")]
     [InlineData(TeamRole.Admin, "reveal")]
     public async Task Management_requires_workflows_write(TeamRole role, string operation)
     {
@@ -223,7 +244,7 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
             await db.SaveChangesAsync();
         }
         using var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
-        var error = await Record.ExceptionAsync(() => ManageAsync(scope.Resolve<IMediator>(), operation, seed.Slug, "renamed-" + Guid.NewGuid().ToString("N")));
+        var error = await Record.ExceptionAsync(() => ManageAsync(scope.Resolve<IMediator>(), operation, seed.TriggerId));
         if (role == TeamRole.Viewer) error.ShouldBeOfType<TenantAccessDeniedException>();
         else error.ShouldBeNull();
     }
@@ -234,58 +255,78 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         var seed = await SeedAsync();
         string fresh;
         using (var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId))
-            fresh = await scope.Resolve<IMediator>().Send(new RotateExternalTriggerKeyCommand { Slug = seed.Slug });
+            fresh = await scope.Resolve<IMediator>().Send(new RotateExternalTriggerKeyCommand { TriggerId = seed.TriggerId });
         fresh.ShouldNotBe(seed.Key);
         (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Unauthorized);
         (await ReceiveAsync(seed with { Key = fresh })).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
         await UpdateAsync(seed, Definition(seed.Slug));
         using var verify = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
-        (await verify.Resolve<IMediator>().Send(new RevealExternalTriggerKeyCommand { Slug = seed.Slug })).ShouldBe(fresh);
+        (await verify.Resolve<IMediator>().Send(new RevealExternalTriggerKeyCommand { TriggerId = seed.TriggerId })).ShouldBe(fresh);
     }
 
     [Fact]
-    public async Task Renaming_moves_the_endpoint_and_a_stale_draft_save_does_not_move_it_back()
+    public async Task Rotation_waits_for_workflow_retirement_and_cannot_restore_the_retired_key()
     {
         var seed = await SeedAsync();
-        var renamed = "prod-alerts-v2-" + Guid.NewGuid().ToString("N");
-        using (var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId))
-            await scope.Resolve<IMediator>().Send(new RenameExternalTriggerCommand { Slug = seed.Slug, DesiredSlug = renamed });
-        await UpdateAsync(seed, Definition(seed.Slug));
-        (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.NotFound);
-        (await ReceiveAsync(seed with { Slug = renamed })).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
-        (await RowAsync(seed)).KeyDigest.ShouldBe(ExternalTriggerKeySealer.Digest(seed.Key));
+        using var retirement = fixture.BeginScope();
+        var retirementDb = retirement.Resolve<CodeSpaceDbContext>();
+        await using var retirementTransaction = await retirementDb.Database.BeginTransactionAsync();
+        await retirementDb.Database.ExecuteSqlInterpolatedAsync($"SELECT id FROM workflow WHERE id = {seed.WorkflowId} FOR UPDATE");
+        await retirementDb.WorkflowExternalTrigger.Where(trigger => trigger.Id == seed.TriggerId)
+            .ExecuteUpdateAsync(update => update
+                .SetProperty(trigger => trigger.DeletedDate, DateTimeOffset.UtcNow)
+                .SetProperty(trigger => trigger.KeyCiphertext, string.Empty));
+
+        using var rotation = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
+        var rotationDb = rotation.Resolve<CodeSpaceDbContext>();
+        await rotationDb.Database.OpenConnectionAsync();
+        var processId = await rotationDb.Database.SqlQueryRaw<int>("SELECT pg_backend_pid() AS \"Value\"").SingleAsync();
+        var rotationTask = rotation.Resolve<IExternalTriggerStore>().RotateKeyAsync(
+            seed.TriggerId, seed.TeamId, seed.UserId, CancellationToken.None);
+
+        await WaitForLockAsync(processId);
+        await retirementTransaction.CommitAsync();
+
+        var error = await Record.ExceptionAsync(async () => await rotationTask);
+        error.ShouldBeOfType<KeyNotFoundException>();
+        using var verify = fixture.BeginScope();
+        var retired = await verify.Resolve<CodeSpaceDbContext>().WorkflowExternalTrigger.AsNoTracking()
+            .SingleAsync(trigger => trigger.Id == seed.TriggerId);
+        retired.DeletedDate.ShouldNotBeNull();
+        retired.KeyCiphertext.ShouldBeEmpty();
     }
 
-    [Fact]
-    public async Task Renaming_onto_another_teams_live_slug_is_refused_and_original_is_untouched()
+    private async Task WaitForLockAsync(int processId)
+    {
+        var deadline = DateTimeOffset.UtcNow.AddSeconds(5);
+        while (DateTimeOffset.UtcNow < deadline)
+        {
+            using var observer = fixture.BeginScope();
+            var waitType = await observer.Resolve<CodeSpaceDbContext>().Database
+                .SqlQueryRaw<string?>("SELECT wait_event_type AS \"Value\" FROM pg_stat_activity WHERE pid = {0}", processId)
+                .SingleOrDefaultAsync();
+            if (waitType == "Lock") return;
+            await Task.Delay(10);
+        }
+
+        throw new TimeoutException("The key rotation did not wait for the workflow lock.");
+    }
+
+    [Theory]
+    [InlineData("reveal")]
+    [InlineData("rotate")]
+    public async Task Another_teams_trigger_is_not_found(string operation)
     {
         var first = await SeedAsync();
         var other = await SeedAsync();
         using var scope = fixture.BeginScopeAs(other.UserId, other.TeamId);
-        var error = await Record.ExceptionAsync(() => scope.Resolve<IMediator>().Send(new RenameExternalTriggerCommand { Slug = other.Slug, DesiredSlug = first.Slug }));
-        error.ShouldNotBeNull();
-        FailureClassifier.Classify(error).Kind.ShouldBe(FailureKind.Conflict);
-        (await ReceiveAsync(other)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        await Should.ThrowAsync<KeyNotFoundException>(() => ManageAsync(scope.Resolve<IMediator>(), operation, first.TriggerId));
         (await ReceiveAsync(first)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
     }
 
     [Theory]
     [InlineData("reveal")]
     [InlineData("rotate")]
-    [InlineData("rename")]
-    public async Task Another_teams_slug_is_not_found(string operation)
-    {
-        var first = await SeedAsync();
-        var other = await SeedAsync();
-        using var scope = fixture.BeginScopeAs(other.UserId, other.TeamId);
-        await Should.ThrowAsync<KeyNotFoundException>(() => ManageAsync(scope.Resolve<IMediator>(), operation, first.Slug, "unused"));
-        (await ReceiveAsync(first)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
-    }
-
-    [Theory]
-    [InlineData("reveal")]
-    [InlineData("rotate")]
-    [InlineData("rename")]
     public async Task Deleting_the_workflow_retires_its_trigger_so_the_key_stops_resolving(string operation)
     {
         var seed = await SeedAsync();
@@ -294,35 +335,33 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
 
         using (var verify = fixture.BeginScopeAs(seed.UserId, seed.TeamId))
         {
-            var error = await Record.ExceptionAsync(() => ManageAsync(verify.Resolve<IMediator>(), operation, seed.Slug, "replacement-" + Guid.NewGuid().ToString("N")));
+            var error = await Record.ExceptionAsync(() => ManageAsync(verify.Resolve<IMediator>(), operation, seed.TriggerId));
             error.ShouldBeOfType<KeyNotFoundException>();
             FailureClassifier.Classify(error).Kind.ShouldBe(FailureKind.NotFound);
         }
 
-        (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.NotFound);
+        (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Unauthorized);
         using var audit = fixture.BeginScope();
         var db = audit.Resolve<CodeSpaceDbContext>();
         var row = await db.WorkflowExternalTrigger.AsNoTracking().SingleAsync(t => t.WorkflowId == seed.WorkflowId);
         row.DeletedDate.ShouldNotBeNull();
         row.KeyDigest.ShouldBe(ExternalTriggerKeySealer.Digest(seed.Key));
         row.KeyCiphertext.ShouldBeEmpty();
-        (await db.WorkflowExternalTrigger.CountAsync(t => t.Slug == seed.Slug && t.DeletedDate == null)).ShouldBe(0);
+        (await db.WorkflowExternalTrigger.CountAsync(t => t.Id == seed.TriggerId && t.DeletedDate == null)).ShouldBe(0);
     }
 
     [Theory]
     [InlineData("!!!")]
     [InlineData("告警")]
     [InlineData("")]
-    public async Task An_underivable_slug_is_refused_without_creating_a_workflow(string desired)
+    public async Task A_legacy_name_is_not_a_workflow_creation_constraint(string desired)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture, false);
         using var scope = fixture.BeginScopeAs(userId, teamId);
-        var error = await Record.ExceptionAsync(() => CreateAsync(scope, Definition(desired)));
-        error.ShouldNotBeNull();
-        FailureClassifier.Classify(error).Kind.ShouldBeOneOf(FailureKind.Invalid, FailureKind.Unprocessable);
+        await CreateAsync(scope, Definition(desired));
         using var verify = fixture.BeginScope();
-        (await verify.Resolve<CodeSpaceDbContext>().Workflow.CountAsync(w => w.TeamId == teamId)).ShouldBe(0);
-        (await verify.Resolve<CodeSpaceDbContext>().WorkflowExternalTrigger.CountAsync(w => w.TeamId == teamId)).ShouldBe(0);
+        (await verify.Resolve<CodeSpaceDbContext>().Workflow.CountAsync(w => w.TeamId == teamId)).ShouldBe(1);
+        (await verify.Resolve<CodeSpaceDbContext>().WorkflowExternalTrigger.CountAsync(w => w.TeamId == teamId)).ShouldBe(1);
     }
 
     [Fact]
@@ -348,26 +387,38 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         (await verify.Resolve<CodeSpaceDbContext>().Workflow.CountAsync(w => w.TeamId == teamId)).ShouldBe(0);
     }
 
-    [Fact]
-    public async Task An_underivable_rename_is_refused_and_keeps_the_old_endpoint()
+    [Theory]
+    [InlineData("{\"type\":\"object\",\"properties\":{\"\\uD800\":{\"type\":\"string\"}}}")]
+    [InlineData("{\"type\":\"object\",\"properties\":{\"a\":{\"type\":\"string\",\"title\":\"\\uD800\"}}}")]
+    [InlineData("{\"type\":\"object\",\"required\":[\"\\uD800\"]}")]
+    public async Task An_unstorable_schema_is_refused_before_input_projection(string schema)
     {
-        var seed = await SeedAsync();
-        using var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
-        await Should.ThrowAsync<ArgumentException>(() => scope.Resolve<IMediator>().Send(new RenameExternalTriggerCommand { Slug = seed.Slug, DesiredSlug = "!!!" }));
-        (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture, false);
+        using var scope = fixture.BeginScopeAs(userId, teamId);
+        var config = WorkflowsTestSeed.Json("{\"inputSchema\":" + schema + "}");
+        var definition = Definition("legacy") with
+        {
+            Nodes = Definition("legacy").Nodes.Select(n => n.Id == "start" ? n with { Config = config } : n).ToArray(),
+        };
+        var error = await Record.ExceptionAsync(() => CreateAsync(scope, definition));
+        error.ShouldNotBeNull();
+        FailureClassifier.Classify(error).Kind.ShouldBe(FailureKind.Unprocessable);
+        using var verify = fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().Workflow.CountAsync(w => w.TeamId == teamId)).ShouldBe(0);
     }
 
     [Fact]
-    public async Task Creating_with_an_existing_slug_is_a_conflict_not_a_suffixed_endpoint()
+    public async Task Two_teams_can_save_the_same_legacy_name_with_independent_trigger_identities()
     {
         var seed = await SeedAsync();
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture, false);
         using var scope = fixture.BeginScopeAs(userId, teamId);
-        var error = await Record.ExceptionAsync(() => CreateAsync(scope, Definition(seed.Slug)));
-        error.ShouldNotBeNull();
-        FailureClassifier.Classify(error).Kind.ShouldBe(FailureKind.Conflict);
+        var workflowId = await CreateAsync(scope, Definition(seed.Slug));
         using var verify = fixture.BeginScope();
-        (await verify.Resolve<CodeSpaceDbContext>().Workflow.CountAsync(w => w.TeamId == teamId)).ShouldBe(0);
+        var row = await verify.Resolve<CodeSpaceDbContext>().WorkflowExternalTrigger.AsNoTracking()
+            .SingleAsync(t => t.WorkflowId == workflowId);
+        row.Id.ShouldNotBe((await RowAsync(seed)).Id);
+        row.KeyDigest.ShouldNotBe(ExternalTriggerKeySealer.Digest(seed.Key));
     }
 
     [Theory]
@@ -385,7 +436,7 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
             Edges = [new EdgeDefinition { From = replace ? "replacement" : "start", To = "end" }],
         };
         await UpdateAsync(seed, definition);
-        (await ReceiveAsync(seed)).Kind.ShouldBe(replace ? ExternalTriggerOutcomeKind.Unauthorized : ExternalTriggerOutcomeKind.NotFound);
+        (await ReceiveAsync(seed)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Unauthorized);
         using var scope = fixture.BeginScopeAs(seed.UserId, seed.TeamId);
         var rows = await scope.Resolve<CodeSpaceDbContext>().WorkflowExternalTrigger.Where(t => t.WorkflowId == seed.WorkflowId).ToArrayAsync();
         var retired = rows.Single(t => t.NodeId == "start");
@@ -394,9 +445,11 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         retired.KeyCiphertext.ShouldBeEmpty();
         if (replace)
         {
-            var fresh = await scope.Resolve<IMediator>().Send(new RevealExternalTriggerKeyCommand { Slug = seed.Slug });
+            var replacement = rows.Single(t => t.NodeId == "replacement");
+            replacement.Id.ShouldNotBe(seed.TriggerId);
+            var fresh = await scope.Resolve<IMediator>().Send(new RevealExternalTriggerKeyCommand { TriggerId = replacement.Id });
             fresh.ShouldNotBe(seed.Key);
-            (await ReceiveAsync(seed with { Key = fresh })).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+            (await ReceiveAsync(seed with { TriggerId = replacement.Id, Key = fresh })).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
         }
     }
 
@@ -429,8 +482,7 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
         var workflowId = await CreateAsync(scope, Definition(slug));
         var row = await scope.Resolve<CodeSpaceDbContext>().WorkflowExternalTrigger.SingleAsync(t => t.WorkflowId == workflowId && t.DeletedDate == null);
         row.NodeId.ShouldBe("start");
-        row.Slug.ShouldBe(slug);
-        return new(teamId, userId, workflowId, slug, scope.Resolve<ExternalTriggerKeySealer>().Open(row.KeyCiphertext));
+        return new(teamId, userId, workflowId, row.Id, slug, scope.Resolve<ExternalTriggerKeySealer>().Open(row.KeyCiphertext));
     }
 
     private async Task UpdateAsync(Seed seed, WorkflowDefinition definition)
@@ -448,13 +500,12 @@ public sealed class ExternalTriggerManagementFlowTests(PostgresFixture fixture)
     private async Task<ExternalTriggerOutcome> ReceiveAsync(Seed seed, string body = "{\"service\":\"api\"}")
     {
         using var scope = fixture.BeginScope();
-        return await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(seed.Slug, seed.Key, null, body, false), CancellationToken.None);
+        return await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(seed.TriggerId, seed.Key, null, body, false), CancellationToken.None);
     }
 
-    private static Task ManageAsync(IMediator mediator, string operation, string slug, string desired) => operation switch
+    private static Task ManageAsync(IMediator mediator, string operation, Guid triggerId) => operation switch
     {
-        "reveal" => mediator.Send(new RevealExternalTriggerKeyCommand { Slug = slug }),
-        "rotate" => mediator.Send(new RotateExternalTriggerKeyCommand { Slug = slug }),
-        _ => mediator.Send(new RenameExternalTriggerCommand { Slug = slug, DesiredSlug = desired }),
+        "reveal" => mediator.Send(new RevealExternalTriggerKeyCommand { TriggerId = triggerId }),
+        _ => mediator.Send(new RotateExternalTriggerKeyCommand { TriggerId = triggerId }),
     };
 }

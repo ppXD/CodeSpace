@@ -1,6 +1,6 @@
 using System.Text.Json;
-using System.Numerics;
 using System.Globalization;
+using System.Text;
 
 namespace CodeSpace.Core.Services.Workflows.ExternalTriggers;
 
@@ -14,6 +14,7 @@ public static class ExternalTriggerPayloadValidator
     public const int MaxNumberTokenLength = 256;
     public const int MaxSchemaDepth = 64;
     public const int MaxNodes = 10_000;
+    public const int MaxEnumComparisonNodes = 100_000;
 
     /// <summary>
     /// The schema keywords the HTTP contract actually enforces. A keyword outside this set is refused at save time
@@ -27,9 +28,15 @@ public static class ExternalTriggerPayloadValidator
     public static IReadOnlyList<string> Validate(JsonElement body, JsonElement inputSchema)
     {
         var errors = new List<string>();
-        var budget = new ValidationBudget();
-        ValidateRepresentable(body, errors, budget, depth: 0);
-        ValidateNode(body, inputSchema, "$", errors, budget, depth: 0);
+        ValidateRepresentable(body, errors, new ValidationBudget(), depth: 0);
+        if (errors.Count == 0) ValidateNode(body, inputSchema, "$", errors, new ValidationBudget(), depth: 0);
+        return errors;
+    }
+
+    public static IReadOnlyList<string> ValidatePayload(JsonElement body)
+    {
+        var errors = new List<string>();
+        ValidateRepresentable(body, errors, new ValidationBudget(), depth: 0);
         return errors;
     }
 
@@ -37,8 +44,12 @@ public static class ExternalTriggerPayloadValidator
     public static IReadOnlyList<string> ValidateSchema(JsonElement schema)
     {
         var errors = new List<string>();
-        var budget = new ValidationBudget();
-        ValidateSchemaNode(schema, "$", errors, budget, depth: 0);
+        ValidateRepresentable(schema, errors, new ValidationBudget(), depth: 0);
+        if (errors.Count != 0) return errors;
+        if (schema.ValueKind != JsonValueKind.Object || !schema.TryGetProperty("type", out var rootType)
+            || rootType.ValueKind != JsonValueKind.String || rootType.GetString() != "object")
+            errors.Add("$: schema root must declare type 'object'");
+        ValidateSchemaNode(schema, "$", errors, new ValidationBudget(), depth: 0);
         return errors;
     }
 
@@ -56,6 +67,7 @@ public static class ExternalTriggerPayloadValidator
             budget.Exhausted = true;
             return;
         }
+        if (schema.ValueKind == JsonValueKind.False) { errors.Add($"{path}: value is not allowed"); return; }
         if (schema.ValueKind != JsonValueKind.Object) return;
 
         if (schema.TryGetProperty("type", out var type) && !TypeMatches(value, type))
@@ -64,9 +76,24 @@ public static class ExternalTriggerPayloadValidator
             return;
         }
 
-        if (schema.TryGetProperty("enum", out var enumValues) && enumValues.ValueKind == JsonValueKind.Array &&
-            !enumValues.EnumerateArray().Any(candidate => JsonValueEquals(value, candidate)))
-            errors.Add($"{path}: value '{DisplayValue(value)}' is not one of the allowed enum values");
+        if (schema.TryGetProperty("enum", out var enumValues) && enumValues.ValueKind == JsonValueKind.Array)
+        {
+            var matched = false;
+            foreach (var candidate in enumValues.EnumerateArray())
+            {
+                var remaining = MaxEnumComparisonNodes - budget.EnumComparisonNodes;
+                matched = ExternalTriggerJsonEquality.AreEquivalent(value, candidate, remaining, out var visited, out var exhausted);
+                budget.EnumComparisonNodes += visited;
+                if (exhausted)
+                {
+                    errors.Add("$: enum comparison budget exceeded");
+                    budget.Exhausted = true;
+                    return;
+                }
+                if (matched) break;
+            }
+            if (!matched) errors.Add($"{path}: value '{DisplayValue(value)}' is not one of the allowed enum values");
+        }
 
         if (value.ValueKind == JsonValueKind.Object)
         {
@@ -82,7 +109,7 @@ public static class ExternalTriggerPayloadValidator
             }
         }
         else if (value.ValueKind == JsonValueKind.String && schema.TryGetProperty("maxLength", out var maxLength) &&
-                 maxLength.TryGetInt32(out var maximum) && TryGetString(value, out var text) && text.Length > maximum)
+                 maxLength.TryGetInt32(out var maximum) && TryGetString(value, out var text) && text.EnumerateRunes().Count() > maximum)
         {
             errors.Add($"{path}: string exceeds maximum length {maximum}");
         }
@@ -111,13 +138,16 @@ public static class ExternalTriggerPayloadValidator
                 ValidateNode(property.Value, propertySchema, $"{path}.{property.Name}", errors, budget, depth + 1);
             else if (closesObject)
                 errors.Add($"{path}.{property.Name}: additional property is not allowed");
+            else if (additionalProperties.ValueKind == JsonValueKind.Object)
+                ValidateNode(property.Value, additionalProperties, $"{path}.{property.Name}", errors, budget, depth + 1);
         }
     }
 
     private static void ValidateSchemaNode(JsonElement schema, string path, List<string> errors, ValidationBudget budget, int depth)
     {
         if (errors.Count >= MaxErrors || budget.Exhausted) return;
-        if (schema.ValueKind != JsonValueKind.Object) return;
+        if (schema.ValueKind is JsonValueKind.True or JsonValueKind.False) return;
+        if (schema.ValueKind != JsonValueKind.Object) { errors.Add($"{path}: schema must be an object or boolean"); return; }
         if (depth > MaxSchemaDepth)
         {
             errors.Add($"{path}: schema is too deep (max {MaxSchemaDepth})");
@@ -132,8 +162,22 @@ public static class ExternalTriggerPayloadValidator
 
         foreach (var keyword in schema.EnumerateObject())
         {
-            if (!SupportedSchemaKeywords.Contains(keyword.Name))
+            if (errors.Count >= MaxErrors) return;
+            if (!SupportedSchemaKeywords.Contains(keyword.Name) && !keyword.Name.StartsWith("x-", StringComparison.Ordinal))
                 errors.Add($"{path}.{keyword.Name}: schema keyword '{keyword.Name}' is not supported");
+            var value = keyword.Value;
+            var valid = keyword.Name switch
+            {
+                "required" => value.ValueKind == JsonValueKind.Array && value.EnumerateArray().All(v => v.ValueKind == JsonValueKind.String),
+                "enum" => value.ValueKind == JsonValueKind.Array && value.GetArrayLength() > 0,
+                "maxLength" => value.ValueKind == JsonValueKind.Number && value.TryGetInt32(out var maximum) && maximum >= 0,
+                "properties" => value.ValueKind == JsonValueKind.Object,
+                "items" => value.ValueKind is JsonValueKind.Object or JsonValueKind.True or JsonValueKind.False,
+                "additionalProperties" => value.ValueKind is JsonValueKind.Object or JsonValueKind.True or JsonValueKind.False,
+                "title" or "description" => value.ValueKind == JsonValueKind.String,
+                _ => true,
+            };
+            if (!valid && errors.Count < MaxErrors) errors.Add($"{path}.{keyword.Name}: invalid schema keyword value");
         }
 
         if (schema.TryGetProperty("type", out var type) && !TypeKeywordIsSupported(type))
@@ -156,7 +200,7 @@ public static class ExternalTriggerPayloadValidator
     private static bool TypeKeywordIsSupported(JsonElement type) => type.ValueKind switch
     {
         JsonValueKind.String => IsSupportedType(type.GetString()!),
-        JsonValueKind.Array => type.EnumerateArray().All(candidate => candidate.ValueKind == JsonValueKind.String && IsSupportedType(candidate.GetString()!)),
+        JsonValueKind.Array => type.GetArrayLength() > 0 && type.EnumerateArray().All(candidate => candidate.ValueKind == JsonValueKind.String && IsSupportedType(candidate.GetString()!)),
         _ => false,
     };
 
@@ -204,12 +248,24 @@ public static class ExternalTriggerPayloadValidator
                     errors.Add("$: number is not representable");
                 break;
             case JsonValueKind.Object:
+                var names = new HashSet<string>(StringComparer.Ordinal);
                 foreach (var property in value.EnumerateObject())
+                {
+                    if (errors.Count >= MaxErrors || budget.Exhausted) break;
+                    string name;
+                    try { name = property.Name; }
+                    catch (InvalidOperationException) { errors.Add("$: property name is not representable"); continue; }
+                    if (!IsWellFormedUtf16(name)) errors.Add("$: property name contains text that cannot be stored");
+                    if (!names.Add(name) && errors.Count < MaxErrors) errors.Add("$: duplicate property name is not allowed");
                     ValidateRepresentable(property.Value, errors, budget, depth + 1);
+                }
                 break;
             case JsonValueKind.Array:
                 foreach (var item in value.EnumerateArray())
+                {
+                    if (errors.Count >= MaxErrors || budget.Exhausted) break;
                     ValidateRepresentable(item, errors, budget, depth + 1);
+                }
                 break;
         }
     }
@@ -219,9 +275,8 @@ public static class ExternalTriggerPayloadValidator
         var exponentIndex = raw.IndexOfAny(['e', 'E']);
         if (exponentIndex >= 0)
         {
-            var exponentText = raw[(exponentIndex + 1)..];
-            if (exponentText.StartsWith('+') || exponentText.StartsWith('-')) exponentText = exponentText[1..];
-            if (exponentText.Length > 20) return false;
+            if (!int.TryParse(raw.AsSpan(exponentIndex + 1), NumberStyles.AllowLeadingSign, CultureInfo.InvariantCulture, out var exponent)
+                || exponent is < -330 or > 330) return false;
         }
 
         return double.TryParse(raw, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) && double.IsFinite(number);
@@ -238,6 +293,7 @@ public static class ExternalTriggerPayloadValidator
     {
         for (var i = 0; i < value.Length; i++)
         {
+            if (value[i] == '\0') return false;
             if (char.IsHighSurrogate(value[i]))
             {
                 if (i + 1 >= value.Length || !char.IsLowSurrogate(value[i + 1])) return false;
@@ -280,7 +336,7 @@ public static class ExternalTriggerPayloadValidator
     {
         var exponentIndex = rawNumber.IndexOfAny(['e', 'E']);
         var mantissa = exponentIndex < 0 ? rawNumber : rawNumber[..exponentIndex];
-        var exponent = exponentIndex < 0 ? BigInteger.Zero : BigInteger.Parse(rawNumber[(exponentIndex + 1)..], CultureInfo.InvariantCulture);
+        var exponent = exponentIndex < 0 ? 0 : int.Parse(rawNumber.AsSpan(exponentIndex + 1), CultureInfo.InvariantCulture);
         var decimalIndex = mantissa.IndexOf('.');
         var fractionalDigits = decimalIndex < 0 ? 0 : mantissa.Length - decimalIndex - 1;
         var digits = mantissa.Replace(".", "", StringComparison.Ordinal).TrimStart('-');
@@ -289,24 +345,14 @@ public static class ExternalTriggerPayloadValidator
 
         // JSON Schema treats 5.0 as an integer: accept a decimal token when its exact value has no fractional
         // part after applying the exponent. Checking token digits avoids double rounding away a non-zero fraction.
-        var remainingFractionalDigits = new BigInteger(fractionalDigits) - exponent;
-        if (remainingFractionalDigits <= BigInteger.Zero) return true;
+        var remainingFractionalDigits = fractionalDigits - exponent;
+        if (remainingFractionalDigits <= 0) return true;
         return remainingFractionalDigits <= digits.Length - significantDigits.Length;
     }
 
     private static bool JsonValueEquals(JsonElement left, JsonElement right)
     {
-        if (left.ValueKind != right.ValueKind) return false;
-
-        return left.ValueKind switch
-        {
-            JsonValueKind.String => TryGetString(left, out var leftText) && TryGetString(right, out var rightText)
-                ? leftText == rightText
-                : RawTextEquals(left, right),
-            JsonValueKind.Number => left.TryGetDouble(out var leftNumber) && right.TryGetDouble(out var rightNumber) && leftNumber == rightNumber,
-            JsonValueKind.True or JsonValueKind.False or JsonValueKind.Null => true,
-            _ => RawTextEquals(left, right),
-        };
+        return JsonElement.DeepEquals(left, right);
     }
 
     private static string KindName(JsonValueKind kind) => kind switch
@@ -329,6 +375,7 @@ public static class ExternalTriggerPayloadValidator
     private sealed class ValidationBudget
     {
         public int Nodes { get; set; }
+        public int EnumComparisonNodes { get; set; }
         public bool Exhausted { get; set; }
     }
 }

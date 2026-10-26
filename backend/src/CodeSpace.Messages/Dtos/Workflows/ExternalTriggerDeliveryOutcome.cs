@@ -15,6 +15,7 @@ public sealed record ExternalTriggerDeliveryOutcome
 
     /// <summary>Non-empty only on <see cref="ExternalTriggerDeliveryKind.InvalidPayload"/> — the ingress's own messages.</summary>
     public required IReadOnlyList<string> Errors { get; init; }
+    public string? Code { get; init; }
 }
 
 public enum ExternalTriggerDeliveryKind

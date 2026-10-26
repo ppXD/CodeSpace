@@ -36,7 +36,7 @@ public class RequestAuthorizationInventoryTests
         ["ReceiveWebhookCommand"] = "provider-signed inbound; proof is the HMAC verified against the per-webhook secret.",
         ["ReceiveConnectionWebhookCommand"] = "the same inbound, from a group/organization hook; proof is the HMAC verified against THAT hook's own secret, never a repository's.",
         ["ReceiveExternalTriggerCommand"] = "an anonymous external trigger delivery; proof is the per-node key, checked against the trigger row's key digest.",
-        ["VerifyExternalTriggerCommand"] = "the anonymous identity check before an external trigger body is read; proof is the same per-node key, checked against the trigger row's key digest.",
+        ["VerifyExternalTriggerQuery"] = "the anonymous identity check before an external trigger body is read; proof is the same per-node key, checked against the trigger row's key digest.",
         ["ResumeWorkflowCallbackCommand"] = "proof is the single-use high-entropy callback token in the URL.",
         ["WebhookExistsQuery"] = "asked before a delivery's body is read; it answers only whether the hook id names a hook, which the delivery's own 404 already tells the caller.",
         ["CompleteCredentialOAuthCommand"] = "the provider redirect carries no JWT; proof is the one-time OAuthPendingState row together with the nonce cookie only the starting browser holds. Without it nothing is consumed: the callback only hands the code to the SPA's completion page, where CompleteCredentialOAuthAsInitiatorCommand requires the signed-in starter.",

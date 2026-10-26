@@ -27,15 +27,16 @@ public static class ExternalTriggerInputProjection
         foreach (var property in properties.EnumerateObject())
         {
             var value = property.Value;
-            if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty("type", out _)) continue;
+            if (value.ValueKind is not (JsonValueKind.Object or JsonValueKind.True or JsonValueKind.False)) continue;
+            var isObject = value.ValueKind == JsonValueKind.Object;
 
             inputs.Add(new WorkflowVariable
             {
                 Name = property.Name,
-                Label = value.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String ? title.GetString() : null,
-                Description = value.TryGetProperty("description", out var description) && description.ValueKind == JsonValueKind.String ? description.GetString() : null,
+                Label = isObject && value.TryGetProperty("title", out var title) && title.ValueKind == JsonValueKind.String ? title.GetString() : null,
+                Description = isObject && value.TryGetProperty("description", out var description) && description.ValueKind == JsonValueKind.String ? description.GetString() : null,
                 Schema = value.Clone(),
-                Default = value.TryGetProperty("default", out var fallback) ? fallback.Clone() : null,
+                Default = isObject && value.TryGetProperty("default", out var fallback) ? fallback.Clone() : null,
                 Required = required.Contains(property.Name),
             });
         }

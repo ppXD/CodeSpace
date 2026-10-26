@@ -15,24 +15,34 @@ namespace CodeSpace.IntegrationTests.Workflows;
 public sealed class ExternalTriggerStorageMigrationTests(PostgresFixture fixture)
 {
     [Fact]
-    public async Task The_slug_is_unique_instance_wide_while_live()
+    public async Task A_trigger_is_persisted_without_a_slug()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture);
         var workflowId = await SeedWorkflowAsync(teamId, userId);
-        var slug = "prod-alerts-" + Guid.NewGuid().ToString("N");
-        await SeedAsync(NewRow(teamId, workflowId, userId, slug, live: true));
-
-        await Should.ThrowAsync<DbUpdateException>(() => SeedAsync(NewRow(teamId, workflowId, userId, slug, live: true)));
+        var row = NewRow(teamId, workflowId, userId, live: true);
+        await SeedAsync(row);
+        using var scope = fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+        var saved = await db.WorkflowExternalTrigger.AsNoTracking().SingleAsync(t => t.Id == row.Id);
+        saved.KeyDigest.ShouldBe(row.KeyDigest);
+        saved.KeyCiphertext.ShouldBe(row.KeyCiphertext);
+        (await db.Database.SqlQuery<int>($"SELECT count(*)::int AS \"Value\" FROM information_schema.columns WHERE table_name = 'workflow_external_trigger' AND column_name = 'slug'").SingleAsync()).ShouldBe(0);
     }
 
     [Fact]
-    public async Task A_soft_deleted_slug_is_reusable()
+    public async Task A_new_trigger_does_not_reuse_the_retired_identity()
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture);
         var workflowId = await SeedWorkflowAsync(teamId, userId);
-        var slug = "prod-alerts-" + Guid.NewGuid().ToString("N");
-        await SeedAsync(NewRow(teamId, workflowId, userId, slug, live: false));
-        await SeedAsync(NewRow(teamId, workflowId, userId, slug, live: true));
+        var retired = NewRow(teamId, workflowId, userId, live: false);
+        var replacement = NewRow(teamId, workflowId, userId, live: true);
+        await SeedAsync(retired);
+        await SeedAsync(replacement);
+        replacement.Id.ShouldNotBe(retired.Id);
+        using var scope = fixture.BeginScope();
+        var rows = await scope.Resolve<CodeSpaceDbContext>().WorkflowExternalTrigger.AsNoTracking().Where(t => t.WorkflowId == workflowId).ToArrayAsync();
+        rows.Single(t => t.Id == retired.Id).DeletedDate.ShouldNotBeNull();
+        rows.Single(t => t.Id == replacement.Id).DeletedDate.ShouldBeNull();
     }
 
     private async Task<Guid> SeedWorkflowAsync(Guid teamId, Guid userId)
@@ -54,9 +64,9 @@ public sealed class ExternalTriggerStorageMigrationTests(PostgresFixture fixture
         await scope.Resolve<CodeSpaceDbContext>().SaveChangesAsync();
     }
 
-    private static WorkflowExternalTrigger NewRow(Guid teamId, Guid workflowId, Guid userId, string slug, bool live) => new()
+    private static WorkflowExternalTrigger NewRow(Guid teamId, Guid workflowId, Guid userId, bool live) => new()
     {
-        Id = Guid.NewGuid(), TeamId = teamId, WorkflowId = workflowId, NodeId = "notify", Slug = slug,
+        Id = Guid.NewGuid(), TeamId = teamId, WorkflowId = workflowId, NodeId = "notify",
         KeyDigest = new string('a', 64), KeyCiphertext = "sealed", CreatedDate = DateTimeOffset.UtcNow,
         CreatedBy = userId, LastModifiedDate = DateTimeOffset.UtcNow, LastModifiedBy = userId,
         DeletedDate = live ? null : DateTimeOffset.UtcNow,

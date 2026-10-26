@@ -10,12 +10,14 @@ public sealed class TransactionalBehavior<TRequest, TResponse> : IPipelineBehavi
     private readonly CodeSpaceDbContext _dbContext;
     private readonly IPostCommitActions _postCommit;
     private readonly ILogger<TransactionalBehavior<TRequest, TResponse>> _logger;
+    private readonly TransactionCompletionCallbacks? _completion;
 
-    public TransactionalBehavior(CodeSpaceDbContext dbContext, IPostCommitActions postCommit, ILogger<TransactionalBehavior<TRequest, TResponse>> logger)
+    public TransactionalBehavior(CodeSpaceDbContext dbContext, IPostCommitActions postCommit, ILogger<TransactionalBehavior<TRequest, TResponse>> logger, TransactionCompletionCallbacks? completion = null)
     {
         _dbContext = dbContext;
         _postCommit = postCommit;
         _logger = logger;
+        _completion = completion;
     }
 
     public async Task<TResponse> Handle(TRequest request, RequestHandlerDelegate<TResponse> next, CancellationToken cancellationToken)
@@ -28,6 +30,7 @@ public sealed class TransactionalBehavior<TRequest, TResponse> : IPipelineBehavi
         if (request is INonTransactionalCommand) return await HandleWithoutTransactionAsync(next, cancellationToken).ConfigureAwait(false);
 
         await using var transaction = await _dbContext.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
+        var checkpoint = _postCommit.CreateCheckpoint();
 
         TResponse response;
         try
@@ -40,7 +43,12 @@ public sealed class TransactionalBehavior<TRequest, TResponse> : IPipelineBehavi
         catch (Exception ex)
         {
             _logger.LogError(ex, "Command {CommandType} failed; transaction rolled back", typeof(TRequest).Name);
-            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+            try { await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false); }
+            finally
+            {
+                _postCommit.RollbackTo(checkpoint);
+                _completion?.RunAfterRollback();
+            }
             throw;
         }
 
@@ -48,7 +56,8 @@ public sealed class TransactionalBehavior<TRequest, TResponse> : IPipelineBehavi
         // background job that executes the run just staged). Never inside the transaction — a worker
         // could otherwise fetch the job before the row is visible. Drains on the success path only;
         // a rolled-back command fires nothing.
-        await _postCommit.RunAllAsync(cancellationToken).ConfigureAwait(false);
+        if (_completion is not null) await _completion.RunAfterCommitAsync(CancellationToken.None).ConfigureAwait(false);
+        await _postCommit.RunAllAsync(CancellationToken.None).ConfigureAwait(false);
 
         return response;
     }

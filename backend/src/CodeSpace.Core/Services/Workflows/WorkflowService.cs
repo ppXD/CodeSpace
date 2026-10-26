@@ -167,8 +167,9 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     public async Task<Guid> CreateAsync(Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, bool enabled, CancellationToken cancellationToken)
     {
-        definition = definition with { Inputs = ExternalTriggerInputProjection.Apply(definition.Inputs, definition) };
+        definition = ExternalTriggerDefinitionSync.Normalize(definition);
         ExternalTriggerDefinitionSync.ValidateSchemas(definition);
+        definition = definition with { Inputs = ExternalTriggerInputProjection.Apply(definition.Inputs, definition) };
         EnsureValidDefinition(definition);
         await EnsureActivationRepositoriesHeldAsync(teamId, activations, cancellationToken).ConfigureAwait(false);
 
@@ -229,11 +230,13 @@ public sealed class WorkflowService : IWorkflowService, IScopedDependency
 
     public async Task UpdateAsync(Guid workflowId, Guid teamId, string name, string? description, WorkflowDefinition definition, IReadOnlyList<WorkflowActivationInput> activations, CancellationToken cancellationToken)
     {
-        definition = definition with { Inputs = ExternalTriggerInputProjection.Apply(definition.Inputs, definition) };
+        definition = ExternalTriggerDefinitionSync.Normalize(definition);
         ExternalTriggerDefinitionSync.ValidateSchemas(definition);
+        definition = definition with { Inputs = ExternalTriggerInputProjection.Apply(definition.Inputs, definition) };
         EnsureValidDefinition(definition);
         await EnsureActivationRepositoriesHeldAsync(teamId, activations, cancellationToken).ConfigureAwait(false);
 
+        await _db.Database.ExecuteSqlInterpolatedAsync($"SELECT id FROM workflow WHERE id = {workflowId} AND team_id = {teamId} FOR UPDATE", cancellationToken).ConfigureAwait(false);
         var workflow = await LoadWorkflowAsync(workflowId, teamId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"Workflow {workflowId} not found in team {teamId}.");
 

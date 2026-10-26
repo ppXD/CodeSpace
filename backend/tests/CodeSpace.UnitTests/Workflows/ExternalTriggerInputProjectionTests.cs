@@ -59,9 +59,16 @@ public sealed class ExternalTriggerInputProjectionTests
     }
 
     [Fact]
-    public void A_property_with_no_type_is_skipped_not_fabricated() =>
-        ExternalTriggerInputProjection.Apply([], DefinitionWith(
-            """{ "inputSchema": { "type": "object", "properties": { "x": { } } } }""")).ShouldBeEmpty();
+    public void Properties_with_boolean_or_untyped_schemas_are_projected_as_inputs()
+    {
+        var inputs = ExternalTriggerInputProjection.Apply([], DefinitionWith(
+            """{ "inputSchema": { "type": "object", "properties": { "allowed": true, "blocked": false, "untyped": { } } } }"""));
+
+        inputs.Select(input => input.Name).ShouldBe(["allowed", "blocked", "untyped"]);
+        inputs[0].Schema.ValueKind.ShouldBe(JsonValueKind.True);
+        inputs[1].Schema.ValueKind.ShouldBe(JsonValueKind.False);
+        inputs[2].Schema.ValueKind.ShouldBe(JsonValueKind.Object);
+    }
 
     [Fact]
     public void The_node_schema_replaces_stale_inputs_and_preserves_the_full_property_schema()

@@ -1,5 +1,7 @@
 using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.RateLimiting;
+using CodeSpace.Messages.Failures;
+using System.Globalization;
 
 namespace CodeSpace.Api.Extensions;
 
@@ -37,7 +39,7 @@ public static class WebhookIngressRateLimitExtension
     public static readonly TimeSpan Window = TimeSpan.FromMinutes(1);
 
     /// <summary>The route values that name what a request is addressed to, in the order the ingress routes declare them.</summary>
-    private static readonly string[] TargetRouteValues = { "webhookId", "connectionWebhookId", "token", "slug" };
+    private static readonly string[] TargetRouteValues = { "webhookId", "connectionWebhookId", "token", "triggerId" };
 
     /// <summary>The one partition every non-ingress request shares in the global limiter — no limit. Never an address.</summary>
     private const string NotIngress = "not-ingress";
@@ -47,6 +49,12 @@ public static class WebhookIngressRateLimitExtension
         services.AddRateLimiter(options =>
         {
             options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+            options.OnRejected = async (context, ct) =>
+            {
+                var retry = context.Lease.TryGetMetadata(MetadataName.RetryAfter, out var delay) ? delay : Window;
+                context.HttpContext.Response.Headers.RetryAfter = Math.Max(0, (int)Math.Ceiling(retry.TotalSeconds)).ToString(CultureInfo.InvariantCulture);
+                await context.HttpContext.Response.WriteAsJsonAsync(new { code = FailureCodes.RateLimited, message = "Request rate limit exceeded." }, ct).ConfigureAwait(false);
+            };
             options.GlobalLimiter = PartitionedRateLimiter.Create<HttpContext, string>(SourcePartition);
             options.AddPolicy(PolicyName, context => FixedWindow(PartitionKey(context), PermitsPerWindow));
         });
@@ -70,6 +78,7 @@ public static class WebhookIngressRateLimitExtension
     internal static string PartitionKey(HttpContext context)
     {
         var target = TargetRouteValues.Select(name => context.GetRouteValue(name)?.ToString()).FirstOrDefault(value => !string.IsNullOrEmpty(value)) ?? "-";
+        if (context.GetRouteValue("triggerId") is not null && Guid.TryParse(target, out var triggerId)) target = triggerId.ToString("N");
 
         return $"{target}|{SourcePartitionKey(context)}";
     }

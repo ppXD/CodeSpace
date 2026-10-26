@@ -1,5 +1,6 @@
 using CodeSpace.Messages.Dtos.Workflows;
 using CodeSpace.Messages.Mediation;
+using System.Text.Json;
 
 namespace CodeSpace.Messages.Commands.Workflows;
 
@@ -11,7 +12,7 @@ namespace CodeSpace.Messages.Commands.Workflows;
 /// </summary>
 public sealed record ReceiveExternalTriggerCommand : ICommand<ExternalTriggerDeliveryOutcome>
 {
-    public required string Slug { get; init; }
+    public required Guid TriggerId { get; init; }
 
     /// <summary>The key as presented, already normalized from Bearer / <c>X-Api-Key</c>. Null when none was sent.</summary>
     public required string? PresentedKey { get; init; }
@@ -23,15 +24,5 @@ public sealed record ReceiveExternalTriggerCommand : ICommand<ExternalTriggerDel
     public required bool IdempotencyRejected { get; init; }
 
     /// <summary>The delivery body, already bounded by the endpoint's size limit.</summary>
-    public required string RawBody { get; init; }
+    public required JsonElement Body { get; init; }
 }
-
-/// <summary>Anonymous identity check only; the controller sends this before reading any request body.</summary>
-public sealed record VerifyExternalTriggerCommand : ICommand<ExternalTriggerVerificationOutcome>
-{
-    public required string Slug { get; init; }
-    public required string? PresentedKey { get; init; }
-}
-
-/// <summary>Wire-safe verification result, mirroring the ingress kind without exposing its internal identity record.</summary>
-public sealed record ExternalTriggerVerificationOutcome(ExternalTriggerDeliveryKind Kind);

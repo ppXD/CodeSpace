@@ -165,7 +165,6 @@ export interface WorkflowExternalTriggerSummary {
   id: string;
   workflowId: string;
   nodeId: string;
-  slug: string;
 }
 
 export interface WorkflowExternalTriggersResult {
@@ -1459,17 +1458,12 @@ export const workflowsApi = {
     `/api/workflows/external-triggers?${new URLSearchParams({ workflowId })}`,
   ),
 
-  revealExternalTriggerKey: (slug: string) => fetchJson<ExternalTriggerKeyResult>(
-    `/api/workflows/external-triggers/${encodeURIComponent(slug)}/key`,
+  revealExternalTriggerKey: (triggerId: string) => fetchJson<ExternalTriggerKeyResult>(
+    `/api/workflows/external-triggers/${encodeURIComponent(triggerId)}/key`,
   ),
 
-  rotateExternalTriggerKey: (slug: string) => fetchJson<ExternalTriggerKeyResult>(
-    `/api/workflows/external-triggers/${encodeURIComponent(slug)}/rotate-key`, { method: "POST" },
-  ),
-
-  renameExternalTrigger: (slug: string, desiredSlug: string) => fetchJson<void>(
-    `/api/workflows/external-triggers/${encodeURIComponent(slug)}/rename`,
-    { method: "POST", body: JSON.stringify({ desiredSlug }) },
+  rotateExternalTriggerKey: (triggerId: string) => fetchJson<ExternalTriggerKeyResult>(
+    `/api/workflows/external-triggers/${encodeURIComponent(triggerId)}/rotate-key`, { method: "POST" },
   ),
 
   /** Resolve one workflow by ref — its GUID (legacy link) or team-unique slug (clean URL). */

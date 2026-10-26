@@ -8,6 +8,15 @@ namespace CodeSpace.Core.Services.Workflows.ExternalTriggers;
 
 public sealed class ExternalTriggerDefinitionSync(CodeSpaceDbContext db, IExternalTriggerStore store) : IScopedDependency
 {
+    public static WorkflowDefinition Normalize(WorkflowDefinition definition) => definition with
+    {
+        Nodes = definition.Nodes.Select(node => node.TypeKey == ExternalTriggerSlug.TypeKey
+            && node.Config.ValueKind == JsonValueKind.Object && node.Config.TryGetProperty("slug", out _)
+            ? node with { Config = JsonSerializer.SerializeToElement(node.Config.EnumerateObject()
+                .Where(property => property.Name != "slug").ToDictionary(property => property.Name, property => property.Value)) }
+            : node).ToArray(),
+    };
+
     /// <summary>
     /// Save-time schema validation runs before any workflow row is written, so an unsupported keyword cannot leave
     /// a half-created workflow behind.
@@ -37,14 +46,7 @@ public sealed class ExternalTriggerDefinitionSync(CodeSpaceDbContext db, IExtern
             row.KeyCiphertext = string.Empty;
         }
 
-        // Release the partial unique slug before a replacement claims it. The command transaction keeps both atomic.
-        if (retired.Count != 0) await db.SaveChangesAsync(cancellationToken).ConfigureAwait(false);
-
         foreach (var node in nodes)
-        {
-            var slug = node.Config.ValueKind == JsonValueKind.Object && node.Config.TryGetProperty("slug", out var value) && value.ValueKind == JsonValueKind.String
-                ? value.GetString() : null;
-            await store.EnsureForNodeAsync(workflowId, teamId, node.Id, slug, actorId, cancellationToken).ConfigureAwait(false);
-        }
+            await store.EnsureForNodeAsync(workflowId, teamId, node.Id, actorId, cancellationToken).ConfigureAwait(false);
     }
 }
