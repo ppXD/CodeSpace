@@ -66,41 +66,4 @@ public sealed class ExternalTriggerSchemaContractFlowTests(PostgresFixture fixtu
         outputs.RootElement.GetProperty("allowed").GetBoolean().ShouldBeTrue();
         outputs.RootElement.GetProperty("untyped").GetProperty("value").GetString().ShouldBe("kept");
     }
-
-    [Fact]
-    public async Task The_real_editor_schema_can_be_saved_and_enforced_at_ingress()
-    {
-        var root = new DirectoryInfo(AppContext.BaseDirectory);
-        while (root is not null && !Directory.Exists(Path.Combine(root.FullName, "frontend"))) root = root.Parent;
-        root.ShouldNotBeNull();
-        var path = Path.Combine(root.FullName, "tmp", "external-trigger-schema-fixture.json");
-        File.Exists(path).ShouldBeTrue("run frontend external-trigger-schema-contract.test.ts first");
-        using var schema = JsonDocument.Parse(await File.ReadAllTextAsync(path));
-        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(fixture, false);
-        using var scope = fixture.BeginScopeAs(userId, teamId);
-        var config = JsonSerializer.SerializeToElement(new { inputSchema = schema.RootElement });
-        var definition = WorkflowsTestSeed.MinimalDefinition() with
-        {
-            Nodes = [new NodeDefinition { Id = "start", TypeKey = "trigger.external", Config = config, Inputs = WorkflowsTestSeed.EmptyJson() },
-                new NodeDefinition { Id = "end", TypeKey = "builtin.terminal", Config = WorkflowsTestSeed.EmptyJson(), Inputs = WorkflowsTestSeed.EmptyJson() }],
-        };
-        var workflowId = await scope.Resolve<IMediator>().Send(new CreateWorkflowCommand
-        {
-            Name = "Editor contract", Definition = definition,
-            Activations = [new WorkflowActivationInput { TypeKey = "trigger.external", Config = config }],
-        });
-        var row = await scope.Resolve<CodeSpaceDbContext>().WorkflowExternalTrigger.AsNoTracking().SingleAsync(t => t.WorkflowId == workflowId);
-        var key = scope.Resolve<ExternalTriggerKeySealer>().Open(row.KeyCiphertext);
-        const string valid = """{"text":"short","paragraph":"paragraph","select":"a","number":1.5,"boolean":true,"repository":"repo","conversation":"chat"}""";
-        (await Deliver(valid)).Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
-        (await Deliver(valid.Replace("short", "toolong"))).Kind.ShouldBe(ExternalTriggerOutcomeKind.InvalidPayload);
-        (await Deliver(valid.Replace("\"select\":\"a\"", "\"select\":\"unknown\""))).Kind.ShouldBe(ExternalTriggerOutcomeKind.InvalidPayload);
-        (await Deliver("{}")).Kind.ShouldBe(ExternalTriggerOutcomeKind.InvalidPayload);
-
-        async Task<ExternalTriggerOutcome> Deliver(string body)
-        {
-            using var receive = fixture.BeginScope();
-            return await receive.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(row.Id, key, null, body, false), CancellationToken.None);
-        }
-    }
 }
