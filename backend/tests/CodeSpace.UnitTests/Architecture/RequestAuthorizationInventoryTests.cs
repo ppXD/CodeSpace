@@ -16,7 +16,7 @@ namespace CodeSpace.UnitTests.Architecture;
 ///
 /// <para>Why pin it: the marker is what selects a request into an authorization behavior. A request
 /// without one is not "authorized by default" — it is not authorized at all, and it looks exactly
-/// like every other request in the diff. Today the unmarked set is a deliberate, auditable 21; this
+/// like every other request in the diff. Today the unmarked set is a deliberate, auditable 47; this
 /// test makes the 22nd a build failure rather than a discovery.</para>
 ///
 /// <para>The two allow-lists are kept SEPARATE on purpose. Adding a sweep is routine; adding an
@@ -35,6 +35,8 @@ public class RequestAuthorizationInventoryTests
         ["SignInCommand"] = "the call that mints the JWT; proof is the password.",
         ["ReceiveWebhookCommand"] = "provider-signed inbound; proof is the HMAC verified against the per-webhook secret.",
         ["ReceiveConnectionWebhookCommand"] = "the same inbound, from a group/organization hook; proof is the HMAC verified against THAT hook's own secret, never a repository's.",
+        ["ReceiveExternalTriggerCommand"] = "an anonymous external trigger delivery; proof is the per-node key, checked against the trigger row's key digest.",
+        ["VerifyExternalTriggerQuery"] = "the anonymous identity check before an external trigger body is read; proof is the same per-node key, checked against the trigger row's key digest.",
         ["ResumeWorkflowCallbackCommand"] = "proof is the single-use high-entropy callback token in the URL.",
         ["WebhookExistsQuery"] = "asked before a delivery's body is read; it answers only whether the hook id names a hook, which the delivery's own 404 already tells the caller.",
         ["CompleteCredentialOAuthCommand"] = "the provider redirect carries no JWT; proof is the one-time OAuthPendingState row together with the nonce cookie only the starting browser holds. Without it nothing is consumed: the callback only hands the code to the SPA's completion page, where CompleteCredentialOAuthAsInitiatorCommand requires the signed-in starter.",

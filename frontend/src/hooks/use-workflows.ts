@@ -55,8 +55,25 @@ export function useUpdateWorkflow() {
     onSuccess: (_, { workflowId }) => {
       qc.invalidateQueries({ queryKey: ["workflows"] });
       qc.invalidateQueries({ queryKey: ["workflow", workflowId] });
+      qc.invalidateQueries({ queryKey: ["workflow-external-triggers", workflowId] });
     },
   });
+}
+
+export function useWorkflowExternalTriggers(workflowId: string) {
+  return useQuery({
+    queryKey: ["workflow-external-triggers", workflowId],
+    queryFn: () => workflowsApi.listExternalTriggers(workflowId),
+    staleTime: 0,
+  });
+}
+
+export function useRevealExternalTriggerKey() {
+  return useMutation({ mutationFn: (triggerId: string) => workflowsApi.revealExternalTriggerKey(triggerId), gcTime: 0 });
+}
+
+export function useRotateExternalTriggerKey() {
+  return useMutation({ mutationFn: (triggerId: string) => workflowsApi.rotateExternalTriggerKey(triggerId), gcTime: 0 });
 }
 
 export function useDeleteWorkflow() {

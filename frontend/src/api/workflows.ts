@@ -161,6 +161,20 @@ export interface WorkflowActivationInput {
   enabled: boolean;
 }
 
+export interface WorkflowExternalTriggerSummary {
+  id: string;
+  workflowId: string;
+  nodeId: string;
+}
+
+export interface WorkflowExternalTriggersResult {
+  triggers: WorkflowExternalTriggerSummary[];
+}
+
+export interface ExternalTriggerKeyResult {
+  key: string;
+}
+
 export interface CreateWorkflowInput {
   name: string;
   description?: string | null;
@@ -1439,6 +1453,18 @@ function decodeRunDataCompleteness(value: unknown, expectedRunId: string): Workf
 
 export const workflowsApi = {
   list: () => fetchJson<WorkflowSummary[]>("/api/workflows"),
+
+  listExternalTriggers: (workflowId: string) => fetchJson<WorkflowExternalTriggersResult>(
+    `/api/workflows/external-triggers?${new URLSearchParams({ workflowId })}`,
+  ),
+
+  revealExternalTriggerKey: (triggerId: string) => fetchJson<ExternalTriggerKeyResult>(
+    `/api/workflows/external-triggers/${encodeURIComponent(triggerId)}/key`,
+  ),
+
+  rotateExternalTriggerKey: (triggerId: string) => fetchJson<ExternalTriggerKeyResult>(
+    `/api/workflows/external-triggers/${encodeURIComponent(triggerId)}/rotate-key`, { method: "POST" },
+  ),
 
   /** Resolve one workflow by ref — its GUID (legacy link) or team-unique slug (clean URL). */
   get: (ref: string) => fetchJson<WorkflowDetail>(`/api/workflows/${encodeURIComponent(ref)}`),

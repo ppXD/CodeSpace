@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { workflowsApi, type WorkflowRunModelCallDetailMetadata, type WorkflowRunModelCallPage } from "@/api/workflows";
@@ -28,7 +28,10 @@ const page: WorkflowRunModelCallPage = {
   }],
 };
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+});
 
 describe("ModelCallsPanel", () => {
   it("leaves the loading state when the run becomes inaccessible", async () => {
@@ -71,6 +74,7 @@ describe("ModelCallsPanel", () => {
   });
 
   it("keeps refreshing pending capture metadata after the workflow is terminal", async () => {
+    vi.useFakeTimers();
     vi.spyOn(workflowsApi, "pageRunModelCalls").mockResolvedValue(page);
     const pending = {
       ...page.items[0],
@@ -83,15 +87,15 @@ describe("ModelCallsPanel", () => {
       bodies: [{ ...pending.bodies[0], captureHealth: "Available" }],
     } as WorkflowRunModelCallDetailMetadata;
     const detailSpy = vi.spyOn(workflowsApi, "getRunModelCallById").mockResolvedValueOnce(pending).mockResolvedValueOnce(available);
-    vi.spyOn(window, "setInterval").mockImplementation((handler: TimerHandler) => {
-      queueMicrotask(() => { if (typeof handler === "function") handler(); });
-      return 1;
-    });
 
     render(<ModelCallsPanel runId={runId} active={false} />);
-    fireEvent.click(await screen.findByRole("button", { name: /agent\.model-call/i }));
-    await screen.findByText("Stable call id");
 
-    await waitFor(() => expect(detailSpy).toHaveBeenCalledTimes(2));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    fireEvent.click(screen.getByRole("button", { name: /agent\.model-call/i }));
+    await act(async () => { await vi.advanceTimersByTimeAsync(0); });
+    expect(screen.getByText("Stable call id")).toBeTruthy();
+
+    await act(async () => { await vi.advanceTimersByTimeAsync(3_000); });
+    expect(detailSpy).toHaveBeenCalledTimes(2);
   });
 });

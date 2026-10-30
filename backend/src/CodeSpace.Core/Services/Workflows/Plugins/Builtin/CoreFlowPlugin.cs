@@ -21,6 +21,7 @@ public sealed class CoreFlowPlugin : IPluginModule
     public IReadOnlyList<Type> Nodes { get; } = new[]
     {
         typeof(TriggerManualNode),
+        typeof(TriggerExternalNode),
         typeof(TriggerScheduleNode),
         typeof(TerminalNode),
         typeof(LogicIfNode),

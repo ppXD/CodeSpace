@@ -44,6 +44,7 @@ import { PostMessageInputsEditor } from "@/components/workflows/PostMessageInput
 import { ERROR_HANDLE, errorRouteTarget, setErrorRoute } from "@/lib/workflowErrorRoute";
 import { introspectScope } from "@/components/workflows/scope-introspection";
 import { StartNodeInputsEditor } from "@/components/workflows/StartNodeInputsEditor";
+import { ExternalTriggerEditor } from "@/components/workflows/external-trigger-editor";
 import { SubworkflowEditor } from "@/components/workflows/SubworkflowEditor";
 import { LoopEditor } from "@/components/workflows/LoopEditor";
 import { MapEditor } from "@/components/workflows/MapEditor";
@@ -1464,6 +1465,8 @@ function NodeInspector({
           start node"). Its Config/Input schemas are empty, so there's nothing else to show. */}
       {manifest.isManual ? (
         <StartNodeInputsEditor inputs={inputFields} onChange={onInputFieldsChange} />
+      ) : manifest.typeKey === "trigger.external" ? (
+        <ExternalTriggerEditor workflowId={currentWorkflowId} nodeId={nodeId} config={config} onConfigChange={onConfigChange} />
       ) : manifest.typeKey === "flow.subworkflow" ? (
         // Sub-workflow gets a dedicated editor: pick the child workflow, then map onto ITS declared
         // inputs (rendered via SchemaForm) — far better than the generic "workflowId + raw object".

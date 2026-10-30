@@ -76,6 +76,25 @@ public class WorkflowSlugBackfillTests
         await tx.RollbackAsync();
     }
 
+    [Fact]
+    public async Task Migration_0252_frees_an_existing_external_triggers_slug()
+    {
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        Guid id;
+        using (var scope = _fixture.BeginScopeAs(userId, teamId, Roles.Admin))
+            id = await scope.Resolve<IMediator>().Send(Create("temp"));
+
+        using var verify = _fixture.BeginScope();
+        var db = verify.Resolve<CodeSpaceDbContext>();
+        await using var tx = await db.Database.BeginTransactionAsync();
+        await db.Database.ExecuteSqlRawAsync("UPDATE workflow SET slug = 'external-triggers' WHERE id = {0}", id);
+
+        await db.Database.ExecuteSqlRawAsync(Migration0252);
+
+        (await db.Workflow.AsNoTracking().SingleAsync(w => w.Id == id)).Slug.ShouldBe("external-triggers-2");
+        await tx.RollbackAsync();
+    }
+
     private static CreateWorkflowCommand Create(string name) => new()
     {
         Name = name,
@@ -114,4 +133,32 @@ BEGIN
         UPDATE workflow SET slug = candidate WHERE id = r.id;
     END LOOP;
 END $$;";
+
+    private const string Migration0252 = @"
+WITH reserved AS (
+    SELECT id, team_id, slug
+    FROM workflow
+    WHERE slug = 'external-triggers' AND deleted_date IS NULL
+),
+candidates AS (
+    SELECT r.id, r.team_id, r.slug, n
+    FROM reserved r
+    CROSS JOIN LATERAL generate_series(2, 1000) AS n
+    WHERE NOT EXISTS (
+        SELECT 1
+        FROM workflow w
+        WHERE w.team_id = r.team_id
+          AND w.slug = 'external-triggers-' || n::text
+          AND w.deleted_date IS NULL
+    )
+)
+UPDATE workflow w
+SET slug = 'external-triggers-' || c.n::text
+FROM candidates c
+WHERE w.id = c.id
+  AND c.n = (
+      SELECT MIN(c2.n)
+      FROM candidates c2
+      WHERE c2.id = c.id
+  );";
 }

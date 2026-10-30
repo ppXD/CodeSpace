@@ -50,6 +50,7 @@ public sealed class WebhookIngressSourceLimitE2ETests : IClassFixture<WebhookApi
         var over = await client.PostAsync(RotatingTarget(WebhookIngressRateLimitExtension.SourcePermitsPerWindow), new StringContent("{}"));
 
         over.StatusCode.ShouldBe(HttpStatusCode.TooManyRequests, customMessage: "a sender that changes the target every time must still run out — check the GlobalLimiter in WebhookIngressRateLimitExtension; without it each new target is a new limiter and nothing ever answers 429");
+        over.Headers.RetryAfter.ShouldNotBeNull().Delta.ShouldNotBeNull().ShouldBeGreaterThanOrEqualTo(TimeSpan.Zero);
     }
 
     [Fact]

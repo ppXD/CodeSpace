@@ -84,6 +84,9 @@ public static class FailureCodes
 
     // ── Workflows and runs ─────────────────────────────────────────────────────────
     public const string WorkflowDefinitionInvalid = "workflow_definition_invalid";
+    public const string ExternalTriggerIdempotencyConflict = "external_trigger_idempotency_conflict";
+    public const string ExternalTriggerCompletionRefused = "external_trigger_completion_refused";
+    public const string ExternalTriggerBodyTooLarge = "external_trigger_body_too_large";
     public const string TaskRouteConfirmationRequired = "task_route_confirmation_required";
     public const string TaskRouteSnapshotMismatch = "task_route_snapshot_mismatch";
     public const string WorkspaceUnresolvable = "workspace_unresolvable";

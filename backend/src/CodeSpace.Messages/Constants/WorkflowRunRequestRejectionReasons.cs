@@ -104,4 +104,7 @@ public static class WorkflowRunRequestRejectionReasons
     /// to start runs on demand; a push moves the head, so new commits are never held back.
     /// </summary>
     public const string PullRequestDebounced = "pull_request_debounced";
+
+    /// <summary>A trigger's authenticated delivery rate exceeded its committed admission budget. The body is already known-good; the caller should retry in the next window.</summary>
+    public const string TriggerRateLimited = "trigger_rate_limited";
 }

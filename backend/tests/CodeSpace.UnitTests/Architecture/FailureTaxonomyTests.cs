@@ -175,6 +175,8 @@ public class FailureTaxonomyTests
             // ProviderApiException reports provider_error, and only a real 401/403 from a provider
             // produces provider_unauthorized. A probe sees one side of a conditional Code, never both.
             .Concat(new[] { FailureCodes.Unauthorized, FailureCodes.NotFound, FailureCodes.DuplicateResource, FailureCodes.InvalidRequest, FailureCodes.Internal, FailureCodes.ProviderUnauthorized })
+            // External-trigger outcomes are returned, not thrown; HTTP tests exercise these three producers.
+            .Concat(new[] { FailureCodes.ExternalTriggerBodyTooLarge, FailureCodes.ExternalTriggerCompletionRefused, FailureCodes.ExternalTriggerIdempotencyConflict })
             .ToHashSet(StringComparer.Ordinal);
 
         var unreachable = DeclaredCodes().Where(c => !emitted.Contains(c)).OrderBy(c => c, StringComparer.Ordinal).ToList();

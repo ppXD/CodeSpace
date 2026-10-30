@@ -1,0 +1,131 @@
+import { useState } from "react";
+
+import { Ic } from "@/_imported/ai-code-space/icons";
+import type { WorkflowVariable } from "@/api/workflows";
+import { useRevealExternalTriggerKey, useRotateExternalTriggerKey } from "@/hooks/use-workflows";
+import { externalTriggerUrl } from "@/lib/external-trigger-url";
+
+import { StartNodeInputsEditor } from "./StartNodeInputsEditor";
+
+interface IExternalTriggerInspectorProps {
+  config: Record<string, unknown>;
+  currentTriggerId: string | null;
+  onConfigChange: (next: Record<string, unknown>) => void;
+}
+
+function asObject(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
+}
+
+export function ExternalTriggerInspector({ config, currentTriggerId, onConfigChange }: IExternalTriggerInspectorProps) {
+  const reveal = useRevealExternalTriggerKey();
+  const rotate = useRotateExternalTriggerKey();
+  const [confirming, setConfirming] = useState(false);
+  const [key, setKey] = useState<string | null>(null);
+  const [copyStatus, setCopyStatus] = useState<string | null>(null);
+  const [copyError, setCopyError] = useState<string | null>(null);
+  const [schemaWarning, setSchemaWarning] = useState<string | null>(null);
+  const schema = asObject(config.inputSchema);
+  const properties = asObject(schema.properties);
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  const fields: WorkflowVariable[] = Object.entries(properties).map(([name, value]) => {
+    const property = asObject(value);
+    return { name, schema: value, label: typeof property.title === "string" ? property.title : undefined, default: property.default, required: required.includes(name) };
+  });
+  const pending = reveal.isPending || rotate.isPending;
+  const error = reveal.error ?? rotate.error;
+  const endpoint = currentTriggerId ? `/api/ext/${encodeURIComponent(currentTriggerId)}/run` : null;
+  const fullUrl = endpoint ? externalTriggerUrl(endpoint) : "";
+  const curl = key ? `curl -X POST '${fullUrl}' -H 'Authorization: Bearer ${key}' -H 'Content-Type: application/json' -d '{}'` : null;
+
+  const changeFields = (next: WorkflowVariable[]) => {
+    const unappliedMetadata: string[] = [];
+    const nextProperties = Object.fromEntries(next.map((field) => {
+      const hasMetadata = field.label != null || field.default !== undefined;
+      if (field.schema === null || typeof field.schema !== "object" || Array.isArray(field.schema)) {
+        if (hasMetadata) unappliedMetadata.push(field.name);
+        return [field.name, field.schema];
+      }
+      if (!hasMetadata && !("title" in field.schema) && !("default" in field.schema)) return [field.name, field.schema];
+      const property = { ...asObject(field.schema) };
+      if (field.label != null) property.title = field.label;
+      else delete property.title;
+      if (field.default !== undefined) property.default = field.default;
+      else delete property.default;
+      return [field.name, property];
+    }));
+    setSchemaWarning(unappliedMetadata.length > 0
+      ? `${unappliedMetadata.join(", ")}: label/default could not be applied to a non-object schema. The original constraint was preserved.`
+      : null);
+    onConfigChange({ ...config, inputSchema: { ...schema, type: "object", properties: nextProperties, required: next.filter((field) => field.required).map((field) => field.name) } });
+  };
+
+  const copy = async (text: string) => {
+    setCopyStatus(null);
+    setCopyError(null);
+    try { await navigator.clipboard.writeText(text); setCopyStatus("Copied"); }
+    catch { setCopyError("Could not copy to clipboard."); }
+  };
+
+  const requestKey = () => {
+    if (!currentTriggerId || pending) return;
+    reveal.reset();
+    rotate.reset();
+    reveal.mutate(currentTriggerId, { onSuccess: (result) => setKey(result.key) });
+  };
+
+  const confirm = () => {
+    if (!currentTriggerId || pending) return;
+    reveal.reset();
+    rotate.reset();
+    setKey(null);
+    rotate.mutate(currentTriggerId, { onSuccess: (result) => { setKey(result.key); setConfirming(false); } });
+  };
+
+  return (
+    <>
+      <StartNodeInputsEditor inputs={fields} onChange={changeFields} />
+      {schemaWarning && <p role="alert" className="wf-retry-hint">{schemaWarning}</p>}
+
+      <section className="wf-inspector-section">
+        <h3 className="wf-inspector-section-h">Endpoint</h3>
+        {!endpoint ? <p role="status" className="wf-retry-hint">Save the workflow to create this endpoint.</p> : (
+          <>
+            <div className="wf-form-row"><span className="wf-form-label">Trigger ID</span><code style={{ overflowWrap: "anywhere" }}>{currentTriggerId}</code></div>
+            <code style={{ display: "block", overflowWrap: "anywhere" }}>{endpoint}</code>
+            <button type="button" className="btn btn-ghost" title="Copy endpoint" aria-label="Copy endpoint" onClick={() => void copy(fullUrl)}><Ic.Copy size={13} /></button>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+              <button type="button" className="btn" disabled={pending} onClick={requestKey}>Show key</button>
+              <button type="button" className="btn" disabled={pending} onClick={() => setConfirming(true)}>Regenerate</button>
+            </div>
+            {confirming && (
+              <div role="group" aria-label="Confirm regenerate" className="wf-retry-hint">
+                <p>The old key stops working immediately. Existing callers must use the new key.</p>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button type="button" className="btn btn-danger" disabled={pending} onClick={confirm}>Confirm regenerate</button>
+                  <button type="button" className="btn" disabled={pending} onClick={() => setConfirming(false)}>Cancel</button>
+                </div>
+              </div>
+            )}
+            {key && (
+              <div>
+                <label className="wf-form-row"><span className="wf-form-label">Key</span><input className="wf-form-input" readOnly value={key} /></label>
+                <button type="button" className="btn btn-ghost" title="Copy key" aria-label="Copy key" onClick={() => void copy(key)}><Ic.Copy size={13} /></button>
+              </div>
+            )}
+            {curl && (
+              <div>
+                <pre style={{ whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{curl}</pre>
+                <button type="button" className="btn btn-ghost" title="Copy curl" aria-label="Copy curl" onClick={() => void copy(curl)}><Ic.Copy size={13} /></button>
+              </div>
+            )}
+          </>
+        )}
+        {pending && <p role="status">Working...</p>}
+        {error && <p role="alert">{error.message}</p>}
+        {copyStatus && <p role="status">{copyStatus}</p>}
+        {copyError && <p role="alert">{copyError}</p>}
+      </section>
+    </>
+  );
+}
