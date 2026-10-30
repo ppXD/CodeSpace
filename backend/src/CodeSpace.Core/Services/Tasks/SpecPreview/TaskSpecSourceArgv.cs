@@ -1,4 +1,5 @@
 using System.Text.Json;
+using CodeSpace.Core.Services.Agents;
 
 namespace CodeSpace.Core.Services.Tasks.SpecPreview;
 
@@ -15,7 +16,7 @@ internal static class TaskSpecSourceArgv
         try
         {
             var argv = JsonSerializer.Deserialize<string[]>(reference.Quote);
-            if (argv is not { Length: > 0 and <= 256 } || string.IsNullOrWhiteSpace(argv[0]) || argv.Any(a => a is null || a.Contains('\0'))) return new([], null, error);
+            if (argv is not { Length: <= 256 } || AcceptanceArgv.NormalizeOrNull(argv) is null) return new([], null, error);
             return new(argv, matches[0], null);
         }
         catch (JsonException) { return new([], null, error); }

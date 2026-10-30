@@ -62,8 +62,7 @@ public static class InLoopAcceptanceHook
     public static bool AppliesTo(AgentTask task) => task.Permissions.WriteScope == AgentWriteScope.Workspace && HasRunnableOracle(task);
 
     /// <summary>Only a well-formed argv oracle can run inside a shell hook. An authored but incomplete contract still requires final grading; file obligations are never interpreted as commands. The shape alone, whatever the write scope.</summary>
-    public static bool HasRunnableOracle(AgentTask task) => task.Acceptance is { Kind: null or Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass, Command.Count: > 0 } spec
-        && !string.IsNullOrWhiteSpace(spec.Command[0]) && spec.Command.All(value => value != null && !value.Contains('\0'));
+    public static bool HasRunnableOracle(AgentTask task) => task.Acceptance is { Kind: null or Messages.Agents.Benchmark.BenchmarkGradingKind.TestsPass } spec && AcceptanceArgv.NormalizeOrNull(spec.Command) is not null;
 
     /// <summary>
     /// The POSIX-<c>sh</c> Stop-hook script content, harness-PARAMETERIZED. Both Claude Code's <c>settings.json</c>
