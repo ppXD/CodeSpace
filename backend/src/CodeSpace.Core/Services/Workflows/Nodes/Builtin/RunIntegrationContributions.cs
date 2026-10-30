@@ -2,12 +2,13 @@ using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Publish;
 using CodeSpace.Messages.Agents;
+using CodeSpace.Messages.Enums;
 using System.Text.Json;
 
 namespace CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 
-/// <summary>One agent-run row's identity + result bytes + task envelope, as the contribution source needs them — a projection of <see cref="AgentRun"/>, so the pure mapping pins without a database.</summary>
-public sealed record RunAgentWork(Guid AgentRunId, string? NodeId, string? IterationKey, DateTimeOffset CreatedDate, string? ResultJson, string? TaskJson);
+/// <summary>One agent-run row's identity + result bytes + task envelope + status, as the contribution source needs them — a projection of <see cref="AgentRun"/>, so the pure mapping pins without a database. <paramref name="Status"/> is the ROW's lifecycle status, the column the map's own <c>{"error": ...}</c> entry is read from; null claims nothing about how the run ended.</summary>
+public sealed record RunAgentWork(Guid AgentRunId, string? NodeId, string? IterationKey, DateTimeOffset CreatedDate, string? ResultJson, string? TaskJson, AgentRunStatus? Status = null);
 
 /// <summary>
 /// P4 (plan-map integrated candidate): WHICH of a run's produced work integrates, derived from the run's OWN
@@ -27,6 +28,15 @@ public sealed record RunAgentWork(Guid AgentRunId, string? NodeId, string? Itera
 /// captured a diff still contributes. The verdicts that withhold work — a rejected definition-of-done, and an output
 /// review that did not approve the work (which a configured review's failed attempt never got) — are a separate,
 /// explicit gate: <see cref="IsWithheldFromHead"/>.</para>
+///
+/// <para><b>The order is the contract: reduce to the latest attempt FIRST, then apply the verdict gate to it.</b> In
+/// this repository, a unit stands or falls on its latest attempt that left a row — a retry that captured nothing writes
+/// no manifest row (<c>AgentRunExecutor</c> records only a run that captured something), so it supersedes nothing, and
+/// the reduction runs per repository (see SCOPE below). Gating first let a superseded attempt that had passed integrate
+/// when the retry that replaced it flunked — the abandoned attempt's bytes on the candidate, and the unit's own latest
+/// verdict ignored. Now a unit whose latest attempt is rejected contributes nothing and is reported by
+/// <see cref="Withheld"/>; a unit whose latest attempt passed contributes that attempt and is never reported, however
+/// its earlier attempts ended.</para>
 ///
 /// <para>The LANE FENCE is load-bearing, because the (node, iteration) cell is not a unit everywhere. A supervisor
 /// stamps ONE turn cell (<c>&lt;nodeId&gt;#turn{N}</c>) on every agent it spawns in that turn, so those K rows are
@@ -49,16 +59,7 @@ public static class RunIntegrationContributions
 {
     public static IReadOnlyList<BranchContribution> Build(Guid repositoryId, IReadOnlyList<PublishManifest> manifests, IReadOnlyList<RunAgentWork> agentWork)
     {
-        var workByRunId = agentWork.ToDictionary(w => w.AgentRunId);
-
-        var produced = manifests
-            .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId is not null && m.RepositoryId == repositoryId && m.PublishStateValue != PublishState.None)
-            .Select(m => (Manifest: m, Work: workByRunId.GetValueOrDefault(m.AgentRunId!.Value)))
-            .Where(pair => pair.Work is not null)
-            .Select(pair => (pair.Manifest, Work: pair.Work!))
-            .Where(pair => !IsWithheldFromHead(pair.Manifest, pair.Work));
-
-        return LatestAttemptPerUnit(produced)
+        return Landing(repositoryId, manifests, agentWork)
             .OrderBy(pair => pair.Work.CreatedDate).ThenBy(pair => pair.Work.AgentRunId)
             .Select(pair => new BranchContribution
             {
@@ -71,6 +72,105 @@ public static class RunIntegrationContributions
             })
             .ToList();
     }
+
+    /// <summary>
+    /// The other face of <see cref="IsWithheldFromHead"/>: the units whose LATEST attempt the head gate kept out of
+    /// <see cref="Build"/>'s contributions — its acceptance grade rejected (or the supervisor waived) it, or its output
+    /// review did not approve it — reported instead of discarded. A withheld unit reaches no integrator outcome at all —
+    /// it is dropped before integration — so without this an outcome that reads <c>Clean</c> over the survivors is
+    /// indistinguishable from a run that integrated everything it produced, and whoever narrates it (the plan-map synth)
+    /// calls a partial deliverable whole.
+    ///
+    /// <para>Reduced to the latest attempt first, exactly as <see cref="Build"/> is (see the class doc), so the two views
+    /// partition the units: each is either a contribution or withheld, never both and never neither. One entry per
+    /// unit, in agent-run creation order — the same total order <see cref="Build"/> applies, so the report repeats
+    /// across builds. In the supervisor lane, where the cell is a turn shared by K concurrent deliverables, each agent
+    /// is its own unit: a peer that landed never hides the one that was withheld.</para>
+    /// </summary>
+    public static IReadOnlyList<WithheldContribution> Withheld(Guid repositoryId, IReadOnlyList<PublishManifest> manifests, IReadOnlyList<RunAgentWork> agentWork)
+    {
+        return Latest(repositoryId, manifests, agentWork)
+            .Where(pair => IsWithheldFromHead(pair.Manifest, pair.Work))
+            .GroupBy(pair => UnitKey(pair.Work))
+            .Select(unit => unit.OrderBy(pair => pair.Manifest.RepositoryAlias, StringComparer.Ordinal).First())
+            .OrderBy(pair => pair.Work.CreatedDate).ThenBy(pair => pair.Work.AgentRunId)
+            .Select(pair => new WithheldContribution(UnitLabel(pair.Work), WithheldReason(pair.Manifest, pair.Work)))
+            .ToList();
+    }
+
+    /// <summary>
+    /// The contributions that LAND although their own agent run did not succeed, each with whether its acceptance check
+    /// had passed. A manifest row is written whatever the owning attempt's status (<c>AgentRunExecutor</c> persists it
+    /// for a failed or timed-out run that captured a diff) and before the run completes, and neither the acceptance
+    /// grade (an ungraded unit is not rejected) nor — with no output review configured — a review holds it back, so a
+    /// subtask that died after editing files integrates Clean: its diff is on the candidate while its own results entry
+    /// reads <c>{"error": ...}</c>. (Under a configured review the same failed run is marked unreviewed and withheld
+    /// instead, which <see cref="Withheld"/> reports.) Without this the account of a Clean integration reads as a whole
+    /// deliverable and the failed subtask reads as missing — the opposite of what is on the branch.
+    ///
+    /// <para>How the run ended is read off its ROW's status, the column that entry comes from, never off its result: a
+    /// worker abandoned after the push is marked Failed by the reconciler with NO result at all, and a result-keyed
+    /// reading would call that unit whole. Acceptance is only graded for a run that reported its own outcome, so a
+    /// Passed row means the work WAS verified and the run failed afterwards, and any other landed failure is a diff
+    /// nothing checked. In agent-run creation order; a null status claims nothing.</para>
+    /// </summary>
+    public static IReadOnlyList<LandedFailedSubtask> LandedFailedSubtasks(Guid repositoryId, IReadOnlyList<PublishManifest> manifests, IReadOnlyList<RunAgentWork> agentWork)
+    {
+        return Landing(repositoryId, manifests, agentWork)
+            .Where(pair => EndedWithoutSuccess(pair.Work))
+            .OrderBy(pair => pair.Work.CreatedDate).ThenBy(pair => pair.Work.AgentRunId)
+            .Select(pair => new LandedFailedSubtask(UnitLabel(pair.Work), pair.Manifest.AcceptanceState == PublishAcceptanceState.Passed))
+            .Distinct()
+            .ToList();
+    }
+
+    /// <summary>Every unit's LATEST attempt, verdict not yet applied: <see cref="Build"/> and <see cref="LandedFailedSubtasks"/> keep the ones the head gate lets through (<see cref="Landing"/>), <see cref="Withheld"/> the ones it stops.</summary>
+    private static IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> Latest(Guid repositoryId, IReadOnlyList<PublishManifest> manifests, IReadOnlyList<RunAgentWork> agentWork) =>
+        LatestAttemptPerUnit(ProducedRows(repositoryId, manifests, agentWork));
+
+    /// <summary>The latest attempts the head gate lets through — the rows that become contributions.</summary>
+    private static IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> Landing(Guid repositoryId, IReadOnlyList<PublishManifest> manifests, IReadOnlyList<RunAgentWork> agentWork) =>
+        Latest(repositoryId, manifests, agentWork).Where(pair => !IsWithheldFromHead(pair.Manifest, pair.Work));
+
+    /// <summary>Every row this repository's agents PRODUCED — Agent-kind, in this repository, carrying something (a None-state row left no trace), and joined to the agent-run row that holds its result bytes. Before any reduction or verdict.</summary>
+    private static IEnumerable<(PublishManifest Manifest, RunAgentWork Work)> ProducedRows(Guid repositoryId, IReadOnlyList<PublishManifest> manifests, IReadOnlyList<RunAgentWork> agentWork)
+    {
+        var workByRunId = agentWork.ToDictionary(w => w.AgentRunId);
+
+        return manifests
+            .Where(m => m.Kind == PublishManifestKind.Agent && m.AgentRunId is not null && m.RepositoryId == repositoryId && m.PublishStateValue != PublishState.None)
+            .Select(m => (Manifest: m, Work: workByRunId.GetValueOrDefault(m.AgentRunId!.Value)))
+            .Where(pair => pair.Work is not null)
+            .Select(pair => (pair.Manifest, Work: pair.Work!));
+    }
+
+    /// <summary>Whether the attempt's OWN run ended in anything but success, read off its row's status — present even when the run left no result. A null status claims nothing.</summary>
+    private static bool EndedWithoutSuccess(RunAgentWork work) => work.Status is { } status && status != AgentRunStatus.Succeeded;
+
+    private static string UnitLabel(RunAgentWork work) => AgentAcceptanceContract.UnitId(work.NodeId, work.IterationKey ?? "");
+
+    /// <summary>What "one unit" means once the reduction has run: the (node, iteration) cell where the cell IS the unit, the agent run itself where it is not — so the alias rows of ONE attempt collapse to one entry while a supervisor turn's K agents stay K.</summary>
+    private static string UnitKey(RunAgentWork work) => CellIsTheUnit(work.TaskJson) ? UnitLabel(work) : work.AgentRunId.ToString("N");
+
+    /// <summary>
+    /// Why the head gate kept a unit out, in words the reader of the account can act on — whichever verdict did it, the
+    /// acceptance grade first. A Waived row is stamped by the SUPERVISOR's amend-acceptance path: a human authorized
+    /// forgoing the unit's verification, and the work is never delivered. A unit the acceptance grade let through was
+    /// withheld by its OUTPUT review: either the critic objected (<c>flagged</c>) or the review never reached an approval
+    /// over the whole result (<c>did not approve</c> — it could not run, read only part of it, or the run ended in a way
+    /// that skipped it). Fixed words only: the critique and the unreviewed reason are model-authored text derived from the
+    /// agent's own output, so they stay on the run's result and never ride into the synth's prompt.
+    /// </summary>
+    private static string WithheldReason(PublishManifest manifest, RunAgentWork work) => manifest.AcceptanceState switch
+    {
+        PublishAcceptanceState.Failed => "acceptance Failed",
+        PublishAcceptanceState.Waived => "acceptance waived by the supervisor (not delivered)",
+        _ => OutputReviewFlagged(work) ? "output review flagged it" : "output review did not approve it",
+    };
+
+    /// <summary>Whether the run's output review OBJECTED, as opposed to never reaching a verdict — the state it stamped, or (for a result written before that state existed) the critique it carries.</summary>
+    private static bool OutputReviewFlagged(RunAgentWork work) =>
+        TryRead<AgentRunResult>(work.ResultJson) is { } result && (result.OutputReview == OutputReviewState.Flagged || !string.IsNullOrWhiteSpace(result.ReviewFeedback));
 
     /// <summary>
     /// "This unit's work is WITHHELD from the reviewable head" — the ledger-row analogue of the supervisor lane's
@@ -105,7 +205,7 @@ public static class RunIntegrationContributions
 
     /// <summary>Whether the run's configured output review did not approve its work: its result says so, or says nothing at all.</summary>
     private static bool OutputReviewWithholds(RunAgentWork work) =>
-        AgentOutputReviewHold.Withholds(TryRead<AgentRunResult>(work.ResultJson), TryRead<AgentTask>(work.TaskJson)?.OutputReviewMode ?? Messages.Enums.ReviewMode.None);
+        AgentOutputReviewHold.Withholds(TryRead<AgentRunResult>(work.ResultJson), TryRead<AgentTask>(work.TaskJson)?.OutputReviewMode ?? ReviewMode.None);
 
     /// <summary>The stored JSON as <typeparamref name="T"/>, or null when it is absent or unreadable.</summary>
     private static T? TryRead<T>(string? json) where T : class
