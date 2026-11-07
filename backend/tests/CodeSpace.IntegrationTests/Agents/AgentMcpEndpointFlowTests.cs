@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Diagnostics;
 using System.Net.Sockets;
 using System.Text;
@@ -19,6 +20,7 @@ using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Shouldly;
@@ -1189,6 +1191,155 @@ public class AgentMcpEndpointFlowTests
         }
     }
 
+    // ── A question asked as the run ends: answered that the run ended, never left in the queue ──
+
+    /// <summary>Where the endpoint holds an agent's question while its run ends: past the authority guard but before the claim reads the run, or after the claim but before the park.</summary>
+    public enum HeldBefore
+    {
+        Claim,
+        Park,
+    }
+
+    [Theory]
+    [InlineData(HeldBefore.Claim)]
+    [InlineData(HeldBefore.Park)]
+    public async Task A_question_asked_as_the_run_ends_is_answered_that_the_run_ended_and_never_reaches_the_queue(HeldBefore held)
+    {
+        // 🟢 High fidelity: the real executor, its real per-run UDS endpoint and the real handler over real Postgres. The
+        // endpoint holds the agent's decision.request while the agent exits and the executor lands the run's own end —
+        // its CompleteAsync under the owner token it claimed — and is then held just past that commit, the endpoint still
+        // open. A run's end keeps its fence, so the question used to claim, park and sit in the queue of a finished run.
+        if (OperatingSystem.IsWindows()) return;
+        if (!Socket.OSSupportsUnixDomainSockets) return;
+
+        var teamId = await SeedTeamAsync();
+        var runId = await CreateRunAsync(teamId, AgentAutonomyLevel.Standard);
+        using var gate = new TempDir();
+        var agentExits = Path.Combine(gate.Path, "exit");
+        var question = new HoldQuestion(held);
+        var end = new HoldPastTheEnd();
+        using var connects = ConnectRegistryFromGovernanceContainer();
+
+        var run = Task.Run(() => ExecuteAsync(runId, new ScriptedHarness($"while [ ! -e '{agentExits}' ]; do sleep 0.05; done"), useGovernanceContainer: true, interceptors: [question, end]));
+
+        try
+        {
+            var connect = await WaitForConnectAsync(connects, runId, run);
+            await using var client = await McpClient.ConnectAsync(connect);
+
+            var ask = client.CallToolAsync(1, DecisionRequestTool.ToolKind, new { question = "Ship it?", decisionType = "choose_one", options = new[] { new { id = "a", label = "Ship" }, new { id = "b", label = "Hold" } } }, TimeSpan.FromSeconds(60));
+            await question.Reached.WaitAsync(TimeSpan.FromSeconds(20));
+
+            await File.WriteAllTextAsync(agentExits, "");
+            await end.Reached.WaitAsync(TimeSpan.FromSeconds(30));
+            question.Release();
+
+            var answer = await ask;
+
+            answer.GetProperty("isError").GetBoolean().ShouldBeTrue();
+            Text(answer).ShouldBe(held == HeldBefore.Claim ? McpRequestHandler.RunEndedToolCallError : StoppedRunDecisions.EndedError, "the agent is told its run ended — not to retry, and not that its question awaits anyone");
+            (await ListPendingDecisionsAsync(teamId)).ShouldBeEmpty("no question of a finished run reaches the queue");
+
+            var rows = await ReadDecisionRowsAsync(runId);
+            if (held == HeldBefore.Claim) rows.ShouldBeEmpty("the claim found the run ended and recorded nothing");
+            else rows.ShouldHaveSingleItem().Status.ShouldBe(ToolCallLedgerStatus.Expired, "the end closed the claimed question before its park ran");
+
+            end.Release();
+            await run.WaitAsync(TimeSpan.FromSeconds(60));
+            (await ReadAgentRunStatusAsync(runId)).ShouldBe(held == HeldBefore.Claim ? AgentRunStatus.Succeeded : AgentRunStatus.NeedsReview, "a question claimed before the end holds the run for review; one refused at its claim does not");
+        }
+        finally
+        {
+            question.Release();
+            end.Release();
+            if (!File.Exists(agentExits)) await File.WriteAllTextAsync(agentExits, "");
+            await Record.ExceptionAsync(() => run.WaitAsync(TimeSpan.FromSeconds(60)));
+        }
+    }
+
+    private async Task<IReadOnlyList<PendingDecision>> ListPendingDecisionsAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IDecisionQueueService>().ListPendingAsync(teamId, CancellationToken.None);
+    }
+
+    private async Task<List<ToolCallLedger>> ReadDecisionRowsAsync(Guid runId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking().Where(l => l.AgentRunId == runId && l.ToolKind == DecisionRequestTool.ToolKind).ToListAsync();
+    }
+
+    /// <summary>Holds the endpoint's database work on the question at <see cref="HeldBefore"/> — the claim's locked read of the run, or the park's write — until released.</summary>
+    private sealed class HoldQuestion : DbCommandInterceptor
+    {
+        private readonly HeldBefore _held;
+        private readonly TaskCompletionSource _reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _fired;
+
+        public HoldQuestion(HeldBefore held) { _held = held; }
+
+        public Task Reached => _reached.Task;
+
+        public void Release() => _released.TrySetResult();
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (_held == HeldBefore.Claim && IsClaimRead(command)) await HoldAsync();
+
+            return result;
+        }
+
+        public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (_held == HeldBefore.Park && IsPark(command)) await HoldAsync();
+
+            return result;
+        }
+
+        private static bool IsClaimRead(DbCommand command) => command.CommandText.Contains("FROM agent_run", StringComparison.Ordinal) && command.CommandText.Contains("FOR SHARE", StringComparison.Ordinal);
+
+        private static bool IsPark(DbCommand command) => command.CommandText.Contains("UPDATE tool_call_ledger", StringComparison.Ordinal) && command.CommandText.Contains("approval_token", StringComparison.Ordinal);
+
+        private async Task HoldAsync()
+        {
+            if (Interlocked.Exchange(ref _fired, 1) == 1) return;
+
+            _reached.TrySetResult();
+
+            await _released.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+    }
+
+    /// <summary>Holds the executor just past the commit of the run's own terminal write — the run has ended, its endpoint still open — until released.</summary>
+    private sealed class HoldPastTheEnd : IDbCommandInterceptor, IDbTransactionInterceptor
+    {
+        private readonly TaskCompletionSource _reached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource _released = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private int _terminalWritten;
+        private int _fired;
+
+        public Task Reached => _reached.Task;
+
+        public void Release() => _released.TrySetResult();
+
+        public ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result, CancellationToken cancellationToken = default)
+        {
+            if (command.CommandText.Contains("UPDATE agent_run", StringComparison.Ordinal) && command.CommandText.Contains("completed_at", StringComparison.Ordinal)) Interlocked.Exchange(ref _terminalWritten, 1);
+
+            return ValueTask.FromResult(result);
+        }
+
+        public async Task TransactionCommittedAsync(DbTransaction transaction, TransactionEndEventData eventData, CancellationToken cancellationToken = default)
+        {
+            if (Volatile.Read(ref _terminalWritten) == 0 || Interlocked.Exchange(ref _fired, 1) == 1) return;
+
+            _reached.TrySetResult();
+
+            await _released.Task.WaitAsync(TimeSpan.FromSeconds(30));
+        }
+    }
+
     /// <summary>The team's owner user id — the human actor that answers the agent's decision via the queue.</summary>
     private async Task<Guid> TeamOwnerAsync(Guid teamId)
     {
@@ -1260,7 +1411,7 @@ public class AgentMcpEndpointFlowTests
     /// at a real existing stand-in (the test only File.Exists-checks it; the scripted harness runs /bin/sh, not the proxy);
     /// when false we point it at a missing path to exercise the fail-closed "no declaration" branch.
     /// </summary>
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool proxyPresent = true, bool useGovernanceContainer = false, string? proxyPath = null, CancellationToken cancellationToken = default, ISandboxRunner? commandRunner = null)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, bool proxyPresent = true, bool useGovernanceContainer = false, string? proxyPath = null, CancellationToken cancellationToken = default, ISandboxRunner? commandRunner = null, IInterceptor[]? interceptors = null)
     {
         // The catalog choice rides the RUN now (CreateRunAsync's enableMcp) and governance is a committed constant, so
         // the only environment this still drives is the proxy path — a genuine filesystem seam, not a feature flag.
@@ -1277,12 +1428,24 @@ public class AgentMcpEndpointFlowTests
             // A command runner, when given, is what the scopes the executor makes for itself — the MCP endpoint's among
             // them, and so every tool call's — run commands on. The harness keeps the real runner the executor is handed.
             using var toolScope = commandRunner is null ? null : scope.BeginLifetimeScope(b => b.RegisterInstance(new SandboxRunnerRegistry([commandRunner])).As<ISandboxRunnerRegistry>());
-            await NewExecutor(scope, harness, toolScope).ExecuteAsync(runId, cancellationToken);
+
+            // Interceptors, when given, see every database command and transaction of the executor and of the scopes it makes.
+            using var intercepted = interceptors is null ? null : scope.BeginLifetimeScope(b => Intercept(b, scope, interceptors));
+            await NewExecutor(intercepted ?? scope, harness, intercepted ?? toolScope).ExecuteAsync(runId, cancellationToken);
         }
         finally
         {
             Environment.SetEnvironmentVariable(LocalProcessRunner.McpProxyPathEnvVar, previousProxy);
         }
+    }
+
+    private static void Intercept(Autofac.ContainerBuilder builder, ILifetimeScope scope, IInterceptor[] interceptors)
+    {
+        builder.RegisterInstance(new DbContextOptionsBuilder<CodeSpaceDbContext>(scope.Resolve<DbContextOptions<CodeSpaceDbContext>>()).AddInterceptors(interceptors).Options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance();
+
+        // The endpoint mints each connection's scope through IServiceScopeFactory, which the container answers from its
+        // root; nesting it here instead keeps the interceptors on the connection's own database commands.
+        builder.Register(c => new ScopedServiceScopeFactory(c.Resolve<ILifetimeScope>())).As<IServiceScopeFactory>();
     }
 
     /// <summary>Drive a FRESH executor's ReattachAsync with the endpoint flag (+ proxy path) ON — the cross-worker-death re-open path.</summary>
@@ -1446,9 +1609,9 @@ public class AgentMcpEndpointFlowTests
             return JsonDocument.Parse(line).RootElement.Clone();
         }
 
-        public async Task<JsonElement> CallToolAsync(int id, string name, object arguments)
+        public async Task<JsonElement> CallToolAsync(int id, string name, object arguments, TimeSpan? readTimeout = null)
         {
-            var line = await SendThenReadAsync(JsonSerializer.Serialize(new { jsonrpc = "2.0", id, method = "tools/call", @params = new { name, arguments } }))
+            var line = await SendThenReadAsync(JsonSerializer.Serialize(new { jsonrpc = "2.0", id, method = "tools/call", @params = new { name, arguments } }), readTimeout)
                 ?? throw new InvalidOperationException("endpoint closed before a response");
             return JsonDocument.Parse(line).RootElement.Clone().GetProperty("result");
         }
@@ -1465,12 +1628,12 @@ public class AgentMcpEndpointFlowTests
             catch (SocketException) { return null; }
         }
 
-        private async Task<string?> SendThenReadAsync(string request)
+        private async Task<string?> SendThenReadAsync(string request, TimeSpan? readTimeout = null)
         {
             await _writer.WriteLineAsync(request);
             await _writer.FlushAsync();
 
-            return await _reader.ReadLineAsync().WaitAsync(TimeSpan.FromSeconds(10));
+            return await _reader.ReadLineAsync().WaitAsync(readTimeout ?? TimeSpan.FromSeconds(10));
         }
 
         public async ValueTask DisposeAsync()

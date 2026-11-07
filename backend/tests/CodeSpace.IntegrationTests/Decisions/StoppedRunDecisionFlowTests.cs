@@ -6,6 +6,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Agents.Exceptions;
+using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Decisions;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.IntegrationTests.Infrastructure;
@@ -502,6 +503,217 @@ public class StoppedRunDecisionFlowTests : IDisposable
         (await LandedAsync(agentId)).ShouldBe(Landing(AgentRunStatus.Succeeded, decisionId), "recovered from a clean exit with its question open: held for review naming it");
     }
 
+    // ─── A run that has ended takes no new question, and no question parks on it ───
+
+    [Theory]
+    [InlineData(AgentRunStatus.Succeeded, true)]
+    [InlineData(AgentRunStatus.Succeeded, false)]
+    [InlineData(AgentRunStatus.Failed, true)]
+    [InlineData(AgentRunStatus.Failed, false)]
+    [InlineData(AgentRunStatus.NeedsReview, true)]
+    [InlineData(AgentRunStatus.NeedsReview, false)]
+    public async Task A_new_claim_on_a_run_that_has_ended_is_refused_and_records_nothing(AgentRunStatus ending, bool owned)
+    {
+        // A run's own end keeps its fence epoch, so a decision.request already past the authority guard still owned the run
+        // by epoch: it claimed a row, parked it, and left a finished run with an open question in the queue.
+        var (teamId, _) = await SeedTeamAsync();
+        var runId = await SeedWorkflowRunAsync(teamId);
+        var agent = await SeedLiveAgentAsync(teamId, runId, owned);
+
+        await EndAgentAsync(agent, ending);
+        (await AgentStatusAsync(agent.RunId)).ShouldBe(ending, "precondition: the run landed where its writer put it, at the epoch the claim below holds");
+
+        await Should.ThrowAsync<AgentRunEndedException>(() => ClaimDecisionAsync(teamId, agent.RunId));
+
+        (await DecisionRowsAsync(agent.RunId)).ShouldBeEmpty("a run that has ended records no new question — so none reaches the queue");
+    }
+
+    [Theory]
+    [InlineData(TerminalPath.Cancel)]
+    [InlineData(TerminalPath.Abandon)]
+    [InlineData(TerminalPath.Recovery)]
+    public async Task A_new_claim_on_a_run_a_stop_ended_is_refused_as_ended_not_as_lost_ownership(TerminalPath path)
+    {
+        // A stop, an abandon and a recovery bump the fence epoch as they end the run, so the caller's epoch is stale as well
+        // as the run ended — and the run's end is the answer: the fence checked first reported it as lost ownership, which
+        // the handler tells the agent to retry.
+        if (path == TerminalPath.Recovery && OperatingSystem.IsWindows()) return;
+
+        var (teamId, _) = await SeedTeamAsync();
+        var runId = await SeedWorkflowRunAsync(teamId);
+        var agent = await SeedAgentToEndAsync(path, teamId, runId);
+
+        await EndThroughAsync(path, agent);   // CancelRunningAsync / the reconciler's abandon and recovery: the production writers of each ending
+        (await AgentStatusAsync(agent.RunId)).ShouldNotBe(AgentRunStatus.Running, "precondition: the run ended");
+
+        await Should.ThrowAsync<AgentRunEndedException>(() => ClaimDecisionAsync(teamId, agent.RunId));
+
+        (await DecisionRowsAsync(agent.RunId)).ShouldBeEmpty("and nothing was recorded");
+    }
+
+    [Fact]
+    public async Task A_claim_waiting_behind_the_runs_end_is_refused_once_the_end_commits()
+    {
+        // The claim reads the run under a share lock, so one issued while the end holds the run waits for the end — and
+        // must then read the run the end left, not the live one it waited behind.
+        var (teamId, _) = await SeedTeamAsync();
+        var runId = await SeedWorkflowRunAsync(teamId);
+        var agent = await SeedLiveAgentAsync(teamId, runId, owned: true);
+
+        var claimDuringEnd = new IssueWhileHeld<Exception?>(_fixture, command => IsLedgerWriteOf(command, agent.RunId), afterExecution: false, () => Record.ExceptionAsync(() => ClaimDecisionAsync(teamId, agent.RunId)));
+        await EndAgentThroughAsync(agent, AgentRunStatus.Succeeded, claimDuringEnd);
+
+        claimDuringEnd.Issued.ShouldBeTrue("precondition: the end had flipped the run and was closing its decisions when the claim was issued");
+        claimDuringEnd.WaitingBeforeTheStep.ShouldBeFalse("precondition: nothing was waiting on the end before the claim was issued");
+        claimDuringEnd.WaitedBehindTheHeld.ShouldBeTrue("the claim's read of the run waits on the end's hold on it");
+
+        (await claimDuringEnd.Step!.WaitAsync(Bound)).ShouldBeOfType<AgentRunEndedException>("once the end committed, the claim read the run as ended");
+        (await DecisionRowsAsync(agent.RunId)).ShouldBeEmpty();
+        (await LandedAsync(agent.RunId)).ShouldBe(Landing(AgentRunStatus.Succeeded, openDecisionId: null), "the end landed its own result, untouched by the refused claim");
+    }
+
+    /// <summary>Each way an agent run ends: its worker's completion, an operator's stop, the reconciler's abandon of a run whose worker is gone, and its recovery of one that exited while nobody watched.</summary>
+    public enum TerminalPath
+    {
+        Completion,
+        Cancel,
+        Abandon,
+        Recovery,
+    }
+
+    [Theory]
+    [InlineData(TerminalPath.Completion)]
+    [InlineData(TerminalPath.Cancel)]
+    [InlineData(TerminalPath.Abandon)]
+    [InlineData(TerminalPath.Recovery)]
+    public async Task A_decision_claimed_before_its_run_ends_closes_with_the_run_and_never_parks_after_it(TerminalPath path)
+    {
+        // Claimed before the end, parked after it: every end closed only the parked questions, so the claimed one survived
+        // Pending — and its park then landed on the finished run.
+        if (path == TerminalPath.Recovery && OperatingSystem.IsWindows()) return;
+
+        var (teamId, _) = await SeedTeamAsync();
+        var runId = await SeedWorkflowRunAsync(teamId);
+        var agent = await SeedAgentToEndAsync(path, teamId, runId);
+
+        var claim = await ClaimDecisionAsync(teamId, agent.RunId);
+        claim.Outcome.ShouldBe(ToolCallClaimOutcome.Proceed, "precondition: the question was claimed while the run lived");
+
+        await EndThroughAsync(path, agent);
+
+        (await ParkAsync(claim.LedgerId, teamId)).ShouldBeFalse("a park after the end finds nothing left to park");
+
+        var row = await LedgerRowAsync(claim.LedgerId);
+        row.Status.ShouldBe(ToolCallLedgerStatus.Expired, "the run's end closed the claimed question along with the parked ones");
+        row.Error.ShouldBe(path is TerminalPath.Cancel or TerminalPath.Abandon ? StoppedRunDecisions.ExpiredError : StoppedRunDecisions.EndedError);
+        row.ApprovalToken.ShouldBeNull("and the park never stamped it");
+        (await ListPendingAsync(teamId)).ShouldNotContain(d => d.Id == claim.LedgerId);
+    }
+
+    [Fact]
+    public async Task A_decision_whose_close_the_stop_lost_is_still_never_parked_on_the_stopped_run()
+    {
+        // A stop closes its run's questions in a statement of its own after the run is stopped, and a failure there is
+        // swallowed — the run is stopped either way. A question claimed before the stop must not then park on it.
+        var (teamId, _) = await SeedTeamAsync();
+        var runId = await SeedWorkflowRunAsync(teamId);
+        var agent = await SeedLiveAgentAsync(teamId, runId, owned: true);
+        var claim = await ClaimDecisionAsync(teamId, agent.RunId);
+
+        var lostClose = new LostDecisionClose(agent.RunId);
+        (await CancelAgentThroughAsync(agent.RunId, lostClose)).ShouldBeTrue("precondition: the stop won the run");
+        lostClose.Fired.ShouldBeTrue("precondition: the stop's close of the run's questions was lost");
+        (await LedgerRowAsync(claim.LedgerId)).Status.ShouldBe(ToolCallLedgerStatus.Pending, "precondition: so the claimed question is still Pending");
+
+        await Should.ThrowAsync<AgentRunEndedException>(() => ParkAsync(claim.LedgerId, teamId));
+
+        var row = await LedgerRowAsync(claim.LedgerId);
+        row.Status.ShouldBe(ToolCallLedgerStatus.Pending, "the park reads the run itself, so it refuses a stopped run even when the close never ran");
+        row.ApprovalToken.ShouldBeNull();
+        (await ListPendingAsync(teamId)).ShouldNotContain(d => d.Id == claim.LedgerId);
+    }
+
+    [Theory]
+    [InlineData(TerminalPath.Completion)]
+    [InlineData(TerminalPath.Cancel)]
+    public async Task A_decision_asked_as_its_run_ends_never_stays_open_on_the_ended_run(TerminalPath path)
+    {
+        var (teamId, _) = await SeedTeamAsync();
+        var runId = await SeedWorkflowRunAsync(teamId);
+
+        for (var i = 0; i < 10; i++)
+        {
+            var agent = await SeedLiveAgentAsync(teamId, runId, owned: true);
+
+            var ask = AskAsync(teamId, agent.RunId);
+            var end = EndThroughAsync(path, agent);
+            var askFault = await Record.ExceptionAsync(() => ask);
+            var endFault = await Record.ExceptionAsync(() => end);
+
+            endFault.ShouldBeNull($"round {i}: the end lands — a deadlock (40P01) here means the question and the end took their locks in different orders");
+            if (askFault is not null) askFault.ShouldBeOfType<AgentRunEndedException>($"round {i}: the question was either asked before the end or refused as ended — never a deadlock");
+            (await DecisionRowsAsync(agent.RunId)).ShouldNotContain(d => d.Status == ToolCallLedgerStatus.Pending || d.Status == ToolCallLedgerStatus.AwaitingApproval, $"round {i}: no question stays open on a run that has ended");
+        }
+    }
+
+    [Fact]
+    public async Task A_park_racing_the_runs_end_waits_for_the_end_and_never_deadlocks()
+    {
+        // The end locks the run's questions, then the run. A park that took the run first and then its question would hold
+        // what the end waits for while waiting on what the end holds: 40P01. The park reads the run without locking it, so it
+        // only ever waits on its own question — behind the end — and finds it closed.
+        var (teamId, _) = await SeedTeamAsync();
+        var runId = await SeedWorkflowRunAsync(teamId);
+        var agent = await SeedLiveAgentAsync(teamId, runId, owned: true);
+        var claim = await ClaimDecisionAsync(teamId, agent.RunId);
+
+        var parkDuringEnd = new IssueWhileHeld<bool>(_fixture, command => IsRunFlipOf(command, agent.RunId), afterExecution: false, () => ParkAsync(claim.LedgerId, teamId));
+        var transactions = new TransactionCounter();
+        await EndAgentThroughAsync(agent, AgentRunStatus.Succeeded, parkDuringEnd, transactions);
+
+        parkDuringEnd.Issued.ShouldBeTrue("precondition: the end held the run's questions and was about to write the run itself when the park was issued");
+        parkDuringEnd.WaitingBeforeTheStep.ShouldBeFalse("precondition: nothing was waiting on the end before the park was issued");
+        parkDuringEnd.WaitedBehindTheHeld.ShouldBeTrue("the park waits on the end's hold on its question");
+
+        (await parkDuringEnd.Step!.WaitAsync(Bound)).ShouldBeFalse("once the end committed, the park found its question closed — no deadlock surfaced on its side");
+        transactions.Started.ShouldBe(1, "the end landed on its first attempt: a second one means it lost a deadlock to the park and was written again");
+        (await LandedAsync(agent.RunId)).ShouldBe(Landing(AgentRunStatus.Succeeded, claim.LedgerId), "the end saw the claimed question open and held the run for it");
+        (await LedgerRowAsync(claim.LedgerId)).Status.ShouldBe(ToolCallLedgerStatus.Expired);
+    }
+
+    /// <summary>A call the run made before it ended: a write whose result was recorded, or a question it claimed and never parked.</summary>
+    public enum MadeBeforeTheEnd
+    {
+        RecordedWrite,
+        ClaimedQuestion,
+    }
+
+    [Theory]
+    [InlineData(MadeBeforeTheEnd.RecordedWrite)]
+    [InlineData(MadeBeforeTheEnd.ClaimedQuestion)]
+    public async Task A_call_made_before_the_run_ended_still_replays_after_it(MadeBeforeTheEnd made)
+    {
+        // A run that has ended takes no NEW call — but an identical re-call of one it already made replays that call's
+        // terminal instead of being refused, so the answer a call got never changes under it.
+        var (teamId, _) = await SeedTeamAsync();
+        var runId = await SeedWorkflowRunAsync(teamId);
+        var agent = await SeedLiveAgentAsync(teamId, runId, owned: true);
+        var toolKind = made == MadeBeforeTheEnd.RecordedWrite ? "git.open_pr" : DecisionToolKinds.DecisionRequest;
+        var key = $"{toolKind}:{Guid.NewGuid():N}";
+
+        var first = await ClaimAsync(teamId, agent.RunId, toolKind, key);
+        if (made == MadeBeforeTheEnd.RecordedWrite) await RecordSucceededAsync(first.LedgerId, teamId);
+
+        await EndAgentAsync(agent, AgentRunStatus.Succeeded);
+
+        var replay = await ClaimAsync(teamId, agent.RunId, toolKind, key);
+
+        replay.Outcome.ShouldBe(ToolCallClaimOutcome.Duplicate, "the existing call replays — the run's end refuses only a new one");
+        replay.LedgerId.ShouldBe(first.LedgerId);
+        replay.PriorStatus.ShouldBe(made == MadeBeforeTheEnd.RecordedWrite ? ToolCallLedgerStatus.Succeeded : ToolCallLedgerStatus.Expired);
+        replay.PriorError.ShouldBe(made == MadeBeforeTheEnd.RecordedWrite ? null : StoppedRunDecisions.EndedError, "a question the end closed replays that the run ended");
+    }
+
     // ─── Drive the real services ──────────────────────────────────────────────────
 
     private async Task<bool> CancelAgentAsync(Guid agentId)
@@ -549,6 +761,106 @@ public class StoppedRunDecisionFlowTests : IDisposable
     {
         using var scope = BeginScopeThrough(interceptor);
         await scope.Resolve<IAgentRunReconcilerService>().ReconcileAsync(CancellationToken.None);
+    }
+
+    /// <summary>Stop the run through a scope whose database commands pass <paramref name="interceptor"/>.</summary>
+    private async Task<bool> CancelAgentThroughAsync(Guid agentId, IInterceptor interceptor)
+    {
+        using var scope = BeginScopeThrough(interceptor);
+        return await scope.Resolve<IAgentRunService>().CancelRunningAsync(agentId, "stopped by the operator", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None);
+    }
+
+    /// <summary>The ledger claim the MCP handler makes for a call, at the attempt's own fence epoch (1, its claim's).</summary>
+    private async Task<ToolCallClaim> ClaimAsync(Guid teamId, Guid agentId, string toolKind, string key)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IToolCallLedgerService>().TryClaimAsync(agentId, teamId, toolKind, key, new string('0', 64), 1, CancellationToken.None);
+    }
+
+    /// <summary>A fresh <c>decision.request</c>'s claim: its row stays Pending until the handler parks it.</summary>
+    private Task<ToolCallClaim> ClaimDecisionAsync(Guid teamId, Guid agentId) => ClaimAsync(teamId, agentId, DecisionToolKinds.DecisionRequest, $"{DecisionToolKinds.DecisionRequest}:{Guid.NewGuid():N}");
+
+    /// <summary>The handler's park of a claimed question: the real CAS Pending → AwaitingApproval.</summary>
+    private async Task<bool> ParkAsync(Guid ledgerId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IToolCallLedgerService>().TryBeginApprovalAsync(ledgerId, teamId, new ToolCallApprovalPark { Token = Guid.NewGuid().ToString("N"), DeadlineAt = DateTimeOffset.UtcNow.AddHours(1) }, CancellationToken.None);
+    }
+
+    /// <summary>Ask a question as the handler does: claim it, then park what was claimed.</summary>
+    private async Task AskAsync(Guid teamId, Guid agentId)
+    {
+        var claim = await ClaimDecisionAsync(teamId, agentId);
+
+        if (claim.Outcome == ToolCallClaimOutcome.Proceed) await ParkAsync(claim.LedgerId, teamId);
+    }
+
+    /// <summary>A side-effecting call's own recorded result.</summary>
+    private async Task RecordSucceededAsync(Guid ledgerId, Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IToolCallLedgerService>().RecordTerminalAsync(ledgerId, teamId, ToolCallLedgerStatus.Succeeded, """{"content":[{"type":"text","text":"opened"}],"isError":false}""", null, CancellationToken.None);
+    }
+
+    /// <summary>The card a parked question's handler posted, recorded on its row.</summary>
+    private async Task RecordCardAsync(Guid ledgerId, Guid teamId, Guid messageId)
+    {
+        using var scope = _fixture.BeginScope();
+        await scope.Resolve<IToolCallLedgerService>().SetApprovalMessageAsync(ledgerId, teamId, messageId, CancellationToken.None);
+    }
+
+    private async Task<List<ToolCallLedger>> DecisionRowsAsync(Guid agentId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking().Where(l => l.AgentRunId == agentId && l.ToolKind == DecisionToolKinds.DecisionRequest).ToListAsync();
+    }
+
+    /// <summary>A live agent run for <paramref name="path"/> to end, at fence epoch 1: one its worker holds, for a completion or a stop; one whose worker is gone, for an abandon; one that exited cleanly while nobody watched, for a recovery.</summary>
+    private async Task<LiveAgent> SeedAgentToEndAsync(TerminalPath path, Guid teamId, Guid workflowRunId) => path switch
+    {
+        TerminalPath.Abandon => new LiveAgent(await SeedRunningAgentAsync(teamId, livenessAgo: TimeSpan.FromDays(3650), fenceEpoch: 1), null),   // legacy claim, then its worker died: the sweep reaches its lapsed lease first
+        TerminalPath.Recovery => new LiveAgent(await SeedRecoverableAgentAsync(teamId, workflowRunId, fenceEpoch: 1), null),                    // legacy claim, then its agent exited unwatched
+        _ => await SeedLiveAgentAsync(teamId, workflowRunId, owned: true),                                                                        // ClaimOwnershipAsync's live run
+    };
+
+    /// <summary>End the run along <paramref name="path"/>, through the production writer of that ending.</summary>
+    private async Task EndThroughAsync(TerminalPath path, LiveAgent agent)
+    {
+        if (path == TerminalPath.Completion) await EndAgentAsync(agent, AgentRunStatus.Succeeded);
+        else if (path == TerminalPath.Cancel) (await CancelAgentAsync(agent.RunId)).ShouldBeTrue("precondition: the stop won the run");
+        else await ReconcileUntilEndedAsync(agent.RunId);
+    }
+
+    /// <summary>Reconcile until the run this test owns has ended — a pass is bounded and deployment-wide, so it may reach other tests' stale runs first.</summary>
+    private async Task ReconcileUntilEndedAsync(Guid agentId)
+    {
+        for (var pass = 0; pass < 10 && await AgentStatusAsync(agentId) == AgentRunStatus.Running; pass++)
+            await ReconcileThroughAsync(new TransactionCounter());
+
+        (await AgentStatusAsync(agentId)).ShouldNotBe(AgentRunStatus.Running, $"the reconciler did not end run {agentId} within 10 passes — look in agent_run for its lease and runner handle");
+    }
+
+    /// <summary>Fails the scope's close of <c>agentRunId</c>'s questions, the step a stop swallows once its run is stopped.</summary>
+    private sealed class LostDecisionClose : DbCommandInterceptor
+    {
+        private readonly Guid _agentRunId;
+
+        public LostDecisionClose(Guid agentRunId) { _agentRunId = agentRunId; }
+
+        public bool Fired { get; private set; }
+
+        public override ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default) => Lose(command, result);
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default) => Lose(command, result);
+
+        private ValueTask<T> Lose<T>(DbCommand command, T result)
+        {
+            if (!IsLedgerWriteOf(command, _agentRunId)) return ValueTask.FromResult(result);
+
+            Fired = true;
+
+            throw new InvalidOperationException("the connection was lost as the stop closed the run's questions");
+        }
     }
 
     /// <summary>The end queues on the held decision first: its lock waits on the hold; then the stop wins the run and its close queues too.</summary>
@@ -645,15 +957,21 @@ public class StoppedRunDecisionFlowTests : IDisposable
     /// <summary>The end's lock on the run's decisions, taken before it reads which of them are open.</summary>
     private static bool IsDecisionLockOf(DbCommand command, Guid agentRunId) => command.CommandText.Contains("FROM tool_call_ledger", StringComparison.Ordinal) && command.CommandText.Contains("FOR UPDATE", StringComparison.Ordinal) && CarriesParameter(command, agentRunId);
 
+    /// <summary>The end's terminal write of the run's own row — taken after it has locked the run's decisions.</summary>
+    private static bool IsRunFlipOf(DbCommand command, Guid agentRunId) => command.CommandText.Contains("UPDATE agent_run", StringComparison.Ordinal) && CarriesParameter(command, agentRunId);
+
     private static bool CarriesParameter(DbCommand command, Guid value) => command.Parameters.Cast<DbParameter>().Any(parameter => parameter.Value is Guid id && id == value);
 
     private static Task EndAsync(IAgentRunService runs, LiveAgent agent, AgentRunStatus ending) =>
         agent.Owner is { } owner ? runs.CompleteAsync(owner, Ending(ending), CancellationToken.None) : runs.CompleteAsync(agent.RunId, Ending(ending), CancellationToken.None);
 
-    /// <summary>The terminal result a worker hands in: the harness's own success, or the executor's generic failure.</summary>
-    private static AgentRunResult Ending(AgentRunStatus ending) => ending == AgentRunStatus.Succeeded
-        ? new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "did the work" }
-        : new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentRunExecutor.GenericExecutorExitReason, Error = "the executor faulted" };
+    /// <summary>The terminal result a worker hands in: the harness's own success, the executor's stalled-agent hold for review, or its generic failure.</summary>
+    private static AgentRunResult Ending(AgentRunStatus ending) => ending switch
+    {
+        AgentRunStatus.Succeeded => new AgentRunResult { Status = AgentRunStatus.Succeeded, ExitReason = "completed", Summary = "did the work" },
+        AgentRunStatus.NeedsReview => new AgentRunResult { Status = AgentRunStatus.NeedsReview, CompletionDisposition = CompletionDisposition.Blocked, ExitReason = AgentAcceptanceContract.StalledExitReason, Error = "the agent produced no output for the idle window" },
+        _ => new AgentRunResult { Status = AgentRunStatus.Failed, ExitReason = AgentRunExecutor.GenericExecutorExitReason, Error = "the executor faulted" },
+    };
 
     /// <summary>A scope whose database commands and transactions pass <paramref name="interceptors"/>.</summary>
     private ILifetimeScope BeginScopeThrough(params IInterceptor[] interceptors)
@@ -690,7 +1008,8 @@ public class StoppedRunDecisionFlowTests : IDisposable
     /// Issues a racing step once, at the command of the intercepted scope that <c>at</c> picks — just before it runs, or just
     /// after — and holds that scope there until the step is either seen WAITING behind the scope's own database session or
     /// has finished without waiting. Which of the two happened is the verdict: a step that finished first got past whatever
-    /// the held session had locked, or found nothing locked at all.
+    /// the held session had locked, or found nothing locked at all. Both kinds of command are watched: the close of a run's
+    /// decisions returns the rows it closed, so it runs as a reader.
     /// </summary>
     private sealed class IssueWhileHeld<T> : DbCommandInterceptor
     {
@@ -724,6 +1043,20 @@ public class StoppedRunDecisionFlowTests : IDisposable
         }
 
         public override async ValueTask<int> NonQueryExecutedAsync(DbCommand command, CommandExecutedEventData eventData, int result, CancellationToken cancellationToken = default)
+        {
+            if (_afterExecution) await HoldAsync(command).ConfigureAwait(false);
+
+            return result;
+        }
+
+        public override async ValueTask<InterceptionResult<DbDataReader>> ReaderExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<DbDataReader> result, CancellationToken cancellationToken = default)
+        {
+            if (!_afterExecution) await HoldAsync(command).ConfigureAwait(false);
+
+            return result;
+        }
+
+        public override async ValueTask<DbDataReader> ReaderExecutedAsync(DbCommand command, CommandExecutedEventData eventData, DbDataReader result, CancellationToken cancellationToken = default)
         {
             if (_afterExecution) await HoldAsync(command).ConfigureAwait(false);
 
@@ -885,8 +1218,8 @@ public class StoppedRunDecisionFlowTests : IDisposable
 
     // ─── Seeding ──────────────────────────────────────────────────────────────────
 
-    /// <summary>A Running agent run; <paramref name="livenessAgo"/> past the window makes it one the reconciler abandons (the heartbeat and lease lapse together).</summary>
-    private async Task<Guid> SeedRunningAgentAsync(Guid teamId, TimeSpan livenessAgo)
+    /// <summary>A Running agent run; <paramref name="livenessAgo"/> past the window makes it one the reconciler abandons (the heartbeat and lease lapse together). <paramref name="fenceEpoch"/> 1 is what the legacy claim (<c>MarkRunningAsync</c>) stamps on a Queued run.</summary>
+    private async Task<Guid> SeedRunningAgentAsync(Guid teamId, TimeSpan livenessAgo, long fenceEpoch = 0)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
@@ -894,7 +1227,7 @@ public class StoppedRunDecisionFlowTests : IDisposable
         var agentId = Guid.NewGuid();
         var stamp = DateTimeOffset.UtcNow - livenessAgo;
 
-        db.AgentRun.Add(new AgentRun { Id = agentId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window });
+        db.AgentRun.Add(new AgentRun { Id = agentId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window, FenceEpoch = fenceEpoch });
 
         await db.SaveChangesAsync();
         return agentId;
@@ -981,7 +1314,7 @@ public class StoppedRunDecisionFlowTests : IDisposable
     }
 
     /// <summary>A Running agent run of <paramref name="workflowRunId"/> whose worker is gone and whose process exited cleanly while nobody watched — a lapsed lease, a dead pid, a clean exit marker in its spool: the run the reconciler recovers rather than abandons.</summary>
-    private async Task<Guid> SeedRecoverableAgentAsync(Guid teamId, Guid workflowRunId)
+    private async Task<Guid> SeedRecoverableAgentAsync(Guid teamId, Guid workflowRunId, long fenceEpoch = 0)
     {
         var spoolDir = Path.Combine(Path.GetTempPath(), "cs-decision-recover-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(spoolDir);
@@ -995,7 +1328,7 @@ public class StoppedRunDecisionFlowTests : IDisposable
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        db.AgentRun.Add(new AgentRun { Id = agentId, TeamId = teamId, WorkflowRunId = workflowRunId, Harness = "codex-cli", Status = AgentRunStatus.Running, StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window, RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options) });
+        db.AgentRun.Add(new AgentRun { Id = agentId, TeamId = teamId, WorkflowRunId = workflowRunId, Harness = "codex-cli", Status = AgentRunStatus.Running, StartedAt = stamp, HeartbeatAt = stamp, LeaseExpiresAt = stamp + AgentRunLiveness.Window, RunnerHandleJson = JsonSerializer.Serialize(handle, AgentJson.Options), FenceEpoch = fenceEpoch });
 
         await db.SaveChangesAsync();
         return agentId;

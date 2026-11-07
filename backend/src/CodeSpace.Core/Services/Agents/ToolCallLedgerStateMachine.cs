@@ -7,7 +7,8 @@ namespace CodeSpace.Core.Services.Agents;
 /// (<c>Succeeded</c> | <c>Failed</c> | <c>Denied</c>) for a synchronously-resolved call, or
 /// <c>Pending</c> → <c>AwaitingApproval</c> → <c>Running</c> → (<c>Succeeded</c> | <c>Failed</c>) for a
 /// durable mid-turn approval that is approved then executed, or <c>AwaitingApproval</c> → <c>Expired</c> when the
-/// reaper expires an undecided approval (item D). The <c>Running</c> hop is the single-winner execution claim: out of
+/// reaper expires an undecided approval (item D) — or <c>Pending</c> | <c>AwaitingApproval</c> → <c>Expired</c> when a
+/// run ends with a decision it raised still unanswered, claimed or parked. The <c>Running</c> hop is the single-winner execution claim: out of
 /// <c>AwaitingApproval</c> exactly one executor flips the row to <c>Running</c> BEFORE running the side effect, so a
 /// concurrent racer that lost the CAS never re-runs it. The single source of truth for which transitions are legal, so
 /// the service's status-guarded CAS can REJECT an illegal/lost transition rather than silently apply it. Mirrors
@@ -21,7 +22,7 @@ public static class ToolCallLedgerStateMachine
 
     /// <summary>
     /// True when moving <paramref name="from"/> → <paramref name="to"/> is allowed: a call may succeed / fail /
-    /// be denied / pause for approval out of <c>Pending</c>; out of <c>AwaitingApproval</c> it may be claimed for
+    /// be denied / pause for approval / expire with its ended run out of <c>Pending</c>; out of <c>AwaitingApproval</c> it may be claimed for
     /// execution (→ <c>Running</c>) or expire (the reaper); out of <c>Running</c> it succeeds / fails. A synchronous
     /// (Pending) call still resolves straight to its terminal without the <c>Running</c> hop. A denial is a
     /// synchronous-only verdict, an approval can never re-pend. Nothing transitions out of a terminal, and
@@ -40,7 +41,8 @@ public static class ToolCallLedgerStateMachine
         ToolCallLedgerStatus.Denied => from == ToolCallLedgerStatus.Pending,
         ToolCallLedgerStatus.AwaitingApproval => from == ToolCallLedgerStatus.Pending,
         ToolCallLedgerStatus.Running => from == ToolCallLedgerStatus.AwaitingApproval,
-        ToolCallLedgerStatus.Expired => from == ToolCallLedgerStatus.AwaitingApproval,
+        // A run's end closes a decision it claimed but had not parked yet as well as a parked one (StoppedRunDecisions).
+        ToolCallLedgerStatus.Expired => from is ToolCallLedgerStatus.Pending or ToolCallLedgerStatus.AwaitingApproval,
         _ => false,
     };
 }

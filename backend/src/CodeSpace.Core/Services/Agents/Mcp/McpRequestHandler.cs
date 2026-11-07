@@ -83,6 +83,13 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     public const string InterruptedToolCallError = "This tool call was interrupted before it completed (the tool timed out, the run was cancelled, or the worker running it was lost), so whether its effect was applied is unknown; it may have been. It is recorded as failed: re-issuing it with identical arguments returns this same result without running it again. Check whether it took effect (for example, read back the PR or comment it would have created or changed) before re-issuing it with changed arguments.";
 
     /// <summary>
+    /// The answer to a call that reached a run which has already ended (<see cref="AgentRunEndedException"/>): a new call
+    /// it would claim, or a decision it claimed before the end and would park after it. Nothing was recorded or run, and
+    /// nothing this run asks can take effect any more, so unlike the governed-fault answer it must never invite a retry.
+    /// </summary>
+    public const string RunEndedToolCallError = "The agent run making this call has already ended, so the call was refused and nothing ran. Calling it again cannot help: nothing this run asks can take effect any more.";
+
+    /// <summary>
     /// The answer — recorded as the row's Denied reason — to a call whose target a reviewer already rejected in this run:
     /// the same tool on the same target (a merge: the same repository and pull request at the same head and base), however
     /// its other arguments differ. It is not put to a reviewer again, so a rejection cannot be worn down by asking until
@@ -240,6 +247,14 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         try
         {
             return await HandleToolCallAsync(id, request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (AgentRunEndedException ended)
+        {
+            // Every entry point meets the run's end here — a claim of a decision, of an allowed write or of a write parked
+            // for approval, or the park of a decision claimed before the end. Nothing ran and nothing can: final, not "retry".
+            _logger.LogWarning(ended, "Agent run {RunId}: tools/call for tool {ToolName} refused — the run has already ended", _runId, ReadToolNameOrNull(request) ?? "(unknown)");
+
+            return JsonRpcResponse.Ok(id, ToolResult(isError: true, RunEndedToolCallError));
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -730,7 +745,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         return claim.Outcome switch
         {
             ToolCallClaimOutcome.Duplicate => WrapDecisionResult(claim.PriorStatus, claim.PriorResultJson, claim.PriorError),                          // already answered/expired — replay (AC1)
-            ToolCallClaimOutcome.InFlight => await ResumeDecisionOrTicketAsync(teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),        // a re-call of a still-parked decision — never a 2nd card
+            ToolCallClaimOutcome.InFlight => await ResumeDecisionOrTicketAsync(arguments, key, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),   // a re-call of a still-open decision — never a 2nd card
             _ => await ParkDecisionAsync(arguments, key, teamId, claim.LedgerId, cancellationToken).ConfigureAwait(false),                              // fresh claim — park + post + block
         };
     }
@@ -746,7 +761,8 @@ public sealed class McpRequestHandler : IMcpRequestHandler
     /// <summary>
     /// A FRESH decision claim's park: CAS Pending → AwaitingApproval (stamping token + the bounded deadline), post the
     /// typed-options card (stamping its message id), then BLOCK until answered. If the park CAS is lost (a concurrent
-    /// path already parked the row), DON'T post — re-bind to whatever it became (the no-second-card guard).
+    /// path already parked the row, or the run's end closed it), DON'T post — re-bind to whatever it became (the
+    /// no-second-card guard). A row its ended run has not closed yet is refused by the park itself.
     /// </summary>
     private async Task<JsonElement> ParkDecisionAsync(JsonElement arguments, string key, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
@@ -755,7 +771,7 @@ public sealed class McpRequestHandler : IMcpRequestHandler
 
         var parked = await _ledger!.TryBeginApprovalAsync(ledgerId, teamId, new ToolCallApprovalPark { Token = token, DeadlineAt = deadlineAt }, cancellationToken).ConfigureAwait(false);
 
-        if (!parked) return await ResumeDecisionOrTicketAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+        if (!parked) return await RebindDecisionAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
 
         var request = BuildDecisionRequest(arguments, ledgerId, key, deadlineAt);
 
@@ -777,8 +793,23 @@ public sealed class McpRequestHandler : IMcpRequestHandler
         return await BlockForDecisionAnswerAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// A re-call of a decision still open on its row. One still Pending was claimed and never parked — its park faulted and
+    /// its call was told to retry — and nothing else parks it, nor does any queue show it: blocking on it waited for an
+    /// answer nobody could give, and came back with a ticket on every re-call. The re-call parks it instead, posting its one
+    /// card; the park's CAS lets exactly one racing re-call win. A parked one is re-bound without a second card.
+    /// </summary>
+    private async Task<JsonElement> ResumeDecisionOrTicketAsync(JsonElement arguments, string key, Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    {
+        var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
+
+        if (state is { Status: ToolCallLedgerStatus.Pending }) return await ParkDecisionAsync(arguments, key, teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+
+        return await RebindDecisionAsync(teamId, ledgerId, cancellationToken).ConfigureAwait(false);
+    }
+
     /// <summary>Re-bind to an already-parked (or just-resolved) decision WITHOUT posting a second card: a terminal row replays its answer; a still-AwaitingApproval one blocks again on a freshly-registered waiter (the card was posted on the first park).</summary>
-    private async Task<JsonElement> ResumeDecisionOrTicketAsync(Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
+    private async Task<JsonElement> RebindDecisionAsync(Guid teamId, Guid ledgerId, CancellationToken cancellationToken)
     {
         var state = await _ledger!.ReadApprovalStateAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false);
 

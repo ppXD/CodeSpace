@@ -1,3 +1,4 @@
+using System.Data.Common;
 using System.Text.Json;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
@@ -14,6 +15,7 @@ using CodeSpace.Messages.Dtos.Decisions;
 using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Shouldly;
 
 namespace CodeSpace.IntegrationTests.Agents;
@@ -630,6 +632,111 @@ public class McpDecisionFlowTests
 
         result.GetProperty("isError").GetBoolean().ShouldBeTrue("governance off → a decision cannot be raised");
         Text(result).ShouldContain("governance", Case.Insensitive);
+    }
+
+    [Fact]
+    public async Task A_decision_whose_park_faulted_is_parked_by_the_retry_and_reaches_the_queue()
+    {
+        // The park faulted after the claim, so the call was told to retry — rightly, the run is live. But the retry found
+        // the claimed row Pending and only blocked on it: no queue shows a Pending row and nothing else parks it, so every
+        // retry came back with a ticket, and the run's end then held it for review over a question nobody was ever asked.
+        var (teamId, ownerId, channelId) = await SeedTeamChannelAsync();
+        var runId = await SeedLiveRunAsync(teamId);
+        var parkFault = new FirstParkFaults();
+
+        using var scope = BeginScopeThrough(parkFault);
+        var handler = new McpRequestHandler(new SingleToolRegistry(new DecisionRequestTool()), AgentAutonomyLevel.Standard, teamId, null, runId,
+            scope.Resolve<IToolCallLedgerService>(), 1, governanceEnabled: true, approvalConversationId: channelId,
+            scope.Resolve<IChatBotService>(), scope.Resolve<IToolApprovalWaiterRegistry>(), scope.Resolve<IInteractionComponentRegistry>());
+        var arguments = new { question = "Which path?", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" }, new { id = "b", label = "B" } } };
+
+        var faulted = await CallToolAsync(handler, arguments);
+
+        parkFault.Fired.ShouldBeTrue("precondition: the first park faulted");
+        Text(faulted).ShouldContain("retry shortly", customMessage: "a fault on a live run is the governed fault, and retrying it is right");
+        (await ReadRunRowsAsync(teamId, runId)).ShouldHaveSingleItem().Status.ShouldBe(ToolCallLedgerStatus.Pending, "precondition: the claim landed and the park did not");
+
+        var retry = Task.Run(() => CallToolAsync(handler, arguments));
+        var (ledgerId, _) = await WaitForPostedCardAsync(teamId, runId);
+
+        (await ListPendingAsync(teamId)).ShouldContain(d => d.Id == ledgerId, "the retry parked the question, so the queue shows it");
+        (await ReadRunCardCountAsync(teamId, channelId)).ShouldBe(1, "and posted its one card");
+
+        (await AnswerViaQueueAsync(ledgerId, new[] { "b" }, null, teamId, ownerId)).Outcome.ShouldBe(DecisionAnswerOutcome.Answered);
+
+        var answered = await retry.WaitAsync(TimeSpan.FromSeconds(20));
+        answered.GetProperty("isError").GetBoolean().ShouldBeFalse("the answer reaches the retried call");
+        answered.GetProperty("structuredContent").GetProperty("selectedOptions")[0].GetString().ShouldBe("b");
+    }
+
+    [Fact]
+    public async Task A_decision_raised_on_a_run_that_was_stopped_is_told_the_run_ended_not_to_retry()
+    {
+        // A stop bumps the fence epoch too, so the handler's claim (at the epoch the agent held) is stale as well as the run
+        // ended; the agent must get the final answer, never "retry shortly".
+        var (teamId, _, channelId) = await SeedTeamChannelAsync();
+        var runId = await SeedLiveRunAsync(teamId);
+
+        using (var stop = _fixture.BeginScope())
+            (await stop.Resolve<IAgentRunService>().CancelRunningAsync(runId, "stopped by the operator", AgentRunAbandonCause.OperatorCancelled, CancellationToken.None)).ShouldBeTrue("precondition: the stop won the run");   // the production writer of a stop
+
+        using var scope = _fixture.BeginScope();
+        var handler = new McpRequestHandler(new SingleToolRegistry(new DecisionRequestTool()), AgentAutonomyLevel.Standard, teamId, null, runId,
+            scope.Resolve<IToolCallLedgerService>(), 1, governanceEnabled: true, approvalConversationId: channelId,
+            scope.Resolve<IChatBotService>(), scope.Resolve<IToolApprovalWaiterRegistry>(), scope.Resolve<IInteractionComponentRegistry>());
+
+        var result = await CallToolAsync(handler, new { question = "Which path?", decisionType = "choose_one", options = new[] { new { id = "a", label = "A" }, new { id = "b", label = "B" } } });
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        Text(result).ShouldBe(McpRequestHandler.RunEndedToolCallError);
+        (await ReadRunRowsAsync(teamId, runId)).ShouldBeEmpty();
+    }
+
+    /// <summary>A live agent run its worker holds — what <c>ClaimOwnershipAsync</c> leaves: Running, owned, at fence epoch 1, its lease current.</summary>
+    private async Task<Guid> SeedLiveRunAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var runId = Guid.NewGuid();
+        var now = DateTimeOffset.UtcNow;
+        db.AgentRun.Add(new AgentRun { Id = runId, TeamId = teamId, Harness = "codex-cli", Status = AgentRunStatus.Running, StartedAt = now, HeartbeatAt = now, LeaseExpiresAt = now + AgentRunLiveness.Window, OwnerId = Guid.NewGuid(), FenceEpoch = 1 });
+
+        await db.SaveChangesAsync();
+        return runId;
+    }
+
+    private async Task<IReadOnlyList<PendingDecision>> ListPendingAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        return await scope.Resolve<IDecisionQueueService>().ListPendingAsync(teamId, CancellationToken.None);
+    }
+
+    /// <summary>A scope whose database commands pass <paramref name="interceptor"/>.</summary>
+    private ILifetimeScope BeginScopeThrough(IInterceptor interceptor)
+    {
+        DbContextOptions<CodeSpaceDbContext> production;
+        using (var probe = _fixture.BeginScope())
+            production = probe.Resolve<DbContextOptions<CodeSpaceDbContext>>();
+
+        var options = new DbContextOptionsBuilder<CodeSpaceDbContext>(production).AddInterceptors(interceptor).Options;
+
+        return _fixture.BeginScope(b => b.RegisterInstance(options).As<DbContextOptions<CodeSpaceDbContext>>().SingleInstance());
+    }
+
+    /// <summary>Faults the scope's first park — the write that stamps a claimed row's approval token — as a lost connection would.</summary>
+    private sealed class FirstParkFaults : DbCommandInterceptor
+    {
+        private int _fired;
+
+        public bool Fired => _fired == 1;
+
+        public override ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(DbCommand command, CommandEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
+        {
+            if (!command.CommandText.Contains("UPDATE tool_call_ledger", StringComparison.Ordinal) || !command.CommandText.Contains("approval_token", StringComparison.Ordinal) || Interlocked.Exchange(ref _fired, 1) == 1) return ValueTask.FromResult(result);
+
+            throw new TimeoutException("the connection was lost as the claimed decision was parked");
+        }
     }
 
     private McpRequestHandler DecisionHandlerCfg(ILifetimeScope scope, Guid teamId, Guid runId, Guid? conversationId, bool governanceEnabled = true) =>

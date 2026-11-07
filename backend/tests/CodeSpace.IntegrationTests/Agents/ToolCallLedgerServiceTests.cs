@@ -447,6 +447,26 @@ public class ToolCallLedgerServiceTests
             .ShouldBe(ToolCallClaimOutcome.Proceed, "the CURRENT owner's claim, at its own live fence, must still proceed");
     }
 
+    // The claim reads the run's status beside its fence. A run with no row has neither: it reads epoch 0, so only a caller
+    // at epoch 0 owns it, and it has no status, so it is never refused as one that has ended.
+    [Theory]
+    [InlineData(0L, true)]    // the epoch an unclaimed run carries: the claim proceeds
+    [InlineData(1L, false)]   // any later epoch: no live owner of a run with no row
+    public async Task A_claim_on_a_run_with_no_row_is_fenced_at_epoch_zero_and_never_refused_as_ended(long fenceEpoch, bool proceeds)
+    {
+        var teamId = await SeedTeamAsync();
+        var runId = Guid.NewGuid();
+
+        using (var scope = _fixture.BeginScope())
+        {
+            if (proceeds) (await Svc(scope).TryClaimAsync(runId, teamId, "git.open_pr", Key, InputHash, fenceEpoch, CancellationToken.None)).Outcome.ShouldBe(ToolCallClaimOutcome.Proceed);
+            else await Should.ThrowAsync<AgentRunOwnershipLostException>(() => Svc(scope).TryClaimAsync(runId, teamId, "git.open_pr", Key, InputHash, fenceEpoch, CancellationToken.None));
+        }
+
+        using var verify = _fixture.BeginScope();
+        (await verify.Resolve<CodeSpaceDbContext>().ToolCallLedger.AsNoTracking().CountAsync(l => l.AgentRunId == runId)).ShouldBe(proceeds ? 1 : 0);
+    }
+
     // A worker hard-killed mid-call leaves its row non-terminal (its recovery write never ran) while the detached agent
     // survives and the run is re-attached at a new epoch. The run is still live, so ExpireStaleToolCallsAsync (terminal runs
     // only) never settles the row, and every identical re-call used to read InFlight for the rest of the run.
