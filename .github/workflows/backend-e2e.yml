@@ -62,7 +62,8 @@ env:
 jobs:
   e2e-http:
     name: dotnet test (E2ETests · HTTP · Postgres)
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: on ubuntu-26.04 an unprivileged bwrap works, so the suites switch to confined mode; they assume the unconfined posture (confinement is covered by sandbox-isolation.yml)
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
 
     services:
@@ -244,7 +245,8 @@ jobs:
 
   e2e-worker:
     name: recurring jobs fire (worker host · Postgres)
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: on ubuntu-26.04 an unprivileged bwrap works, so the suites switch to confined mode; they assume the unconfined posture (confinement is covered by sandbox-isolation.yml)
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     services:

@@ -40,7 +40,8 @@ jobs:
   unit:
     name: repeat (UnitTests)
     if: inputs.project == 'unit'
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: on ubuntu-26.04 an unprivileged bwrap works, so the suites switch to confined mode; they assume the unconfined posture (confinement is covered by sandbox-isolation.yml)
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
     steps:
       - uses: actions/checkout@v4
@@ -108,7 +109,8 @@ jobs:
   integration:
     name: repeat (IntegrationTests · Postgres)
     if: inputs.project == 'integration'
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: on ubuntu-26.04 an unprivileged bwrap works, so the suites switch to confined mode; they assume the unconfined posture (confinement is covered by sandbox-isolation.yml)
+    runs-on: ubuntu-24.04
     timeout-minutes: 180
 
     env:
