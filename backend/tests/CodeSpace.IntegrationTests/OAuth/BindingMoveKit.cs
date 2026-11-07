@@ -30,7 +30,11 @@ namespace CodeSpace.IntegrationTests.OAuth;
 /// </summary>
 internal sealed class BindingMoveKit
 {
+    /// <summary>The display-name prefix of every connection <see cref="SeedSiblingInstanceAsync"/> makes — what <see cref="RetireOtherSiblingConnectionsAsync"/> recognises as its own.</summary>
+    private const string SiblingNamePrefix = "GitLab sibling ";
+
     private readonly PostgresFixture _fixture;
+    private readonly List<Guid> _siblings = new();
 
     public BindingMoveKit(PostgresFixture fixture) { _fixture = fixture; }
 
@@ -82,12 +86,31 @@ internal sealed class BindingMoveKit
         var of = await db.ProviderInstance.AsNoTracking().SingleAsync(p => p.Id == (ofInstanceId ?? world.InstanceId));
         var suffix = Guid.NewGuid().ToString("N")[..8];
 
-        var sibling = new ProviderInstance { Id = Guid.NewGuid(), TeamId = of.TeamId, Provider = of.Provider, DisplayName = $"GitLab sibling {suffix}", BaseUrl = of.BaseUrl, ApiUrl = apiUrl ?? of.ApiUrl, WebhookScope = webhookScope, OauthClientId = $"client-{suffix}", OauthClientSecretEnc = scope.Resolve<IPayloadEncryptor>().Encrypt("client-secret") };
+        var sibling = new ProviderInstance { Id = Guid.NewGuid(), TeamId = of.TeamId, Provider = of.Provider, DisplayName = $"{SiblingNamePrefix}{suffix}", BaseUrl = of.BaseUrl, ApiUrl = apiUrl ?? of.ApiUrl, WebhookScope = webhookScope, OauthClientId = $"client-{suffix}", OauthClientSecretEnc = scope.Resolve<IPayloadEncryptor>().Encrypt("client-secret") };
 
         db.ProviderInstance.Add(sibling);
         await db.SaveChangesAsync();
 
+        _siblings.Add(sibling.Id);
+
         return sibling.Id;
+    }
+
+    /// <summary>
+    /// Soft-deletes the sibling connections earlier tests of this database left behind, keeping the ones this kit seeded. The repair sweep reads every
+    /// group of interchangeable connections in the database and builds one query across all of them, on every candidate it attempts, so what it costs grows
+    /// with the number of groups: late in a full lane a pass that took milliseconds takes tens of seconds, and a test that needs a dozen attempts outlasts the
+    /// lane's hang timeout. A connection that is deleted is in no group. The tests of one collection run one after another, so nothing is still using them.
+    /// </summary>
+    public async Task RetireOtherSiblingConnectionsAsync()
+    {
+        var mine = _siblings.ToArray();
+
+        using var scope = _fixture.BeginScope();
+
+        await scope.Resolve<CodeSpaceDbContext>().ProviderInstance
+            .Where(p => p.DeletedDate == null && p.DisplayName.StartsWith(SiblingNamePrefix) && !mine.Contains(p.Id))
+            .ExecuteUpdateAsync(s => s.SetProperty(p => p.DeletedDate, DateTimeOffset.UtcNow));
     }
 
     /// <summary>The connection moved to <paramref name="webhookScope"/> as an operator's edit leaves it, with nothing registered yet to retire — for a test that needs a connection-wide target.</summary>

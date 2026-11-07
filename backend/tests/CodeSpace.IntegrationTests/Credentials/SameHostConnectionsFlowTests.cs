@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -155,17 +156,34 @@ public sealed partial class SameHostConnectionsFlowTests
 
     /// <summary>
     /// Sweeps until the row the test owns has moved. The repair is deployment-wide, so what one pass repairs says nothing about this
-    /// test's row: a test waits on the row it owns, never on a tally of the pass.
+    /// test's row: a test waits on the row it owns, never on a tally of the pass. Bounded by <see cref="MaxSweeps"/> passes and by
+    /// <see cref="SweepDeadline"/>, and the deadline names what it was waiting for.
     /// </summary>
     private async Task SweepUntilAsync(Func<Task<bool>> ownedRowHasMoved)
     {
+        await _kit.RetireOtherSiblingConnectionsAsync();
+
+        var clock = Stopwatch.StartNew();
+
         for (var pass = 1; pass <= MaxSweeps; pass++)
         {
             using (var scope = _kit.Fixture.BeginScope()) await scope.Resolve<IMediator>().Send(new RepairDisconnectedCredentialBindingsCommand { BatchSize = 50 });
 
             if (await ownedRowHasMoved()) return;
+
+            EnsureWithinDeadline(clock, pass);
         }
     }
 
+    /// <summary>Fails a wait that has used up <see cref="SweepDeadline"/>, naming the signal it watched and how to look at it by hand.</summary>
+    private static void EnsureWithinDeadline(Stopwatch clock, int passes)
+    {
+        if (clock.Elapsed < SweepDeadline) return;
+
+        throw new TimeoutException($"The repair sweep's pass {passes} ended {clock.Elapsed.TotalSeconds:F0}s into waiting for the row this test owns to move (limit {SweepDeadline.TotalSeconds:F0}s). Each pass costs a query per group of sibling connections in the database — check `SELECT count(*) FROM provider_instance WHERE deleted_date IS NULL` and the 'ok in' time of RepairDisconnectedCredentialBindingsCommand in the log.");
+    }
+
     private const int MaxSweeps = 20;
+
+    private static readonly TimeSpan SweepDeadline = TimeSpan.FromMinutes(2);
 }

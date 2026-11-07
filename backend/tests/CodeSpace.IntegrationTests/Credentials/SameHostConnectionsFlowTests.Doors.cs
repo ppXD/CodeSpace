@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using Autofac;
 using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
@@ -361,6 +362,10 @@ public sealed partial class SameHostConnectionsFlowTests
         var movable = await _kit.SeedRepositoryAsync(elsewhere, movableDead, RepositoryStatus.Error);
         var passes = 0;
 
+        await _kit.RetireOtherSiblingConnectionsAsync();
+
+        var clock = Stopwatch.StartNew();
+
         while ((await _kit.LoadRepositoryAsync(movable)).CredentialId != movableSuccessor && passes < MaxSweeps)
         {
             passes++;
@@ -368,6 +373,8 @@ public sealed partial class SameHostConnectionsFlowTests
             using var scope = _kit.Fixture.BeginScope();
 
             await scope.Resolve<IMediator>().Send(new RepairDisconnectedCredentialBindingsCommand { BatchSize = 1 });
+
+            EnsureWithinDeadline(clock, passes);
         }
 
         (await _kit.LoadRepositoryAsync(movable)).CredentialId.ShouldBe(movableSuccessor, "the repairable credential was reached however many refused ones sit ahead of it");
@@ -498,11 +505,16 @@ public sealed partial class SameHostConnectionsFlowTests
     /// </summary>
     private async Task<int> DrainedStrandedAsync()
     {
+        await _kit.RetireOtherSiblingConnectionsAsync();
+
         var count = await StrandedAsync();
+        var clock = Stopwatch.StartNew();
 
         for (var pass = 1; pass <= MaxSweeps; pass++)
         {
             using (var scope = _kit.Fixture.BeginScope()) await scope.Resolve<IMediator>().Send(new RepairDisconnectedCredentialBindingsCommand { BatchSize = 200 });
+
+            EnsureWithinDeadline(clock, pass);
 
             var next = await StrandedAsync();
 
