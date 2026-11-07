@@ -82,6 +82,17 @@ public interface IModelPoolSelector
     }
 
     /// <summary>
+    /// The credentialed-model rows <paramref name="rowIds"/> names, TEAM-SCOPED and whatever their state: each row with
+    /// whether it can run at all (enabled, under an active, non-deleted credential), the credential it runs on and that
+    /// credential's name, its provider, and the agent-plane ranking inputs. The allowed-model-pool choice
+    /// (<c>AllowedModelPool</c>) reads it to run an authored pin on its OWN pooled row — never a same-named row of another
+    /// credential — and to name what moved, and why, when it cannot. The default implementation (a fake that models no
+    /// rows) lists nothing, so a bounded choice over it fails closed rather than escape its pool.
+    /// </summary>
+    Task<IReadOnlyList<PooledModelRow>> ListPoolRowsAsync(Guid teamId, IReadOnlyList<Guid> rowIds, CancellationToken cancellationToken) =>
+        Task.FromResult<IReadOnlyList<PooledModelRow>>(Array.Empty<PooledModelRow>());
+
+    /// <summary>
     /// List the team's credentialed pool models (model id + provider) the brain MAY dispatch — bounded to
     /// <paramref name="allowedRowIds"/> (null/empty = ALL the team's enabled rows under active credentials). For
     /// rendering the capability catalog into the supervisor/planner prompt so the model authors a provider-compatible

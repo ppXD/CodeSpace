@@ -5,6 +5,7 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Agents;
 using CodeSpace.Core.Services.Tasks.Effort;
+using CodeSpace.Core.Services.Tasks.Launch;
 using CodeSpace.Core.Services.Tasks.RoutePreview.Exceptions;
 using CodeSpace.Core.Services.Workflows;
 using CodeSpace.Messages.Commands.Tasks;
@@ -20,14 +21,16 @@ public sealed class TaskRouteSnapshotService : ITaskRouteSnapshotService, IScope
 {
     public static readonly TimeSpan Lifetime = TimeSpan.FromMinutes(10);
     private readonly IEffortRouter _router;
+    private readonly ILaunchGroundingResolver _grounding;
     private readonly TaskRoutePolicyFingerprint _policy;
     private readonly CodeSpaceDbContext _db;
     private readonly IPostCommitActions _postCommit;
     private PendingCommitRecovery? _pendingCommitRecovery;
 
-    public TaskRouteSnapshotService(IEffortRouter router, TaskRoutePolicyFingerprint policy, CodeSpaceDbContext db, IPostCommitActions postCommit)
+    public TaskRouteSnapshotService(IEffortRouter router, ILaunchGroundingResolver grounding, TaskRoutePolicyFingerprint policy, CodeSpaceDbContext db, IPostCommitActions postCommit)
     {
         _router = router;
+        _grounding = grounding;
         _policy = policy;
         _db = db;
         _postCommit = postCommit;
@@ -36,8 +39,13 @@ public sealed class TaskRouteSnapshotService : ITaskRouteSnapshotService, IScope
     public async Task<TaskRoutePreviewResult> CreateAsync(TaskLaunchRequest request, TaskLaunchSeed seed, CancellationToken cancellationToken)
     {
         await ResolvePendingCommitAsync().ConfigureAwait(false);
+
+        // The SAME grounding the launch resolves before it routes, so a follow-up turn is classified as one here too. It
+        // only feeds the router: the seed digest below still binds the provider's seed, as the launch's read validates it.
+        var grounding = await _grounding.ResolveAsync(request, seed, cancellationToken).ConfigureAwait(false);
+
         var policy = _policy.Capture();
-        var route = await _router.RouteAsync(TaskLaunchService.BuildRouteRequest(seed, request), cancellationToken).ConfigureAwait(false);
+        var route = await _router.RouteAsync(TaskLaunchService.BuildRouteRequest(seed with { GroundingContext = grounding }, request), cancellationToken).ConfigureAwait(false);
         if (policy != _policy.Capture()) throw new TaskRouteSnapshotMismatchException();
 
         var now = await ReadDatabaseClockAsync(cancellationToken).ConfigureAwait(false);

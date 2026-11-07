@@ -38,4 +38,19 @@ public sealed record EffortRouteRequest
     /// own reading on the auto path, and the <c>code</c> default on the explicit one — byte-identical.
     /// </summary>
     public string? DeliverableShape { get; init; }
+
+    /// <summary>
+    /// The launch carries an operator acceptance floor (an executable <c>acceptanceChecks</c> argv) — a routing signal:
+    /// the AUTO path must land on a projection that grades it, so a classified tier whose projection cannot is set aside
+    /// for the next tier the policy admits. An explicit tier or a pinned recipe / projection is the operator's own
+    /// choice and is never moved; the launch refuses that combination with its reason instead. False ⇒ unconstrained.
+    /// </summary>
+    public bool HasOperatorFloor { get; init; }
+
+    /// <summary>
+    /// The launch's workspace binds a repository. With <see cref="HasOperatorFloor"/> it decides which lanes can grade the
+    /// floor HERE: the supervisor grades one only against the branch it publishes, while the single agent grades it in
+    /// its own workspace, repository or not — so a repository-free floor keeps the auto path on the single agent.
+    /// </summary>
+    public bool HasRepository { get; init; }
 }

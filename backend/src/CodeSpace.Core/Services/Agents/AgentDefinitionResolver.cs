@@ -87,6 +87,13 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
     /// silently falling back — the operator's explicit choice is honoured or surfaced, never substituted. A disabled
     /// model is "not part of the usable pool", so a pinned-then-disabled model fails rather than runs. No reference →
     /// the task is returned untouched (byte-identical).
+    ///
+    /// <para>The one exception is a task bound to an operator's allowed model pool (<see cref="AgentTask.AllowedModelIds"/>):
+    /// the operator chose the POOL as the fallback, and the dispatch owns that choice (<c>HarnessModelReconciler</c>
+    /// walks pinned row → model on the pinned credential → model on any pooled credential → the credential's best
+    /// pooled row → the pool default, names the move on the run's timeline, or fails with
+    /// <c>agent_model_pool_unresolvable</c>). So an unusable pinned row is left on the task for it — failing here would
+    /// end the run before any pooled row was tried, with no note and no typed cause.</para>
     /// </summary>
     private async Task<AgentTask> ApplyCredentialedModelAsync(AgentTask task, Guid teamId, CancellationToken cancellationToken)
     {
@@ -95,8 +102,12 @@ public sealed class AgentDefinitionResolver : IAgentDefinitionResolver, IScopedD
         var row = await _db.ModelCredentialModel.AsNoTracking()
             .Where(m => m.Id == rowId && m.Enabled && m.Credential.TeamId == teamId && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active)
             .Select(m => new { m.ModelId, m.ModelCredentialId })
-            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false)
-            ?? throw new AgentDefinitionResolutionException($"Selected model {rowId} is not an active, enabled credentialed model for this team.");
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+        if (row is null && task.AllowedModelIds is { Count: > 0 }) return task;
+
+        if (row is null)
+            throw new AgentDefinitionResolutionException($"Selected model {rowId} is not an active, enabled credentialed model for this team.");
 
         return task with { Model = row.ModelId, ModelCredentialId = row.ModelCredentialId };
     }

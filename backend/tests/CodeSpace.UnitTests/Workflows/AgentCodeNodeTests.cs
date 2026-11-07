@@ -453,6 +453,54 @@ public class AgentCodeNodeTests
     }
 
     [Fact]
+    public void The_manifest_declares_the_allowed_model_pool_the_node_reads()
+    {
+        // The node reads allowedModelIds (as it reads maxCostUsd); an undeclared key is invisible to the editor and to
+        // anything that reads the manifest to learn what an agent.run can be told.
+        var pool = new AgentCodeNode().Manifest.ConfigSchema.GetProperty("properties").GetProperty("allowedModelIds");
+
+        pool.GetProperty("type").GetString().ShouldBe("array");
+        pool.GetProperty("items").GetProperty("format").GetString().ShouldBe("uuid", "credentialed-model row ids — the shape the node's strict reader accepts");
+    }
+
+    [Fact]
+    public async Task The_allowed_model_pool_a_projection_baked_is_carried_onto_the_task()
+    {
+        var pool = new[] { Guid.NewGuid(), Guid.NewGuid() };
+        var config = new Dictionary<string, JsonElement>(RequiredConfig()) { ["allowedModelIds"] = JsonSerializer.SerializeToElement(pool.Select(id => id.ToString())) };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Suspended);
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.AllowedModelIds.ShouldBe(pool, "dispatch holds the model to the pool the task carries");
+    }
+
+    [Fact]
+    public async Task An_absent_allowed_model_pool_leaves_the_task_unbounded_and_its_json_byte_identical()
+    {
+        var result = await new AgentCodeNode().RunAsync(BuildContext(RequiredConfig(), resume: null), CancellationToken.None);
+
+        JsonSerializer.Deserialize<AgentTask>(result.SuspendUntil!.Payload, AgentJson.Options)!.AllowedModelIds.ShouldBeNull();
+        result.SuspendUntil.Payload.GetRawText().ShouldNotContain("allowedModelIds");
+    }
+
+    [Theory]
+    [InlineData("[\"not-a-uuid\"]")]
+    [InlineData("\"a-single-string\"")]
+    [InlineData("[42]")]
+    public async Task A_malformed_allowed_model_pool_fails_the_node_rather_than_run_on_a_different_bound(string raw)
+    {
+        // A pool is a bound: silently skipping an entry would run the agent on a different set of models than the
+        // operator allowed — and an all-skipped pool on none of them — so it fails like any malformed id.
+        var config = new Dictionary<string, JsonElement>(RequiredConfig()) { ["allowedModelIds"] = JsonDocument.Parse(raw).RootElement.Clone() };
+
+        var result = await new AgentCodeNode().RunAsync(BuildContext(config, resume: null), CancellationToken.None);
+
+        result.Status.ShouldBe(NodeStatus.Failure);
+        result.Error.ShouldContain("allowedModelIds");
+    }
+
+    [Fact]
     public async Task An_unset_credentialed_model_is_omitted_from_the_staged_task_json()
     {
         // Byte-identity: [JsonIgnore(WhenWritingNull)] keeps an unset reference OUT of the persisted task_json, so an
@@ -578,6 +626,7 @@ public class AgentCodeNodeTests
     [InlineData("Failed", "harness-reported-failure", true)]  // exit-0-but-harness-Error — a fresh respawn may survive
     [InlineData("Failed", "resource-exhausted", false)]  // a cgroup ceiling killed the subtree — a respawn runs at the SAME ceiling and dies identically
     [InlineData("Failed", FailureCodes.SandboxArgumentTooLong, false)]  // the spec itself is unexecutable — every host's kernel refuses the same bytes, so N respawns are N identical refusals
+    [InlineData("Failed", FailureCodes.AgentModelPoolUnresolvable, false)]  // nothing in the run's allowed model pool can run — a respawn meets the same pool
     [InlineData("Failed", FailureCodes.NativeLaunchUnavailable, true)]  // the SLOT could not admit one (foreign host, binding conflict, missing bootstrap) — another worker may well take it
     public async Task A_resumed_failure_carries_the_retry_verdict_for_the_engine(string status, string? exitReason, bool expectedRetryable)
     {

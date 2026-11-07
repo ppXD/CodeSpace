@@ -240,6 +240,7 @@ public sealed class PlanAuthorNode : INodeRuntime
             TeamId = teamId,
             GroundingContext = string.IsNullOrWhiteSpace(prompt.Grounding) ? null : prompt.Grounding,
             BrainModelId = ReadGuid(config, "plannerModelId"),
+            AllowedModelIds = ReadGuids(config, "allowedModelIds"),
             Review = ReadReviewMode(config),
             ReviewerModelId = ReadGuid(config, "reviewerModelId"),
             // D① grounded plan review: a real read-only agent verifies the plan against this repository's actual tree.
@@ -250,6 +251,14 @@ public sealed class PlanAuthorNode : INodeRuntime
             WorkflowRunId = workflowRunId,
             NodeId = nodeId,
         };
+    }
+
+    /// <summary>A string-uuid array config read (the allowed model pool a projection bakes) — defensive per the node convention: absent / non-array ⇒ null, a non-uuid entry skipped, nothing left ⇒ null. It bounds only the catalog the planner allocates from; each branch's own agent.run is where the pool is enforced.</summary>
+    private static IReadOnlyList<Guid>? ReadGuids(IReadOnlyDictionary<string, JsonElement> config, string key)
+    {
+        var ids = ReadStringArray(config, key).Select(raw => Guid.TryParse(raw, out var id) ? id : (Guid?)null).OfType<Guid>().ToList();
+
+        return ids.Count > 0 ? ids : null;
     }
 
     /// <summary>Defensive bool config read — absent / non-bool ⇒ false, mirroring the node convention.</summary>

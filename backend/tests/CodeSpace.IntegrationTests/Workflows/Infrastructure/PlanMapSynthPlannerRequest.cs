@@ -53,7 +53,8 @@ public static class PlanMapSynthPlannerRequest
 
         var planRequest = PlanAuthorNode.BuildPlanRequest(config, teamId, new PlanAuthorNode.PlanPromptParts(goal, [], grounding, ""));
 
-        var pool = await scope.Resolve<IModelPoolSelector>().ListPoolAsync(teamId, allowedRowIds: null, cancellationToken).ConfigureAwait(false);
+        // The production planner lists the pool bounded to the request's allowed models — null for this unbounded launch, so the key is unchanged.
+        var pool = await scope.Resolve<IModelPoolSelector>().ListPoolAsync(teamId, planRequest.AllowedModelIds, cancellationToken).ConfigureAwait(false);
         var catalog = CapabilityCatalog.Render(scope.Resolve<IAgentHarnessRegistry>().All, pool);
 
         return new StructuredLLMCompletionRequest

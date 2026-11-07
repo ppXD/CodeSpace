@@ -31,6 +31,10 @@ public sealed record TaskRoutePreviewResult
     /// </summary>
     [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
     public TaskRoutePosture? Posture { get; init; }
+
+    /// <summary>What the launch will do with each route-dependent operator control this input carries — computed by the same service the launch calls, so a Refused entry here is a launch that will be refused. Null only on the raw result a snapshot store constructs before <c>TaskRoutePreviewService</c> describes it.</summary>
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public IReadOnlyList<LaunchControlDisposition>? ControlDispositions { get; init; }
 }
 
 /// <summary>

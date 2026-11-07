@@ -15,6 +15,7 @@ using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
 using CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
+using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Workflows.Nodes;
 using CodeSpace.Core.Services.Workflows.Nodes.Builtin;
 using CodeSpace.Core.Services.Workflows.Runtime;
@@ -268,7 +269,8 @@ public class DeploymentAutonomyCeilingTests
         new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier() }),
         new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new MapFanoutRecipe(), new SupervisorRecipe() }),
         new BoundsPresetRegistry(withPresets ? new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset(), new DeepBoundsPreset() } : Array.Empty<IBoundsPreset>()),
-        new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()));
+        new CapabilityProbeRegistry(Array.Empty<ICapabilityProbe>()),
+        new TaskProjectionRegistry(Array.Empty<IWorkflowDefinitionBuilder>()));
 
     private static EffortRouteRequest RouteRequest(string effort) => new()
     {
