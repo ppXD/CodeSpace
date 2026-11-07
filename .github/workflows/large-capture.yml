@@ -51,7 +51,8 @@ env:
 jobs:
   large-capture:
     name: dotnet test (LargeCapture · 4 GiB · Postgres)
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: on ubuntu-26.04 an unprivileged bwrap works, so the suites switch to confined mode; they assume the unconfined posture (confinement is covered by sandbox-isolation.yml)
+    runs-on: ubuntu-24.04
     # Three nested deadlines, ordered so the INNERMOST always fires first and the diagnosis is readable: the in-test
     # CancellationTokenSource at 40 m (AgentRunLogFourGibibyteCaptureFlowTests.cs) throws an XunitException naming the
     # stream and the SQL to inspect it; --blame-hang-timeout at 50 m only catches a genuinely wedged process, and
