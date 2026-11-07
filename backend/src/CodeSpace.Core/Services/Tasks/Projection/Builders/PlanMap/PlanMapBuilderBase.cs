@@ -88,8 +88,10 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
 
             new() { Id = "ms", TypeKey = "flow.map_start", Label = "Subtask", ParentId = "map", Config = Empty(), Inputs = Empty() },
 
+            // The operator's allowed model pool rides every branch, so a planner-authored {{item.model}} outside it runs
+            // the pool's default row at dispatch instead of escaping the pool.
             new() { Id = "agent", TypeKey = "agent.run", Label = "Work the subtask", ParentId = "map", Retry = AgentNodeMapping.DefaultRetry,
-                    Config = AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile, BranchMode, grounding: context.GroundingContext, acceptance: "{{item.acceptance}}", fallbackModel: BranchModel), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
+                    Config = AgentNodeMapping.WithAllowedModels(AgentNodeMapping.BuildAgentConfig(BranchGoal, context.AgentProfile, BranchMode, grounding: context.GroundingContext, acceptance: "{{item.acceptance}}", fallbackModel: BranchModel), context.AllowedModelIds), Inputs = AgentNodeMapping.BuildAgentInputs(context) },
         });
 
         // P4 (the plan-map integrated candidate): a repo-bound fan-out integrates its produced work into ONE
@@ -136,7 +138,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         return edges;
     }
 
-    /// <summary>The plan.author Config — always a FLAT plan (the parallel map cannot honor ordering), plus the launch's pinned planner model row + the operator's planner critic (reviewMode / reviewerModelId, omitted when off — byte-identical).</summary>
+    /// <summary>The plan.author Config — always a FLAT plan (the parallel map cannot honor ordering), plus the launch's pinned planner model row, the operator's allowed model pool (the catalog the planner allocates subtasks from; omitted when unbounded) + the operator's planner critic (reviewMode / reviewerModelId, omitted when off — byte-identical).</summary>
     private static JsonElement PlannerConfig(TaskBuildContext context)
     {
         var config = new Dictionary<string, object?>
@@ -145,6 +147,7 @@ public abstract class PlanMapBuilderBase : IWorkflowDefinitionBuilder
         };
 
         AddIfPresent(config, "plannerModelId", context.PlannerModelRowId?.ToString());
+        AddIfPresent(config, "allowedModelIds", context.AllowedModelIds is { Count: > 0 } pool ? pool.Select(id => id.ToString()).ToList() : null);
         AddIfPresent(config, "reviewMode", context.PlannerReviewMode != ReviewMode.None ? (int)context.PlannerReviewMode : null);
         AddIfPresent(config, "reviewerModelId", context.PlannerReviewMode != ReviewMode.None ? context.ReviewerModelId?.ToString() : null);
         // D① grounded plan review — a real read-only agent verifies the plan against the bound repository's tree.

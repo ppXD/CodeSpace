@@ -9,6 +9,7 @@ using CodeSpace.Core.Services.Tasks.Recipes;
 using CodeSpace.Core.Services.Tasks.Recipes.MapFanout;
 using CodeSpace.Core.Services.Tasks.Recipes.SingleAgent;
 using CodeSpace.Core.Services.Tasks.Recipes.Supervisor;
+using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Messages.Tasks;
 using CodeSpace.Messages.Tasks.Effort;
 using Shouldly;
@@ -43,7 +44,8 @@ public class EffortRouterDegradeTests
             new EffortClassifierRegistry(new IEffortClassifier[] { new HeuristicEffortClassifier() }),
             new TaskRecipeRegistry(new ITaskRecipe[] { new SingleAgentRecipe(), new FakeGatedRecipe() }),
             new BoundsPresetRegistry(new IBoundsPreset[] { new QuickBoundsPreset(), new StandardBoundsPreset() }),
-            new CapabilityProbeRegistry(new ICapabilityProbe[] { new FakeProbe(FakeGatedRecipe.FakeCapability, available: false) }));
+            new CapabilityProbeRegistry(new ICapabilityProbe[] { new FakeProbe(FakeGatedRecipe.FakeCapability, available: false) }),
+            new TaskProjectionRegistry(Array.Empty<IWorkflowDefinitionBuilder>()));
 
         var plan = await router.RouteAsync(Request(FakeGatedRecipe.FakeTier), CancellationToken.None);
 

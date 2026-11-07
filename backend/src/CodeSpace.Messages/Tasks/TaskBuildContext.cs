@@ -56,13 +56,13 @@ public sealed record TaskBuildContext
     /// <summary>True when the brain row is the operator's own HONORED pin — baked so the decider knows it must resolve verbatim (never fail over).</summary>
     public bool SupervisorBrainModelPinned { get; init; }
 
-    /// <summary>The operator's allowed model pool (credentialed-model ROW ids) for the agents a Deep run dispatches, validated TEAM-SCOPED at launch — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>allowedModelIds</c>, where a dispatched model out of the pool fails closed. Null / empty ⇒ the pool is all the team's models (the builder omits the key — byte-identical). Inert on a non-supervisor projection (its builder never reads this).</summary>
+    /// <summary>The operator's allowed model pool (credentialed-model ROW ids), validated TEAM-SCOPED at launch — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>allowedModelIds</c>, where a dispatched model out of the pool fails closed; the plan-map builders bake it into the planner (its catalog) and every branch's agent.run, and the single-agent builder into its one agent.run, where dispatch holds the model to the pool. Null / empty ⇒ the pool is all the team's models (every builder omits the key — byte-identical).</summary>
     public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
 
     /// <summary>The operator's allowed AGENT (persona) pool (<c>AgentDefinition</c> ROW ids), validated TEAM-SCOPED at launch — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>allowedAgentDefinitionIds</c>, where a dispatched persona out of the pool fails closed. Null / empty ⇒ all the team's personas (builder omits the key — byte-identical). Inert on a non-supervisor projection.</summary>
     public IReadOnlyList<Guid>? AllowedAgentDefinitionIds { get; init; }
 
-    /// <summary>The operator's free-text ACCEPTANCE CRITERIA — the <c>SupervisorDefinitionBuilder</c> bakes them into the node's <c>acceptanceCriteria</c>, rendered into the decider prompt (NOT executed). Null / empty ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>
+    /// <summary>The operator's free-text ACCEPTANCE CRITERIA (NOT executed) — the <c>SupervisorDefinitionBuilder</c> bakes them into the node's <c>acceptanceCriteria</c> (rendered into the decider prompt), the plan-map builders into the planner's <c>criteria</c> input, and the single-agent builder onto its agent's goal. Null / empty ⇒ every builder omits them (byte-identical).</summary>
     public IReadOnlyList<string>? AcceptanceCriteria { get; init; }
 
     /// <summary>The plan-confirmation gate — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>requirePlanConfirmation</c> (S3); the plan-map builders insert a <c>plan.confirm</c> node after the planner and rebind the map to its APPROVED outputs (S4d). False (the default) ⇒ byte-identical ungated graphs. Inert on the quick tier.</summary>
@@ -80,7 +80,7 @@ public sealed record TaskBuildContext
     /// <summary>How an INDEPENDENT critic reviews the AUTHORED PLAN — tier-generic (S4e): the plan-map builders bake it into plan.author/plan.confirm's <c>reviewMode</c>; the supervisor builder bakes it into the plan-scoped <c>planReviewMode</c>. <see cref="ReviewMode.None"/> (the default) ⇒ omitted (byte-identical). Inert on quick.</summary>
     public ReviewMode PlannerReviewMode { get; init; } = ReviewMode.None;
 
-    /// <summary>The operator's EXECUTABLE acceptance floor (S4b) — an argv (e.g. ["sh","check.sh"]) the <c>SupervisorDefinitionBuilder</c> bakes into the node's <c>acceptanceChecks</c>, enforced at the terminal stop (a non-zero exit fails the stop + withholds the reviewable head). Null / empty ⇒ omitted (byte-identical). Inert on a non-supervisor projection.</summary>
+    /// <summary>The operator's EXECUTABLE acceptance floor (S4b) — an argv (e.g. ["sh","check.sh"]) the <c>SupervisorDefinitionBuilder</c> bakes into the node's <c>acceptanceChecks</c>, enforced at the terminal stop (a non-zero exit fails the stop + withholds the reviewable head), and the single-agent builder into its agent's own oracle. Null / empty ⇒ omitted (byte-identical). The plan-map builders grade none — the launch refuses a floor before it reaches them.</summary>
     public IReadOnlyList<string>? AcceptanceChecks { get; init; }
 
     /// <summary>How an INDEPENDENT critic reviews each supervisor decision — the <c>SupervisorDefinitionBuilder</c> bakes it into the node's <c>decisionReviewMode</c>. <see cref="ReviewMode.None"/> (the default) ⇒ the builder omits the key (byte-identical). Inert on a non-supervisor projection.</summary>

@@ -132,6 +132,49 @@ public class AgentDefinitionResolverCredentialedModelFlowTests
         await Should.ThrowAsync<AgentDefinitionResolutionException>(() => ResolveAsync(task, teamId));
     }
 
+    [Theory]
+    [InlineData("revoked")]
+    [InlineData("disabled")]
+    [InlineData("foreign-team")]
+    [InlineData("missing")]
+    public async Task A_bounded_task_whose_picked_model_cannot_run_is_left_for_the_dispatchs_pool_choice(string unusable)
+    {
+        // The operator named the allowed pool as the fallback, and the dispatch owns that choice: it moves to another
+        // pooled row and names the move, or fails with agent_model_pool_unresolvable. Failing here would end the run
+        // before any pooled row was tried. The pin stays on the task, unexpanded, for the dispatch to read — whatever
+        // made it unusable. (The team barrier for a foreign row is then the dispatch's: ModelPoolSelector.)
+        var teamId = await SeedTeamAsync();
+        var credId = await SeedCredentialAsync(teamId, "Anthropic");
+        var rowId = await AddModelAsync(credId, "claude-opus-4-8");
+        var otherRow = await AddModelAsync(await SeedCredentialAsync(teamId, "Anthropic"), "claude-sonnet-4-6");
+
+        var pin = unusable switch
+        {
+            "revoked" => await RevokedPinAsync(credId, rowId),
+            "disabled" => await DisabledPinAsync(rowId),
+            "foreign-team" => await AddModelAsync(await SeedCredentialAsync(await SeedTeamAsync(), "Anthropic"), "claude-opus-4-8"),
+            _ => Guid.NewGuid(),
+        };
+
+        var task = new AgentTask { Goal = "g", Harness = "claude-code", ModelCredentialModelId = pin, AllowedModelIds = [pin, otherRow] };
+
+        var resolved = await ResolveAsync(task, teamId);
+
+        resolved.ShouldBe(task, "nothing is substituted here — the pool choice is the dispatch's");
+    }
+
+    private async Task<Guid> RevokedPinAsync(Guid credId, Guid rowId)
+    {
+        await RevokeCredentialAsync(credId);
+        return rowId;
+    }
+
+    private async Task<Guid> DisabledPinAsync(Guid rowId)
+    {
+        await DisableModelAsync(rowId);
+        return rowId;
+    }
+
     [Fact]
     public async Task A_missing_model_row_fails_closed()
     {

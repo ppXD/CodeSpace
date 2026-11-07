@@ -67,6 +67,9 @@ public sealed record WorkflowPlanRequest
     /// </summary>
     public Guid? BrainModelId { get; init; }
 
+    /// <summary>The operator's allowed model pool (credentialed-model ROW ids) the plan's subtasks are allocated from — the capability catalog the planner reads is bounded to it, so a per-subtask model is picked from the pool. It bounds the catalog only; the planner's own brain is <see cref="BrainModelId"/>. Null / empty ⇒ the whole team pool (byte-identical).</summary>
+    public IReadOnlyList<Guid>? AllowedModelIds { get; init; }
+
     /// <summary>Whether an INDEPENDENT reviewer model gates / improves the plan (the <c>CriticPlannerDecorator</c>). Default <see cref="ReviewMode.None"/> ⇒ no review (byte-identical).</summary>
     public ReviewMode Review { get; init; } = ReviewMode.None;
 

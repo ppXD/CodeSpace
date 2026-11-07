@@ -458,7 +458,7 @@ public sealed class AgentRunReviseLoopFlowTests
         // The run's OWN credential holds the ladder it may climb…
         var credentialId = await SeedModelCredentialAsync(teamId);
         await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
-        await SeedTieredModelAsync(credentialId, "test-model-pro", ModelCapabilityTier.Strong);
+        var proRowId = await SeedTieredModelAsync(credentialId, "test-model-pro", ModelCapabilityTier.Strong);
 
         // …and a SECOND credential of the SAME provider holds a stronger model still. A team credentials one
         // provider twice all the time (a direct vendor key beside a gateway with its own base URL and family), and
@@ -491,9 +491,50 @@ public sealed class AgentRunReviseLoopFlowTests
         result.ModelEscalation.Reason.ShouldContain("claimed success");
         result.ProposedEscalation.ShouldBeNull("the run ended PASSING — it owes the next attempt nothing");
 
+        var persisted = JsonSerializer.Deserialize<AgentTask>(run.TaskJson, AgentJson.Options).ShouldNotBeNull();
+        persisted.Model.ShouldBe("test-model-pro");
+        persisted.ModelCredentialModelId.ShouldBe(proRowId, "the stored envelope names the ROW the revise round runs, not only its model — a re-attach and the identity strip read it");
+
         var events = await LoadEventsAsync(runId);
         events.ShouldContain(e => e.StartsWith(AgentRunExecutor.ModelEscalationPrefix, StringComparison.Ordinal) && e.Contains("test-model → test-model-pro"),
             "the operator sees the run reached for a stronger model and why");
+    }
+
+    [Fact]
+    public async Task A_later_round_that_does_not_escalate_is_reviewed_as_the_row_an_earlier_round_escalated_to()
+    {
+        // The first attempt fails the check; revise round 1 escalates, passes the check, and is flagged by the critic;
+        // revise round 2 asks for no escalation. Both revise rounds run on the escalated model, so both reviews must name
+        // ITS row as the producer — a later round that fell back to the authored row would let the reviewer pick the
+        // model that did the work.
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var credentialId = await SeedModelCredentialAsync(teamId);
+        await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
+        var proRowId = await SeedTieredModelAsync(credentialId, "test-model-pro", ModelCapabilityTier.Strong);
+        var reviewerRowId = await SeedCriticModelAsync(teamId);
+        ResetCriticScript();
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync(CheckScript);
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { ModelCredentialId = credentialId, OutputReviewMode = ReviewMode.Improve, ReviewerModelId = reviewerRowId, MaxReviseRounds = 2 });
+
+        var harness = new ReviseAwareHarness(first: DraftScript, revised: HalfFixScript, later: RevisedScript);
+        var critic = new ProducerRecordingCritic(_fixture);
+        await ExecuteAsync(runId, harness, critic: critic);
+
+        var (run, result) = await LoadAsync(runId);
+
+        run.Status.ShouldBe(AgentRunStatus.Succeeded, "revise round 2's clean work passes both gates");
+        result.ReviseRounds.ShouldBe(2);
+        harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model", "test-model-pro", "test-model-pro" }, "fixture check: only round 1 escalated, and the model held");
+
+        critic.Producers.Count.ShouldBe(2, "fixture check: the half-fixed round and the clean round were each reviewed");
+        critic.Producers.ShouldAllBe(p => p != null && p.ModelCredentialModelId == proRowId, "every review names the escalated row as the producer");
     }
 
     [Fact]
@@ -539,6 +580,39 @@ public sealed class AgentRunReviseLoopFlowTests
         result.ProposedEscalation.ShouldNotBeNull("the run ended still failing — it owes the NEXT attempt an answer");
         result.ProposedEscalation!.From.ShouldBe("test-model-ultra", "the floor for the next attempt is the model this run ended on");
         result.ProposedEscalation.To.ShouldBeNull("nothing is credentialed above Frontier — a respawn would re-burn the same model, so the node keeps the failure terminal");
+    }
+
+    [Fact]
+    public async Task A_run_bound_to_an_allowed_model_pool_never_escalates_outside_it()
+    {
+        // The operator's pool holds only the Basic model; a Frontier one sits on the run's OWN credential, outside it.
+        // A Quick launch at Delivery now always carries a check, so a failing check is the ordinary path — and it used
+        // to climb straight past the pool ("test-model → test-model-ultra"), in the revise round and for the next attempt.
+        if (OperatingSystem.IsWindows()) return;
+        if (!await GitAvailableAsync()) return;
+
+        var (teamId, userId) = await SeedTeamAsync();
+        var credentialId = await SeedModelCredentialAsync(teamId);
+        var pooled = await SeedTieredModelAsync(credentialId, "test-model", ModelCapabilityTier.Basic);
+        await SeedTieredModelAsync(credentialId, "test-model-ultra", ModelCapabilityTier.Frontier);
+
+        using var remote = new BareRemote();
+        await remote.SeedBaseAsync("#!/bin/sh\nexit 1\n");   // an unfixable check — every round asks to escalate
+        var repoId = await SeedBoundRepositoryAsync(teamId, remote.Url);
+
+        var runId = await CreateRunAsync(teamId, userId, TaskWith(repoId) with { ModelCredentialId = credentialId, MaxReviseRounds = 1, AllowedModelIds = [pooled] });
+
+        var harness = new ReviseAwareHarness(first: DraftScript, revised: RevisedScript);
+        await ExecuteAsync(runId, harness);
+
+        var (_, result) = await LoadAsync(runId);
+
+        harness.InvokedModels.AsEnumerable().ShouldBe(new[] { "test-model", "test-model" },
+            customMessage: "the revise round asked for a stronger model — and the pool holds none, so it re-ran the pooled one instead of test-model-ultra");
+        result.ModelEscalation.ShouldNotBeNull("the run still reached for a stronger model and said it could not");
+        result.ModelEscalation!.To.ShouldBeNull("nothing stronger is INSIDE the pool");
+        result.ProposedEscalation.ShouldNotBeNull("the run ended failing, so it answers for the next attempt too");
+        result.ProposedEscalation!.To.ShouldBeNull("the next attempt may not climb past the pool either — the node keeps the failure terminal instead of respawning onto test-model-ultra");
     }
 
     [Fact]
@@ -691,15 +765,17 @@ public sealed class AgentRunReviseLoopFlowTests
         return credentialId;
     }
 
-    /// <summary>One credentialed pool model with a DECLARED capability tier — the ordering the escalation pick reads (<c>WorkflowsTestSeed.SeedCredentialedModelAsync</c> leaves the tier Unknown, which no escalation can rank).</summary>
-    private async Task SeedTieredModelAsync(Guid credentialId, string modelId, ModelCapabilityTier tier)
+    /// <summary>One credentialed pool model with a DECLARED capability tier — the ordering the escalation pick reads (<c>WorkflowsTestSeed.SeedCredentialedModelAsync</c> leaves the tier Unknown, which no escalation can rank). Returns the row id — an allowed-pool entry.</summary>
+    private async Task<Guid> SeedTieredModelAsync(Guid credentialId, string modelId, ModelCapabilityTier tier)
     {
         using var scope = _fixture.BeginScope();
         var db = scope.Resolve<CodeSpaceDbContext>();
 
-        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = Guid.NewGuid(), ModelCredentialId = credentialId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, CapabilityTier = tier });
+        var rowId = Guid.NewGuid();
+        db.ModelCredentialModel.Add(new ModelCredentialModel { Id = rowId, ModelCredentialId = credentialId, ModelId = modelId, Source = ModelSource.Manual, Enabled = true, CapabilityTier = tier });
 
         await db.SaveChangesAsync();
+        return rowId;
     }
 
     /// <summary>The reviewer model row under the content-keyed critic fake's provider tag — pinned onto the task so the reviewer resolution is deterministic even beside other seeded rows.</summary>
@@ -753,7 +829,7 @@ public sealed class AgentRunReviseLoopFlowTests
 
     // ─── Execution ───────────────────────────────────────────────────────────
 
-    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, ISandboxRunner? runner = null, TimeProvider? clock = null)
+    private async Task ExecuteAsync(Guid runId, IAgentHarness harness, ISandboxRunner? runner = null, TimeProvider? clock = null, CodeSpace.Core.Services.Review.IStructuredCritic? critic = null)
     {
         using var scope = _fixture.BeginScope();
         var executor = new AgentRunExecutor(
@@ -767,7 +843,7 @@ public sealed class AgentRunReviseLoopFlowTests
             scope.Resolve<IAgentRunCompletionNotifier>(),
             scope.Resolve<Microsoft.Extensions.DependencyInjection.IServiceScopeFactory>(),
             scope.Resolve<CodeSpaceDbContext>(),
-            scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
+            critic ?? scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactOffloader>(),
             scope.Resolve<CodeSpace.Core.Services.Workflows.Artifacts.IArtifactStore>(),
             scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IPublishManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Publish.IArtifactManifestStore>(), scope.Resolve<CodeSpace.Core.Services.Agents.Capture.ICaptureIntentService>(),
@@ -1027,13 +1103,29 @@ public sealed class AgentRunReviseLoopFlowTests
         public Task<SandboxTerminateResult> TerminateAsync(SandboxHandle handle, CancellationToken cancellationToken) => _inner.TerminateAsync(handle, cancellationToken);
     }
 
+    /// <summary>The real critic, recording the producer identity each review was handed.</summary>
+    private sealed class ProducerRecordingCritic(PostgresFixture fixture) : CodeSpace.Core.Services.Review.IStructuredCritic
+    {
+        public List<CodeSpace.Messages.Review.ReviewModelIdentity?> Producers { get; } = new();
+
+        public async Task<CodeSpace.Messages.Review.CriticVerdict> ReviewAsync(CodeSpace.Core.Services.Review.CriticRequest request, Guid teamId, Guid? reviewerModelId, CancellationToken cancellationToken)
+        {
+            Producers.Add(request.ProducerModel);
+
+            using var scope = fixture.BeginScope();
+            return await scope.Resolve<CodeSpace.Core.Services.Review.IStructuredCritic>().ReviewAsync(request, teamId, reviewerModelId, cancellationToken);
+        }
+    }
+
     private sealed class ReviseAwareHarness : IAgentHarness
     {
         private readonly string _first;
         private readonly string _revised;
         private readonly string? _requiredDiagnosis;
+        private readonly string? _later;
 
-        public ReviseAwareHarness(string first, string revised, string? requiredDiagnosis = null) { _first = first; _revised = revised; _requiredDiagnosis = requiredDiagnosis; }
+        /// <param name="later">When set, the script from the THIRD invocation on (the second revise round), instead of <paramref name="revised"/>.</param>
+        public ReviseAwareHarness(string first, string revised, string? requiredDiagnosis = null, string? later = null) { _first = first; _revised = revised; _requiredDiagnosis = requiredDiagnosis; _later = later; }
 
         public string Kind => "scripted";
         public string Version => "test";
@@ -1055,7 +1147,7 @@ public sealed class AgentRunReviseLoopFlowTests
             return new SandboxSpec
             {
                 Command = "/bin/sh",
-                Args = new[] { "-c", task.Goal.StartsWith(AgentRunExecutor.ReviseInstructionPrefix, StringComparison.Ordinal) && (_requiredDiagnosis == null || task.Goal.Contains(_requiredDiagnosis, StringComparison.Ordinal)) ? _revised : _first },
+                Args = new[] { "-c", task.Goal.StartsWith(AgentRunExecutor.ReviseInstructionPrefix, StringComparison.Ordinal) && (_requiredDiagnosis == null || task.Goal.Contains(_requiredDiagnosis, StringComparison.Ordinal)) ? (_later is not null && InvokedModels.Count >= 3 ? _later : _revised) : _first },
                 WorkingDirectory = task.WorkspaceDirectory,
                 TimeoutSeconds = task.TimeoutSeconds,
             };

@@ -4,6 +4,8 @@ using CodeSpace.Core.Persistence.Db;
 using CodeSpace.Core.Persistence.Entities;
 using CodeSpace.Core.Services.Tasks;
 using CodeSpace.Core.Services.Tasks.Contracts;
+using CodeSpace.Core.Services.Tasks.Launch;
+using CodeSpace.Core.Services.Tasks.Launch.Exceptions;
 using CodeSpace.Core.Services.Tasks.Projection;
 using CodeSpace.Core.Services.Completion;
 using CodeSpace.Core.Services.Workflows;
@@ -42,19 +44,21 @@ public class TaskLaunchContractFlowTests : IDisposable
     public void Dispose() => _manualExecution.Dispose();
 
     [Theory]
-    [InlineData(TaskEffortModes.Quick, TaskProjectionKinds.SingleAgent)]
-    [InlineData(TaskEffortModes.Standard, TaskProjectionKinds.PlanMapSynth)]
-    [InlineData(TaskEffortModes.Deep, TaskProjectionKinds.Supervisor)]
-    public async Task Every_launch_lane_records_original_controls_in_the_frozen_run_detail(string effort, string projectionKind)
+    [InlineData(TaskEffortModes.Quick, TaskProjectionKinds.SingleAgent, true, false)]       // the single agent grades its floor in its own workspace
+    [InlineData(TaskEffortModes.Standard, TaskProjectionKinds.PlanMapSynth, false, false)]  // plan-map grades no operator floor: sending one is refused (pinned below)
+    [InlineData(TaskEffortModes.Deep, TaskProjectionKinds.Supervisor, true, true)]          // the supervisor grades it against the branch it publishes
+    public async Task Every_launch_lane_records_original_controls_in_the_frozen_run_detail(string effort, string projectionKind, bool gradesOperatorFloor, bool floorNeedsRepository)
     {
         var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        Guid? repoId = floorNeedsRepository ? await SeedRepositoryAsync(teamId) : null;
+
         using var scope = _fixture.BeginScope();
         var request = new TaskLaunchRequest
         {
-            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat, RepositoryId = repoId,
             TaskText = "Preserve the original delivery obligations", RequestedEffort = effort, Autonomy = "Unleashed",
             CapsOverride = new() { MaxCostUsd = 3.25m, AutonomyCeiling = "Standard" },
-            AcceptanceCriteria = ["Use original inputs", "Explain limitations"], AcceptanceChecks = ["sh", "verify.sh"],
+            AcceptanceCriteria = ["Use original inputs", "Explain limitations"], AcceptanceChecks = gradesOperatorFloor ? ["sh", "verify.sh"] : null,
             DeliverySpec = new() { OpenPullRequest = false, TargetBranch = "review" },
             AllowedModelIds = [], AllowedAgentDefinitionIds = [], RequirePlanConfirmation = false,
             Overrides = new() { Harness = "codex-cli", AllowedTools = ["Read", "Grep"], PushBranch = false, EnableMcp = false },
@@ -87,7 +91,7 @@ public class TaskLaunchContractFlowTests : IDisposable
             contract.SupervisorModelSelection.ShouldNotBeNull("the supervisor decision is frozen before execution and survives the real PostgreSQL snapshot path");
             run.DefinitionSnapshotJson.ShouldContain(contract.SupervisorModelSelection!.ModelCredentialModelId.ToString(), Case.Insensitive);
             contract.SupervisorModelSelection.Mode.ShouldBe(RunModeKeys.Supervisor);
-            contract.SupervisorModelSelection.CapabilityKey.ShouldBe(CapabilityKeys.InlineAnswer);
+            contract.SupervisorModelSelection.CapabilityKey.ShouldBe(repoId is null ? CapabilityKeys.InlineAnswer : CapabilityKeys.GitBranch, "repository-scoped work produces a reviewable branch");
             contract.PlannerModelSelection.ShouldBeNull();
         }
         else if (projectionKind == TaskProjectionKinds.PlanMapSynth)
@@ -105,6 +109,26 @@ public class TaskLaunchContractFlowTests : IDisposable
         JsonElement.DeepEquals(JsonSerializer.SerializeToElement(contract.ResolvedRoute.Caps, WorkflowJson.Options), JsonSerializer.SerializeToElement(launched.Route.Caps, WorkflowJson.Options)).ShouldBeTrue();
         DefinitionHash.Compute(detail.Definition).ShouldBe(run.DefinitionSnapshotHash, "Postgres jsonb normalization cannot detach the contract from the frozen hash");
         (await scope.Resolve<CodeSpaceDbContext>().AgentRun.CountAsync(r => r.WorkflowRunId == launched.RunId)).ShouldBe(0, "this verifies persistence, not model execution or control enforcement");
+    }
+
+    [Fact]
+    public async Task A_standard_launch_carrying_an_operator_floor_is_refused_and_records_nothing()
+    {
+        // The plan-map lane grades no operator floor, so the floor is refused by name before a session or run exists —
+        // it used to be recorded in the contract and silently never graded.
+        var (teamId, userId) = await WorkflowsTestSeed.SeedTeamAsync(_fixture);
+        using var scope = _fixture.BeginScope();
+        var request = new TaskLaunchRequest
+        {
+            TeamId = teamId, ActorUserId = userId, SurfaceKind = TaskLaunchSurfaceKinds.Chat,
+            TaskText = "Preserve the original delivery obligations", RequestedEffort = TaskEffortModes.Standard,
+            AcceptanceChecks = ["sh", "verify.sh"],
+        };
+
+        var ex = await Should.ThrowAsync<TaskLaunchControlRefusedException>(() => scope.Resolve<ITaskLaunchService>().LaunchAsync(request, CancellationToken.None));
+
+        ex.Message.ShouldContain(LaunchControlResolver.FloorNotGradedReason);
+        (await scope.Resolve<CodeSpaceDbContext>().WorkflowRun.CountAsync(r => r.TeamId == teamId)).ShouldBe(0, "no run, no contract — nothing records a floor nothing would grade");
     }
 
     [Theory]
@@ -223,6 +247,23 @@ public class TaskLaunchContractFlowTests : IDisposable
     {
         using var scope = _fixture.BeginScope();
         return await scope.Resolve<IRunFromSnapshotStarter>().StartFromSnapshotAsync(definition, teamId, userId, "{}", null, null, null, CancellationToken.None);
+    }
+
+    /// <summary>A provider instance + an active repository in the team — enough for the launch's team-scope guard, and a workspace an argv floor can be graded against.</summary>
+    private async Task<Guid> SeedRepositoryAsync(Guid teamId)
+    {
+        using var scope = _fixture.BeginScope();
+        var db = scope.Resolve<CodeSpaceDbContext>();
+
+        var suffix = Guid.NewGuid().ToString("N")[..8];
+        var instanceId = Guid.NewGuid();
+        var repoId = Guid.NewGuid();
+
+        db.ProviderInstance.Add(new ProviderInstance { Id = instanceId, TeamId = teamId, Provider = ProviderKind.GitHub, DisplayName = "GH", BaseUrl = $"https://gh-{suffix}.local", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+        db.Repository.Add(new Repository { Id = repoId, TeamId = teamId, ProviderInstanceId = instanceId, ExternalId = $"ext-{suffix}", NamespacePath = "acme", Name = "api", FullPath = $"acme/api-{suffix}", WebUrl = "https://gh.local/acme/api", CreatedBy = SystemUsers.SeederId, LastModifiedBy = SystemUsers.SeederId });
+
+        await db.SaveChangesAsync();
+        return repoId;
     }
 
     private async Task ExecuteAsync(Guid runId)

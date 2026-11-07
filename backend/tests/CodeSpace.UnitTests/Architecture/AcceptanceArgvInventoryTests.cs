@@ -49,6 +49,7 @@ public class AcceptanceArgvInventoryTests
         ["CodeSpace.Core/Services/Agents/InLoopAcceptanceHook.cs"] = 1,
         ["CodeSpace.Core/Services/Agents/Workspace/LocalAcceptanceVerifier.cs"] = 1,
         ["CodeSpace.Core/Services/Supervisor/SupervisorTurnService.Rehydrate.cs"] = 4,
+        ["CodeSpace.Core/Services/Tasks/Launch/LaunchControlResolver.cs"] = 1,
         ["CodeSpace.Core/Services/Tasks/Projection/Builders/SingleAgent/SingleAgentDefinitionBuilder.cs"] = 1,
         ["CodeSpace.Core/Services/Tasks/Projection/Builders/Supervisor/SupervisorDefinitionBuilder.cs"] = 1,
         ["CodeSpace.Core/Services/Tasks/SpecPreview/TaskSpecAcceptanceAssessment.cs"] = 1,

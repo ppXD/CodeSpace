@@ -6,12 +6,10 @@ using Shouldly;
 namespace CodeSpace.UnitTests.Tasks;
 
 /// <summary>
-/// Pins P3.2's two tier-mandate choke points: <see cref="TaskLaunchService.EnsureAcceptanceMandate"/> (Delivery/
-/// Unattended on a SUPERVISOR-projected launch must carry an executable <c>acceptanceChecks</c> floor, fail-loud
-/// otherwise) and <see cref="TaskLaunchService.BuildAgentProfile"/>'s tier-aware <c>OutputReviewMode</c> floor
-/// (Delivery ⇒ at least Gate, Unattended ⇒ at least Improve — a MINIMUM an operator's explicit choice can only
-/// raise, never lower). Both are pure, so they're unit-pinned directly here (no DB) — the integration tier proves
-/// a Delivery launch without an acceptance check is rejected through the REAL <c>ITaskLaunchService</c>.
+/// Pins <see cref="TaskLaunchService.BuildAgentProfile"/>'s tier-aware <c>OutputReviewMode</c> floor (Delivery ⇒ at
+/// least Gate, Unattended ⇒ at least Improve — a MINIMUM an operator's explicit choice can only raise, never lower). The
+/// tier's OTHER mandate — an executable acceptance floor on every route that grades one — is a launch-control disposition
+/// now, pinned lane by lane in <c>LaunchControlResolverTests</c> (the preview predicts it; the launch refuses on it).
 /// </summary>
 [Trait("Category", "Unit")]
 public class TaskLaunchServiceQualityTierTests
@@ -20,55 +18,13 @@ public class TaskLaunchServiceQualityTierTests
 
     private static RoutePlan Route(string projectionKind) => new() { ProjectionKind = projectionKind, Caps = new RouteCaps() };
 
-    private static TaskLaunchRequest Request(QualityTier? tier, IReadOnlyList<string>? acceptanceChecks = null) => new()
+    private static TaskLaunchRequest Request(QualityTier? tier) => new()
     {
         TeamId = Guid.NewGuid(),
         ActorUserId = Guid.NewGuid(),
         SurfaceKind = "chat",
         Tier = tier,
-        AcceptanceChecks = acceptanceChecks,
     };
-
-    // ── EnsureAcceptanceMandate — Delivery/Unattended on a supervisor launch must carry an acceptance floor ──
-
-    [Theory]
-    [InlineData(QualityTier.Delivery)]
-    [InlineData(QualityTier.Unattended)]
-    public void A_supervisor_launch_at_delivery_or_unattended_quality_without_an_acceptance_check_is_rejected(QualityTier tier)
-    {
-        var ex = Should.Throw<ArgumentException>(() =>
-            TaskLaunchService.EnsureAcceptanceMandate(Request(tier), Route(TaskProjectionKinds.Supervisor)));
-
-        ex.Message.ShouldContain("acceptanceChecks", Case.Insensitive, "the operator needs an actionable name for the missing lever");
-        ex.Message.ShouldContain(tier.ToString());
-    }
-
-    [Theory]
-    [InlineData(QualityTier.Delivery)]
-    [InlineData(QualityTier.Unattended)]
-    public void A_supervisor_launch_with_an_authored_acceptance_check_is_not_rejected(QualityTier tier)
-    {
-        Should.NotThrow(() =>
-            TaskLaunchService.EnsureAcceptanceMandate(Request(tier, new[] { "sh", "check.sh" }), Route(TaskProjectionKinds.Supervisor)));
-    }
-
-    [Fact]
-    public void A_supervisor_launch_at_prototype_quality_or_no_tier_is_never_rejected()
-    {
-        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(QualityTier.Prototype), Route(TaskProjectionKinds.Supervisor)));
-        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(tier: null), Route(TaskProjectionKinds.Supervisor)));
-    }
-
-    [Theory]
-    [InlineData(QualityTier.Delivery)]
-    [InlineData(QualityTier.Unattended)]
-    public void A_non_supervisor_launch_at_delivery_or_unattended_quality_is_never_rejected(QualityTier tier)
-    {
-        // AcceptanceChecks is inert on a non-supervisor projection today — this PR doesn't invent new acceptance-floor
-        // plumbing for single-agent/plan-map launches, so the mandate is inert there too, matching that existing shape.
-        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(tier), Route(TaskProjectionKinds.SingleAgent)));
-        Should.NotThrow(() => TaskLaunchService.EnsureAcceptanceMandate(Request(tier), Route(TaskProjectionKinds.PlanMapDynamic)));
-    }
 
     // ── BuildAgentProfile's tier-aware OutputReviewMode floor ──
 

@@ -159,6 +159,17 @@ public sealed class ModelPoolSelector : IModelPoolSelector, IScopedDependency
         return pick is null ? null : new ModelDispatchRef { ModelId = pick.ModelId, ModelCredentialId = pick.ModelCredentialId, Provider = pick.Provider };
     }
 
+    public async Task<IReadOnlyList<PooledModelRow>> ListPoolRowsAsync(Guid teamId, IReadOnlyList<Guid> rowIds, CancellationToken cancellationToken) =>
+        await _db.ModelCredentialModel.AsNoTracking()
+            .Where(m => rowIds.Contains(m.Id) && m.Credential.TeamId == teamId)
+            .Select(m => new PooledModelRow
+            {
+                Id = m.Id, ModelId = m.ModelId, ModelCredentialId = m.ModelCredentialId, CredentialName = m.Credential.DisplayName, Provider = m.Credential.Provider,
+                Usable = m.Enabled && m.Credential.DeletedDate == null && m.Credential.Status == CredentialStatus.Active,
+                IsDefault = m.IsDefault, CapabilityTier = m.CapabilityTier, ProbedCapabilityTier = m.ProbedCapabilityTier,
+            })
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
+
     public async Task<IReadOnlyList<PoolModelInfo>> ListPoolAsync(Guid teamId, IReadOnlyList<Guid>? allowedRowIds, CancellationToken cancellationToken)
     {
         var query = _db.ModelCredentialModel.AsNoTracking()

@@ -110,12 +110,17 @@ internal static class AgentNodeMapping
     }
 
     /// <summary>Add the route-owned monitored cost ceiling without widening the already broad profile-mapping signature. Null leaves the serialized config byte-identical.</summary>
-    public static JsonElement WithCostCap(JsonElement config, decimal? maxCostUsd)
-    {
-        if (maxCostUsd is null) return config;
+    public static JsonElement WithCostCap(JsonElement config, decimal? maxCostUsd) =>
+        maxCostUsd is null ? config : WithKey(config, "maxCostUsd", JsonSerializer.SerializeToElement(maxCostUsd.Value));
 
+    /// <summary>Hold the agent's model to the operator's allowed pool (credentialed-model row ids, as string uuids — the shape the supervisor node bakes): the node carries it onto <c>AgentTask.AllowedModelIds</c>, where dispatch runs the model on a pooled row. Null / empty leaves the config byte-identical (the whole team pool).</summary>
+    public static JsonElement WithAllowedModels(JsonElement config, IReadOnlyList<Guid>? allowedModelIds) =>
+        allowedModelIds is not { Count: > 0 } pool ? config : WithKey(config, "allowedModelIds", JsonSerializer.SerializeToElement(pool.Select(id => id.ToString()).ToList()));
+
+    private static JsonElement WithKey(JsonElement config, string key, JsonElement value)
+    {
         var mapped = config.EnumerateObject().ToDictionary(p => p.Name, p => p.Value.Clone());
-        mapped["maxCostUsd"] = JsonSerializer.SerializeToElement(maxCostUsd.Value);
+        mapped[key] = value;
         return JsonSerializer.SerializeToElement(mapped);
     }
 
