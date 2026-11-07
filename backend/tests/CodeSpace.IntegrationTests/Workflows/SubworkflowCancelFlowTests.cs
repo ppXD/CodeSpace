@@ -85,7 +85,7 @@ public sealed class SubworkflowCancelFlowTests : IDisposable
         (await RunStatusAsync(sibling)).ShouldBe(WorkflowRunStatus.Cancelled, "one child's failed cancel must not strand its sibling — the single UPDATE this replaced cancelled every staged child at once");
         (await WaitStatusAsync(approvalWaitId)).ShouldBe(WorkflowWaitStatuses.Discarded, "nor the parent's remaining waits");
         (await RunStatusAsync(parentId)).ShouldBe(WorkflowRunStatus.Cancelled);
-        (await RunStatusAsync(failed)).ShouldBe(started[failed], "the child whose cancel failed is left as it was: the stuck-run reconciler never dispatches a staged child under a finished parent, and nothing sweeps a started one");
+        (await RunStatusAsync(failed)).ShouldBe(started[failed], "the child whose cancel failed is left as it was by the stop — the stuck-run reconciler's next tick cancels it (UnwaitedChildRunFlowTests)");
     }
 
     [Fact]

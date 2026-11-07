@@ -28,6 +28,9 @@ public interface IWorkflowRunDispatcher
     ///   <item><c>false</c> if the row was not in <c>Pending</c> state (another caller won
     ///         the race, OR the run is already terminal). This is NOT an error; the loser
     ///         silently returns. Reconciler relies on this idempotence.</item>
+    ///   <item><c>false</c>, too, for a sub-workflow child with a finished ancestor (reached through
+    ///         sub-workflow children only — a rerun's lineage never counts). Nothing waits for it; the
+    ///         row is left as it is, for the stuck-run reconciler to cancel.</item>
     /// </list>
     ///
     /// Throws when the background-job client itself fails to enqueue (e.g. Hangfire storage

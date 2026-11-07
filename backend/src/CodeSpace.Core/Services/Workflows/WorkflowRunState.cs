@@ -14,6 +14,9 @@ public static class WorkflowRunState
     public static bool IsTerminal(WorkflowRunStatus status) =>
         status is WorkflowRunStatus.Success or WorkflowRunStatus.Failure or WorkflowRunStatus.Cancelled;
 
+    /// <summary>The non-terminal statuses, derived once from <see cref="IsTerminal"/> so a query cannot drift from it.</summary>
+    internal static readonly WorkflowRunStatus[] NonTerminal = Enum.GetValues<WorkflowRunStatus>().Where(s => !IsTerminal(s)).ToArray();
+
     /// <summary>True when an operator cancel may flip <paramref name="status"/> to Cancelled — every non-terminal state (Pending/Enqueued/Running/Suspended).</summary>
     public static bool IsCancellable(WorkflowRunStatus status) => !IsTerminal(status);
 }

@@ -39,4 +39,7 @@ public sealed record ReconcileStuckRunsResponse
 
     /// <summary>Stranded Subworkflow parents re-fired because the child's inline on-completion resume was lost. 0 when no parent is parked on a terminal child.</summary>
     public required int RecoveredStrandedSubworkflowParent { get; init; }
+
+    /// <summary>Sub-workflow children cancelled because no live run was waiting for them. 0 when every live child is waited for.</summary>
+    public required int CancelledUnwaitedChildRun { get; init; }
 }

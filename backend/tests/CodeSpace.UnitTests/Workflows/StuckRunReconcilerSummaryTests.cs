@@ -63,6 +63,24 @@ public class StuckRunReconcilerSummaryTests
     }
 
     [Fact]
+    public void Total_counts_the_unwaited_child_cancels()
+    {
+        // A tick that only cancelled sub-workflow children no parent waits for still did work — the recurring job logs on Total > 0.
+        var summary = new StuckRunReconcileSummary { CancelledUnwaitedChildRun = 4 };
+
+        summary.Total.ShouldBe(4);
+    }
+
+    [Fact]
+    public void UnwaitedChildStagingGrace_is_two_minutes()
+    {
+        // Pinned: a staged child has no wait naming it until its parent parks a moment later, and a child younger than this is
+        // never judged unwaited. Shortening it risks cancelling a child mid-staging; lengthening it lets an orphan staged by a
+        // walk that died before parking be re-dispatched by the Pending sweep (also two minutes) before this sweep cancels it.
+        StuckRunReconcilerService.UnwaitedChildStagingGrace.ShouldBe(TimeSpan.FromMinutes(2));
+    }
+
+    [Fact]
     public void MaxSupervisorRunRecoveries_is_three()
     {
         // THE LOOP-GUARD cap (PR-E P1-2). Pinned because it is load-bearing: a deterministically

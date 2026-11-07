@@ -28,6 +28,7 @@ public sealed class ReconcileStuckRunsCommandHandler : IRequestHandler<Reconcile
             RecoveredStrandedTimerWait = summary.RecoveredStrandedTimerWait,
             RecoveredStrandedSupervisorInfraParkWait = summary.RecoveredStrandedSupervisorInfraParkWait,
             RecoveredStrandedSubworkflowParent = summary.RecoveredStrandedSubworkflowParent,
+            CancelledUnwaitedChildRun = summary.CancelledUnwaitedChildRun,
         };
     }
 }
