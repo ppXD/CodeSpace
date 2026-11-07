@@ -22,6 +22,8 @@ public class ToolCallLedgerStateMachineTests
     [InlineData(ToolCallLedgerStatus.AwaitingApproval, ToolCallLedgerStatus.Running, true)]
     [InlineData(ToolCallLedgerStatus.AwaitingApproval, ToolCallLedgerStatus.Failed, true)]
     [InlineData(ToolCallLedgerStatus.AwaitingApproval, ToolCallLedgerStatus.Expired, true)]
+    // legal — a decision its run ended without parking: claimed, then closed by the run's end before its park landed
+    [InlineData(ToolCallLedgerStatus.Pending, ToolCallLedgerStatus.Expired, true)]
     // legal — an executing (claimed) row resolves to a terminal
     [InlineData(ToolCallLedgerStatus.Running, ToolCallLedgerStatus.Succeeded, true)]
     [InlineData(ToolCallLedgerStatus.Running, ToolCallLedgerStatus.Failed, true)]
@@ -30,9 +32,8 @@ public class ToolCallLedgerStateMachineTests
     // ONLY by TryAnswerDecisionAsync, which guards on tool_kind == 'decision.request', so a real side-effecting approval
     // row can never reach Succeeded without its Running claim.
     [InlineData(ToolCallLedgerStatus.AwaitingApproval, ToolCallLedgerStatus.Succeeded, true)]
-    // illegal — a denial is synchronous-only; an approval can never re-pend or expire from Pending; Running is reached ONLY from AwaitingApproval
+    // illegal — a denial is synchronous-only; an approval can never re-pend; Running is reached ONLY from AwaitingApproval
     [InlineData(ToolCallLedgerStatus.AwaitingApproval, ToolCallLedgerStatus.Denied, false)]
-    [InlineData(ToolCallLedgerStatus.Pending, ToolCallLedgerStatus.Expired, false)]
     [InlineData(ToolCallLedgerStatus.Pending, ToolCallLedgerStatus.Running, false)]
     [InlineData(ToolCallLedgerStatus.Running, ToolCallLedgerStatus.Expired, false)]
     [InlineData(ToolCallLedgerStatus.Running, ToolCallLedgerStatus.Denied, false)]

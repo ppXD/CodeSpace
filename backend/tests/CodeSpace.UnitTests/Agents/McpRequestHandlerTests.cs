@@ -1,5 +1,6 @@
 using System.Text.Json;
 using CodeSpace.Core.Services.Agents;
+using CodeSpace.Core.Services.Agents.Exceptions;
 using CodeSpace.Core.Services.Agents.Mcp;
 using CodeSpace.Core.Services.Agents.Tools;
 using CodeSpace.Core.Services.Providers.Resilience;
@@ -2048,5 +2049,110 @@ public class McpRequestHandlerTests
         var card = bot.PostedBodies.ShouldHaveSingleItem();
         card.ShouldContain("- commitTitle: as parked", customMessage: "the card a reviewer approves is the one the row's pins were stamped from");
         card.ShouldNotContain("as read now");
+    }
+
+    // ── a call that reaches a run which has already ended ──
+
+    private const string DecisionQuestion = """{"question":"ok?","decisionType":"choose_one","options":[{"id":"a","label":"A"},{"id":"b","label":"B"}]}""";
+
+    /// <summary>Where a call meets its run's end: the claim of a decision, of a write the tier allows, or of a write parked for approval — or the park of a decision claimed before the end.</summary>
+    public enum EndedAt
+    {
+        DecisionClaim,
+        AllowedWriteClaim,
+        ApprovalClaim,
+        DecisionPark,
+    }
+
+    [Theory]
+    [InlineData(EndedAt.DecisionClaim)]
+    [InlineData(EndedAt.AllowedWriteClaim)]
+    [InlineData(EndedAt.ApprovalClaim)]
+    [InlineData(EndedAt.DecisionPark)]
+    public async Task A_call_refused_because_its_run_ended_is_answered_as_final_never_as_a_retry(EndedAt at)
+    {
+        // The run is over, so nothing it asks can take effect. "Retry shortly" sent the model round again and again; the
+        // answer must say the run ended, and that calling again cannot help.
+        var runId = Guid.NewGuid();
+        var ledger = new SpyLedger
+        {
+            PendingDecisionCount = () => 0,
+            ClaimResult = () => ToolCallClaim.Proceed(Guid.NewGuid()),
+            OnClaimThrow = at == EndedAt.DecisionPark ? null : () => new AgentRunEndedException(runId),
+            OnBeginApprovalThrow = at == EndedAt.DecisionPark ? () => new AgentRunEndedException(runId) : null,
+        };
+        var bot = new StubBot { ConversationInTeam = true };
+        var tool = new FakeTool { Kind = "git.merge_pr", IsDestructiveOverride = true };
+
+        var result = (await Respond(EndedRunHandler(at, runId, ledger, bot, tool), at is EndedAt.DecisionClaim or EndedAt.DecisionPark ? Call(DecisionRequestTool.ToolKind, DecisionQuestion) : Call("git.merge_pr", "{}"))).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        var text = result.GetProperty("content")[0].GetProperty("text").GetString();
+        text.ShouldBe(McpRequestHandler.RunEndedToolCallError, "the model is told its run ended — never the governed-fault answer that invites a retry");
+        text.ShouldNotContain("retry", Case.Insensitive);
+        tool.CallCount.ShouldBe(0, "nothing ran");
+        bot.PostCount.ShouldBe(0, "and nobody was asked");
+    }
+
+    /// <summary>The handler a call meets its run's end through: a decision's, a write the Unleashed tier allows, or a write the Standard tier parks for approval.</summary>
+    private static McpRequestHandler EndedRunHandler(EndedAt at, Guid runId, SpyLedger ledger, StubBot bot, FakeTool tool) => at switch
+    {
+        EndedAt.AllowedWriteClaim => new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Unleashed, Guid.NewGuid(), null, runId, ledger, fenceEpoch: 1, governanceEnabled: true),
+        EndedAt.ApprovalClaim => new McpRequestHandler(new FakeRegistry(tool), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, runId, ledger, fenceEpoch: 1, governanceEnabled: true, approvalConversationId: Guid.NewGuid(), bot, new StubWaiters(), new StubComponents()),
+        _ => DecisionHandlerOver(runId, ledger, bot),
+    };
+
+    /// <summary>A decision.request handler with a card surface, over a waiter that arms but is never signalled — the durable row is its only way out of a block.</summary>
+    private static McpRequestHandler DecisionHandlerOver(Guid runId, SpyLedger ledger, StubBot bot) =>
+        new(new FakeRegistry(new DecisionRequestTool()), AgentAutonomyLevel.Standard, Guid.NewGuid(), null, runId, ledger, fenceEpoch: 1, governanceEnabled: true, approvalConversationId: Guid.NewGuid(), bot, new ArmedButNeverSignalledWaiters(), new StubComponents());
+
+    /// <summary>How a re-call learns its decision was closed by its run's end: the claim replays the closed row, or the park finds the row closed under it.</summary>
+    public enum ClosedBy
+    {
+        ClaimReplay,
+        LostPark,
+    }
+
+    [Theory]
+    [InlineData(ClosedBy.ClaimReplay)]
+    [InlineData(ClosedBy.LostPark)]
+    public async Task A_decision_its_runs_end_closed_is_answered_that_the_run_ended(ClosedBy closedBy)
+    {
+        var ledgerId = Guid.NewGuid();
+        var ledger = new SpyLedger
+        {
+            PendingDecisionCount = () => 0,
+            ClaimResult = () => closedBy == ClosedBy.ClaimReplay ? ToolCallClaim.Duplicate(ledgerId, ToolCallLedgerStatus.Expired, null, StoppedRunDecisions.EndedError) : ToolCallClaim.Proceed(ledgerId),
+            BeginApprovalResult = () => false,   // the end closed the row before the park's CAS reached it
+            ApprovalState = () => new ToolCallApprovalState { Status = ToolCallLedgerStatus.Expired, Error = StoppedRunDecisions.EndedError },
+        };
+        var bot = new StubBot { ConversationInTeam = true };
+
+        var result = (await WithinArmRaceBudgetAsync(DecisionHandlerOver(Guid.NewGuid(), ledger, bot).HandleAsync(Parse(Call(DecisionRequestTool.ToolKind, DecisionQuestion)), CancellationToken.None), "a decision its run's end closed")).GetProperty("result");
+
+        result.GetProperty("isError").GetBoolean().ShouldBeTrue();
+        result.GetProperty("content")[0].GetProperty("text").GetString().ShouldBe(StoppedRunDecisions.EndedError, "the closed row's own reason: the run that asked ended before it was answered");
+        bot.PostCount.ShouldBe(0, "a closed question is never put to anyone");
+    }
+
+    [Fact]
+    public async Task A_re_call_of_a_decision_whose_park_never_landed_parks_it_and_posts_its_one_card()
+    {
+        // The first call claimed the row and its park faulted, so it was told to retry. The row is Pending: no queue shows
+        // it and nothing else parks it, so a re-call that only blocked on it waited for an answer nobody could give, and
+        // came back with a ticket every time. The re-call parks it instead, posting the card the first call never did.
+        var ledgerId = Guid.NewGuid();
+        var ledger = new SpyLedger { PendingDecisionCount = () => 0, ClaimResult = () => ToolCallClaim.InFlight(ledgerId), BeginApprovalResult = () => true };
+        ledger.ApprovalState = () => ledger.BegunPark is null
+            ? new ToolCallApprovalState { Status = ToolCallLedgerStatus.Pending }                                                                   // claimed by the first call, never parked
+            : new ToolCallApprovalState { Status = ToolCallLedgerStatus.Succeeded, ResultJson = """{"decisionId":"d","selectedOptions":["a"]}""" };   // parked by this re-call, then answered
+        var bot = new StubBot { ConversationInTeam = true };
+
+        var result = (await WithinArmRaceBudgetAsync(DecisionHandlerOver(Guid.NewGuid(), ledger, bot).HandleAsync(Parse(Call(DecisionRequestTool.ToolKind, DecisionQuestion)), CancellationToken.None), "a re-call of a decision whose park never landed")).GetProperty("result");
+
+        ledger.BegunPark.ShouldNotBeNull("the re-call parks the row the first call claimed");
+        bot.PostCount.ShouldBe(1, "and posts its one card");
+        ledger.ApprovalMessages.ShouldHaveSingleItem().LedgerId.ShouldBe(ledgerId);
+        result.GetProperty("isError").GetBoolean().ShouldBeFalse("the answer to the parked question comes back");
     }
 }

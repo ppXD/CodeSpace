@@ -8,6 +8,7 @@ using CodeSpace.Messages.Agents;
 using CodeSpace.Messages.Decisions;
 using CodeSpace.Messages.Enums;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Storage;
 using Microsoft.Extensions.Logging;
 
 namespace CodeSpace.Core.Services.Agents.Mcp;
@@ -48,13 +49,19 @@ public interface IToolCallLedgerService
     /// leaks the refusal as an ungoverned side effect. (<see cref="AuthorizedMcpRequestHandler"/> only pre-checks
     /// <c>Guard.CheckAsync</c> before delegating to the inner handler — it has no catch of its own.)
     /// </para>
+    ///
+    /// <para>
+    /// Under the same lock it reads whether the run has ENDED, because a run's own end keeps its epoch: a NEW claim on an
+    /// ended run throws <see cref="Exceptions.AgentRunEndedException"/>, which the dispatch answers as final, never as a
+    /// retry. An existing key still replays as above — the refusal is only for a call the run never made.
+    /// </para>
     /// </summary>
     Task<ToolCallClaim> TryClaimAsync(Guid agentRunId, Guid teamId, string toolKind, string idempotencyKey, string inputHash, long fenceEpoch, CancellationToken cancellationToken);
 
     /// <summary>Status-guarded CAS Pending → terminal (mirrors <see cref="AgentRunService"/> completion), team-scoped (defense-in-depth — the design mandates all reads team-scoped). Stores the ALREADY-REDACTED result/error. Throws when the transition is illegal or lost the CAS.</summary>
     Task RecordTerminalAsync(Guid ledgerId, Guid teamId, ToolCallLedgerStatus status, string? resultJson, string? error, CancellationToken cancellationToken);
 
-    /// <summary>Status-guarded CAS Pending → AwaitingApproval (durable mid-turn HITL, item D2 — mirrors <see cref="RecordTerminalAsync"/>'s discipline), team-scoped. Stamps <c>ApprovalToken</c> + <c>ApprovalDeadlineAt</c> so the row is resolvable BEFORE the card posts (the token is the authority; the card's message id is a best-effort follow-up), and in the same write the preview the card is built from and the target a rejection sticks to — so a row awaiting approval never lacks the pins its card showed. Returns false when the CAS is lost (the row already moved — e.g. a re-claim of an already-parked call), so the handler re-reads + re-blocks rather than posting a second card.</summary>
+    /// <summary>Status-guarded CAS Pending → AwaitingApproval (durable mid-turn HITL, item D2 — mirrors <see cref="RecordTerminalAsync"/>'s discipline), team-scoped. Stamps <c>ApprovalToken</c> + <c>ApprovalDeadlineAt</c> so the row is resolvable BEFORE the card posts (the token is the authority; the card's message id is a best-effort follow-up), and in the same write the preview the card is built from and the target a rejection sticks to — so a row awaiting approval never lacks the pins its card showed. Returns false when the CAS is lost (the row already moved — e.g. a re-claim of an already-parked call, or the run's end closed it), so the handler re-reads + re-blocks rather than posting a second card. Never parks a row whose run has ended: one still Pending throws <see cref="Exceptions.AgentRunEndedException"/>.</summary>
     Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, ToolCallApprovalPark park, CancellationToken cancellationToken);
 
     /// <summary>Whether a reviewer rejected a call on <paramref name="approvalTarget"/> earlier in <paramref name="agentRunId"/> — a row of that run and target that a rejection failed (<see cref="ToolCallApprovalResolver.RejectedError"/>). Team-scoped. A target expired unanswered was not rejected.</summary>
@@ -208,15 +215,17 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
         // caller, whose epoch is always >= 1 once Running).
         await using var transaction = await _db.Database.BeginTransactionAsync(cancellationToken).ConfigureAwait(false);
 
-        var lockedEpoch = (await _db.Database.SqlQuery<long>($"SELECT fence_epoch AS \"Value\" FROM agent_run WHERE id = {agentRunId} FOR SHARE")
-            .ToListAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault();
+        var run = await LockRunForClaimAsync(agentRunId, cancellationToken).ConfigureAwait(false);
 
-        if (!AgentRunFence.StillOwns(lockedEpoch, fenceEpoch))
+        if (run.HasEnded) return await ReplayOnEndedRunAsync(transaction, agentRunId, toolKind, idempotencyKey, fenceEpoch, cancellationToken).ConfigureAwait(false);
+
+        // An ended run answers "ended" whatever ended it: a stop, abandon or recovery bumps the epoch too, so the fence
+        // checked first would report it as lost ownership, which the handler answers as a retry.
+        if (!AgentRunFence.StillOwns(run.FenceEpoch, fenceEpoch))
         {
-            await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
-            _db.ChangeTracker.Clear();
+            await AbandonClaimAsync(transaction, cancellationToken).ConfigureAwait(false);
 
-            _logger.LogWarning("Agent run {RunId}: {Note}", agentRunId, AgentRunFence.RefusalNote($"tool-call claim ({toolKind})", lockedEpoch, fenceEpoch));
+            _logger.LogWarning("Agent run {RunId}: {Note}", agentRunId, AgentRunFence.RefusalNote($"tool-call claim ({toolKind})", run.FenceEpoch, fenceEpoch));
 
             throw new AgentRunOwnershipLostException(agentRunId);
         }
@@ -240,6 +249,43 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
 
             return await ReadExistingClaimAsync(agentRunId, idempotencyKey, fenceEpoch, cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    /// <summary>The owning run as a claim sees it: its fence epoch, and whether it has ended.</summary>
+    private sealed record ClaimedRun(long FenceEpoch, bool HasEnded);
+
+    /// <summary>
+    /// Read the run's fence epoch and whether it has ended, together, under the claim's FOR SHARE. A run's own
+    /// completion keeps its epoch, so the fence alone let a call already past the authority guard claim on a run that had
+    /// just finished; a stop, abandon or recovery bumps it, so the end is checked first — the run's end is the answer. Every terminal write takes this row FOR UPDATE, so it either committed first (this
+    /// read sees the run ended) or waits for this claim to commit and then closes the row the claim inserted along with
+    /// the run's other open questions. A run with no row reads epoch 0 and not ended.
+    /// </summary>
+    private async Task<ClaimedRun> LockRunForClaimAsync(Guid agentRunId, CancellationToken cancellationToken) =>
+        (await _db.Database.SqlQuery<ClaimedRun>($"SELECT fence_epoch, status = ANY({TerminalAgentRunStatusNames}) AS has_ended FROM agent_run WHERE id = {agentRunId} FOR SHARE").ToListAsync(cancellationToken).ConfigureAwait(false)).FirstOrDefault() ?? new ClaimedRun(0, false);
+
+    /// <summary>
+    /// A run that has ended takes no NEW call: nothing reads its result any more, and a question claimed now would wait in
+    /// the queue of a finished run, answerable into nothing. A call it already made still replays exactly as on a live run
+    /// — its recorded result, or the close its question got — so the answer an identical re-call gets never changes.
+    /// </summary>
+    private async Task<ToolCallClaim> ReplayOnEndedRunAsync(IDbContextTransaction transaction, Guid agentRunId, string toolKind, string idempotencyKey, long fenceEpoch, CancellationToken cancellationToken)
+    {
+        await AbandonClaimAsync(transaction, cancellationToken).ConfigureAwait(false);
+
+        if (await _db.ToolCallLedger.AsNoTracking().AnyAsync(l => l.AgentRunId == agentRunId && l.IdempotencyKey == idempotencyKey, cancellationToken).ConfigureAwait(false))
+            return await ReadExistingClaimAsync(agentRunId, idempotencyKey, fenceEpoch, cancellationToken).ConfigureAwait(false);
+
+        _logger.LogWarning("Agent run {RunId} has ended; refused a new {ToolKind} tool call", agentRunId, toolKind);
+
+        throw new AgentRunEndedException(agentRunId);
+    }
+
+    /// <summary>Roll back a claim that will not insert, and drop the Pending row it staged.</summary>
+    private async Task AbandonClaimAsync(IDbContextTransaction transaction, CancellationToken cancellationToken)
+    {
+        await transaction.RollbackAsync(cancellationToken).ConfigureAwait(false);
+        _db.ChangeTracker.Clear();
     }
 
     public async Task RecordTerminalAsync(Guid ledgerId, Guid teamId, ToolCallLedgerStatus status, string? resultJson, string? error, CancellationToken cancellationToken)
@@ -279,15 +325,43 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
 
     public async Task<bool> TryBeginApprovalAsync(Guid ledgerId, Guid teamId, ToolCallApprovalPark park, CancellationToken cancellationToken)
     {
+        if (await ParkUnlessRunEndedAsync(ledgerId, teamId, park, cancellationToken).ConfigureAwait(false))
+        {
+            _logger.LogInformation("Tool call ledger awaiting approval. LedgerId={LedgerId}", ledgerId);
+
+            return true;
+        }
+
+        // Still Pending after a lost CAS can only mean its run has ended: nothing moves a row back to Pending, so the
+        // status guard did not stop it, and the run predicate did — and an ended run stays ended.
+        if (await PendingRowRunAsync(ledgerId, teamId, cancellationToken).ConfigureAwait(false) is { } runId)
+            throw new AgentRunEndedException(runId);
+
+        return false;
+    }
+
+    /// <summary>
+    /// Status-guarded CAS Pending → AwaitingApproval (mirrors RecordTerminalAsync's ExecuteUpdate discipline), unless the
+    /// row's run has ended. The Status == Pending guard is the single-winner: a concurrent transition (a re-claim that
+    /// already parked, a racing terminal) leaves the row not-Pending so this update affects 0 rows, and the caller re-reads
+    /// + re-blocks instead of posting a second card. The preview and target ride the same write: a parked row always
+    /// carries the pins its card showed.
+    ///
+    /// <para>The run predicate READS the run and never locks it. Every terminal write locks the run's questions and then
+    /// the run (<see cref="StoppedRunDecisions"/>), so a park that locked the run and then waited on its question would
+    /// hold what the end waits for while waiting on what the end holds — a deadlock. This UPDATE holds only its own row,
+    /// for its own statement: a park that queues behind an end holding that row re-checks it once the end commits and
+    /// finds it Expired (the end closes Pending questions too); one that runs after the end sees the run ended. Only a
+    /// park whose read began before a stop's flip committed can still land. For a decision.request row the stop's own
+    /// close, which runs after its flip, then expires it; a write-approval row parked in that window waits for the
+    /// deadline reaper.</para>
+    /// </summary>
+    private async Task<bool> ParkUnlessRunEndedAsync(Guid ledgerId, Guid teamId, ToolCallApprovalPark park, CancellationToken cancellationToken)
+    {
         var now = DateTimeOffset.UtcNow;
 
-        // Status-guarded CAS Pending → AwaitingApproval (mirrors RecordTerminalAsync's ExecuteUpdate discipline). The
-        // Status == Pending guard is the single-winner: a concurrent transition (a re-claim that already parked, a
-        // racing terminal) leaves the row not-Pending so this update affects 0 rows → false, and the caller re-reads
-        // + re-blocks instead of posting a second card. The preview and target ride the same write: a parked row always
-        // carries the pins its card showed.
         var flipped = await _db.ToolCallLedger
-            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.Pending)
+            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.Pending && !_db.AgentRun.Any(r => r.Id == l.AgentRunId && TerminalAgentRunStatuses.Contains(r.Status)))
             .ExecuteUpdateAsync(s => s
                 .SetProperty(l => l.Status, ToolCallLedgerStatus.AwaitingApproval)
                 .SetProperty(l => l.ApprovalToken, park.Token)
@@ -297,10 +371,15 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
                 .SetProperty(l => l.LastModifiedDate, now), cancellationToken)
             .ConfigureAwait(false);
 
-        if (flipped > 0) _logger.LogInformation("Tool call ledger awaiting approval. LedgerId={LedgerId}", ledgerId);
-
         return flipped > 0;
     }
+
+    /// <summary>The run of <paramref name="ledgerId"/> while that row is still Pending (team-scoped), else null.</summary>
+    private async Task<Guid?> PendingRowRunAsync(Guid ledgerId, Guid teamId, CancellationToken cancellationToken) =>
+        await _db.ToolCallLedger.AsNoTracking()
+            .Where(l => l.Id == ledgerId && l.TeamId == teamId && l.Status == ToolCallLedgerStatus.Pending)
+            .Select(l => (Guid?)l.AgentRunId)
+            .SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
 
     public async Task SetApprovalMessageAsync(Guid ledgerId, Guid teamId, Guid messageId, CancellationToken cancellationToken) =>
         // Best-effort, idempotent (the approval_message_id IS NULL guard → exactly one card recorded per row). The
@@ -451,6 +530,9 @@ public sealed class ToolCallLedgerService : IToolCallLedgerService, IScopedDepen
 
     /// <summary>The terminal <see cref="AgentRunStatus"/> set, derived ONCE from the state machine so the stranded-reaper predicate can't drift from <see cref="AgentRunStateMachine.IsTerminal"/> (mirrors the StuckRunReconciler's NonTerminalDecisionStatuses discipline).</summary>
     private static readonly AgentRunStatus[] TerminalAgentRunStatuses = Enum.GetValues<AgentRunStatus>().Where(AgentRunStateMachine.IsTerminal).ToArray();
+
+    /// <summary>The same set as stored, for the raw SQL of the claim's status read.</summary>
+    private static readonly string[] TerminalAgentRunStatusNames = TerminalAgentRunStatuses.Select(status => status.ToString()).ToArray();
 
     public async Task<int> ExpireStaleToolCallsAsync(DateTimeOffset now, CancellationToken cancellationToken)
     {

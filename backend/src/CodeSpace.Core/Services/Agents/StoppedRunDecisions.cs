@@ -8,8 +8,8 @@ namespace CodeSpace.Core.Services.Agents;
 
 /// <summary>
 /// Closes the decisions a stopped agent run left unanswered. An agent raises a <c>decision.request</c> mid-run and
-/// blocks on it as an AwaitingApproval ledger row; a cancel or the reconciler's abandon ends the run, but nothing ended
-/// that row, so the question stayed in the team queue and on the Room — answerable into a run that no longer exists,
+/// blocks on it as an AwaitingApproval ledger row — Pending between its claim and its park; a cancel or the reconciler's
+/// abandon ends the run, but nothing ended that row, so the question stayed in the team queue and on the Room — answerable into a run that no longer exists,
 /// and for a human-required decision forever, since the decision reaper only ever defers those. The stop closes them
 /// here instead, as <see cref="ToolCallLedgerStatus.Expired"/>: the no-decision terminal every pending-decision reader
 /// already excludes. A run that ends on its own — its completion, or its recovery from the spool — closes them the same
@@ -80,9 +80,11 @@ public static class StoppedRunDecisions
 
     /// <summary>
     /// The CAS itself: every still-unanswered <c>decision.request</c> row <paramref name="agentRunId"/> raised → Expired,
-    /// stamped with <paramref name="reason"/>. It locks the rows in id order before it writes them, in the one statement —
-    /// the order <see cref="LockAsync"/> takes them in; a plain UPDATE locks them in whatever order its scan meets them.
+    /// stamped with <paramref name="reason"/> — the parked ones, and the ones claimed but not yet parked, which would
+    /// otherwise survive the end Pending and then park on the finished run. It locks the rows in id order before it writes
+    /// them, in the one statement — the order <see cref="LockAsync"/> takes them in; a plain UPDATE locks them in whatever
+    /// order its scan meets them.
     /// </summary>
     public static async Task ExpireAsync(CodeSpaceDbContext db, Guid agentRunId, string reason, CancellationToken cancellationToken) =>
-        await db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM tool_call_ledger WHERE agent_run_id = {agentRunId} AND tool_kind = {DecisionToolKinds.DecisionRequest} AND status = {nameof(ToolCallLedgerStatus.AwaitingApproval)} AND approved_at IS NULL ORDER BY id FOR UPDATE) UPDATE tool_call_ledger AS target SET status = {nameof(ToolCallLedgerStatus.Expired)}, error = {reason}, last_modified_date = {DateTimeOffset.UtcNow} FROM locked WHERE target.id = locked.id AND target.status = {nameof(ToolCallLedgerStatus.AwaitingApproval)} AND target.approved_at IS NULL", cancellationToken).ConfigureAwait(false);
+        await db.Database.ExecuteSqlInterpolatedAsync($"WITH locked AS MATERIALIZED (SELECT id FROM tool_call_ledger WHERE agent_run_id = {agentRunId} AND tool_kind = {DecisionToolKinds.DecisionRequest} AND status IN ({nameof(ToolCallLedgerStatus.Pending)}, {nameof(ToolCallLedgerStatus.AwaitingApproval)}) AND approved_at IS NULL ORDER BY id FOR UPDATE) UPDATE tool_call_ledger AS target SET status = {nameof(ToolCallLedgerStatus.Expired)}, error = {reason}, last_modified_date = {DateTimeOffset.UtcNow} FROM locked WHERE target.id = locked.id AND target.status IN ({nameof(ToolCallLedgerStatus.Pending)}, {nameof(ToolCallLedgerStatus.AwaitingApproval)}) AND target.approved_at IS NULL", cancellationToken).ConfigureAwait(false);
 }
