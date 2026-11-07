@@ -52,6 +52,12 @@ namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 ///       this wait kind had NO backstop until now — a lost deadline would strand the run on the park ladder
 ///       FOREVER, even once the model plane recovered. Re-fire the same deadline resume; idempotent against the
 ///       real (late) job via the resume's still-Pending gate.</item>
+///   <item><b>Unwaited sub-workflow child</b> (a live <c>workflow.child</c> run past a 2-min staging grace that no live
+///       run holds a Pending <c>Subworkflow</c> wait for) — its parent ended without reaching it (the engine's failure
+///       cleanup cancels only a child still Pending or Enqueued; a stop's cancel of a child can fail), or moved on without
+///       it (a Continue's re-walk stages a fresh child). Nothing will ever read its result, yet a timer or an agent can
+///       keep it spending. Cancelled through the full run cancel, FIRST in the tick, so no sweep after it revives one;
+///       every wake sweep also leaves out a child whose parent has finished, and the dispatcher refuses one.</item>
 /// </list>
 ///
 /// <para>Idempotent + safe to call concurrently from multiple replicas because every state
@@ -88,5 +94,8 @@ public sealed record StuckRunReconcileSummary
     /// <summary>Stranded Subworkflow parents re-fired because the child's inline on-completion resume was lost (a crash between the child's terminal commit and the resume). 0 when no parent is parked on a terminal child.</summary>
     public int RecoveredStrandedSubworkflowParent { get; init; }
 
-    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun + ReleasedRerunLeases + RecoveredStrandedTimerWait + RecoveredStrandedSupervisorInfraParkWait + RecoveredStrandedSubworkflowParent;
+    /// <summary>Sub-workflow children cancelled because no live run holds a Pending Subworkflow wait naming them — a parent that ended without reaching them, or moved on without them. 0 when every live child is waited for.</summary>
+    public int CancelledUnwaitedChildRun { get; init; }
+
+    public int Total => RedispatchedFromPending + RevertedFromEnqueued + MarkedAbandonedFromRunning + RedispatchedFromStrandedSuspended + RecoveredSupervisorAdvance + RecoveredAbandonedSupervisorRun + ReleasedRerunLeases + RecoveredStrandedTimerWait + RecoveredStrandedSupervisorInfraParkWait + RecoveredStrandedSubworkflowParent + CancelledUnwaitedChildRun;
 }

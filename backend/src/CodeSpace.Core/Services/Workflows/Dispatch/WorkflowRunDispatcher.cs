@@ -10,7 +10,7 @@ namespace CodeSpace.Core.Services.Workflows.Dispatch;
 
 /// <summary>
 /// Atomic CAS + revert-on-throw isolated from the three call sites (manual run, replay run,
-/// webhook dispatcher).
+/// webhook dispatcher), behind a refusal of any sub-workflow child whose parent run has finished.
 /// </summary>
 public sealed class WorkflowRunDispatcher : IWorkflowRunDispatcher, IScopedDependency
 {
@@ -27,6 +27,8 @@ public sealed class WorkflowRunDispatcher : IWorkflowRunDispatcher, IScopedDepen
 
     public async Task<bool> DispatchAsync(Guid runId, CancellationToken cancellationToken)
     {
+        if (await HasFinishedAncestorAsync(runId, cancellationToken).ConfigureAwait(false)) return RefuseUnderFinishedAncestor(runId);
+
         // Atomic CAS — Pending → Enqueued.
         // ExecuteUpdateAsync emits a single UPDATE ... WHERE Status = Pending statement.
         // Two concurrent callers (e.g. RunManuallyAsync + a reconciler that found the same
@@ -88,5 +90,23 @@ public sealed class WorkflowRunDispatcher : IWorkflowRunDispatcher, IScopedDepen
 
             throw;
         }
+    }
+
+    /// <summary>
+    /// Whether the run is a sub-workflow child whose ancestry has finished. Every resume, revive and reconciler re-dispatch comes
+    /// through here, so this is the last door before a worker walks the run: a child whose parent has ended — a timer still firing
+    /// after the parent failed, say — would run toward a wait nothing holds open any more, spending for no one.
+    /// </summary>
+    private async Task<bool> HasFinishedAncestorAsync(Guid runId, CancellationToken cancellationToken) =>
+        await RunAncestry.HasFinishedAncestorAsync(runId, id => LoadHopAsync(id, cancellationToken)).ConfigureAwait(false);
+
+    private async Task<RunAncestry.Hop?> LoadHopAsync(Guid runId, CancellationToken cancellationToken) =>
+        await _db.WorkflowRun.AsNoTracking().Where(r => r.Id == runId).Select(r => new RunAncestry.Hop(r.SourceType, r.ParentRunId, r.Status)).SingleOrDefaultAsync(cancellationToken).ConfigureAwait(false);
+
+    /// <summary>Leave the run as it is — Pending, if a resume flipped it — for the stuck-run reconciler, which cancels a sub-workflow child no live parent waits for.</summary>
+    private bool RefuseUnderFinishedAncestor(Guid runId)
+    {
+        _logger.LogInformation("WorkflowRunDispatcher: run {RunId} not dispatched — it is a sub-workflow whose parent run has finished, so nothing is waiting for it", runId);
+        return false;
     }
 }

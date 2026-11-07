@@ -151,8 +151,8 @@ public interface IWorkflowService
     /// teardown kills its agents and cancels its own children) — and emit a <c>run.cancelled</c>
     /// ledger record. The teardown is best-effort, so one agent's failed kill never strands the other agents, and one
     /// child's failed cancel never strands its siblings or the run's remaining waits. The agent-run reconciler's
-    /// parent-run-terminal guard re-cleans an agent run the teardown missed, and the stuck-run reconciler never dispatches
-    /// a child still staged under a finished parent; nothing stops a child that had already started.
+    /// parent-run-terminal guard re-cleans an agent run the teardown missed, and a child the teardown left live — staged or
+    /// started — is no longer waited for: the dispatcher will not queue it and the stuck-run reconciler cancels it.
     /// The teardown runs after the terminal commits and does not stop when the request that asked for it goes away — and
     /// the response waits for it across the whole sub-tree: every descendant's agents, children and waits are torn down
     /// before this returns. Returning at the commit instead is a follow-up, not built: a <c>TearDownStoppedRunAsync</c>
@@ -171,17 +171,19 @@ public interface IWorkflowService
     /// Cancelled run, whose halting / interrupted steps re-run where they stopped. CAS → Pending then post-commit
     /// dispatch. TEAM-SCOPED: a foreign run throws <see cref="KeyNotFoundException"/> (404). Returns <c>true</c> if this
     /// call drove it; <c>false</c> when the run is Success / Running, still parked on a pending wait (use
-    /// <c>/resume</c>), has nothing to re-run in place, or the CAS lost to a concurrent continue. Idempotent + race-safe
+    /// <c>/resume</c>), has nothing to re-run in place, is a sub-workflow child with a finished ancestor (continue the parent
+    /// instead; nothing waits for the child), or the CAS lost to a concurrent continue. Idempotent + race-safe
     /// (the dispatcher's Pending → Enqueued CAS is the double-dispatch guard).
     ///
     /// <para>Reviving a terminal run starts a new run generation: a walk still winding down from the stop or failure,
     /// and a stop's teardown still in flight, carry the old one and touch nothing of the revived run. The revive also
     /// closes, in the same transaction, what the ended attempt left pending — its waits Discarded, its queued and
-    /// running agents cancelled, its staged child runs cancelled — so the revived run never parks on, reuses or folds
-    /// as its own work a late teardown then ends. A running agent gets only its row flipped there; its process kill,
-    /// credential revoke and spend settlement run once that commit is visible, and a stop's teardown landing later
-    /// loses every CAS on what the revive already ended. A Continue after a Failure, which has no teardown, gets its
-    /// kills from the revive alone.</para>
+    /// running agents cancelled — so the revived run never parks on, reuses or folds as its own work a late teardown
+    /// then ends. A running agent gets only its row flipped there; its process kill, credential revoke and spend
+    /// settlement run once that commit is visible, and so does the full cancel of every sub-workflow child the ended
+    /// attempt left live, staged or started: the revived walk stages its own, so nothing waits for the old one. A stop's
+    /// teardown landing later loses every CAS on what the revive already ended. A Continue after a Failure, which has no
+    /// teardown, gets its kills from the revive alone.</para>
     ///
     /// <para>A step the continue re-runs starts over, because a wait the stop or failure closed carries no answer. So a
     /// <c>flow.sleep</c> parks a fresh timer for its FULL delay — the time it already slept is not credited — and a

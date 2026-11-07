@@ -16,8 +16,9 @@ namespace CodeSpace.Core.Services.Workflows.Reconciliation;
 /// <summary>
 /// Four independent sweeps, one per stuck-state class. Order matters less than you'd think
 /// — each sweep's CAS protects against racing a normal flow or another reconciler tick.
+/// The one that must lead is <see cref="CancelUnwaitedChildRunsAsync"/>: no sweep after it revives what it cancels.
 /// </summary>
-public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, IScopedDependency
+public sealed partial class StuckRunReconcilerService : IStuckRunReconcilerService, IScopedDependency
 {
     /// <summary>Threshold for "Pending too long" — past this, re-dispatch.</summary>
     public static readonly TimeSpan PendingStuckAfter = TimeSpan.FromMinutes(2);
@@ -99,15 +100,17 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     private readonly IWorkflowResumeService _resumeService;
     private readonly ISubworkflowService _subworkflowService;
     private readonly IRunRecordLogger _recordLogger;
+    private readonly IWorkflowService _workflowService;
     private readonly ILogger<StuckRunReconcilerService> _logger;
 
-    public StuckRunReconcilerService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, IWorkflowResumeService resumeService, ISubworkflowService subworkflowService, IRunRecordLogger recordLogger, ILogger<StuckRunReconcilerService> logger)
+    public StuckRunReconcilerService(CodeSpaceDbContext db, IWorkflowRunDispatcher dispatcher, IWorkflowResumeService resumeService, ISubworkflowService subworkflowService, IRunRecordLogger recordLogger, IWorkflowService workflowService, ILogger<StuckRunReconcilerService> logger)
     {
         _db = db;
         _dispatcher = dispatcher;
         _resumeService = resumeService;
         _subworkflowService = subworkflowService;
         _recordLogger = recordLogger;
+        _workflowService = workflowService;
         _logger = logger;
     }
 
@@ -137,6 +140,10 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
 
         var recoveredSubworkflowParents = await RecoverStrandedSubworkflowParentsAsync(cancellationToken).ConfigureAwait(false);
 
+        // LAST: every cancel is a full teardown (agent kill wave) — slow — and the wake sweeps above already skip, and the dispatcher
+        // already refuses, a child whose parent has finished, so the cheap sweeps never wait on this one.
+        var cancelledUnwaitedChildren = await CancelUnwaitedChildRunsAsync(cancellationToken).ConfigureAwait(false);
+
         var summary = new StuckRunReconcileSummary
         {
             RedispatchedFromPending = redispatched,
@@ -149,12 +156,13 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             RecoveredStrandedTimerWait = recoveredTimerWaits,
             RecoveredStrandedSupervisorInfraParkWait = recoveredInfraParkWaits,
             RecoveredStrandedSubworkflowParent = recoveredSubworkflowParents,
+            CancelledUnwaitedChildRun = cancelledUnwaitedChildren,
         };
 
         if (summary.Total > 0)
             _logger.LogInformation(
-                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}, rerunLeasesReleased={RerunLeasesReleased}, timerWaitsRecovered={TimerWaitsRecovered}, infraParkWaitsRecovered={InfraParkWaitsRecovered}, subworkflowParentsRecovered={SubworkflowParentsRecovered}",
-                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun, summary.ReleasedRerunLeases, summary.RecoveredStrandedTimerWait, summary.RecoveredStrandedSupervisorInfraParkWait, summary.RecoveredStrandedSubworkflowParent);
+                "StuckRunReconciler: redispatched={Redispatched}, reverted={Reverted}, abandoned={Abandoned}, unstranded={Unstranded}, supervisorAdvances={SupervisorAdvances}, supervisorRunsRecovered={SupervisorRunsRecovered}, rerunLeasesReleased={RerunLeasesReleased}, timerWaitsRecovered={TimerWaitsRecovered}, infraParkWaitsRecovered={InfraParkWaitsRecovered}, subworkflowParentsRecovered={SubworkflowParentsRecovered}, unwaitedChildrenCancelled={UnwaitedChildrenCancelled}",
+                summary.RedispatchedFromPending, summary.RevertedFromEnqueued, summary.MarkedAbandonedFromRunning, summary.RedispatchedFromStrandedSuspended, summary.RecoveredSupervisorAdvance, summary.RecoveredAbandonedSupervisorRun, summary.ReleasedRerunLeases, summary.RecoveredStrandedTimerWait, summary.RecoveredStrandedSupervisorInfraParkWait, summary.RecoveredStrandedSubworkflowParent, summary.CancelledUnwaitedChildRun);
 
         return summary;
     }
@@ -163,17 +171,15 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// Pending older than threshold: call DispatchAsync. The dispatcher's own CAS prevents
     /// double-dispatch if a normal flow is racing us; we just hand the id back into the
     /// queue and Hangfire takes it from there.
-    /// <para>Never a sub-workflow child whose parent has finished — one whose cancel failed during its parent's stop, say.
-    /// Dispatched, it would run under the finished parent toward a wait that parent no longer holds open; no one is waiting
-    /// for it. The guard is by source type because <c>ParentRunId</c> is also a rerun's lineage, finished by definition.</para>
+    /// <para>Never a sub-workflow child whose parent has finished (<see cref="RunsWithNoFinishedParent"/>) — one whose cancel
+    /// failed during its parent's stop, say. No one is waiting for it; <see cref="CancelUnwaitedChildRunsAsync"/> cancels it.</para>
     /// </summary>
     private async Task<int> RedispatchStuckPendingAsync(CancellationToken cancellationToken)
     {
         var threshold = DateTimeOffset.UtcNow - PendingStuckAfter;
 
-        var stuckIds = await _db.WorkflowRun.AsNoTracking()
-            .Where(r => r.Status == WorkflowRunStatus.Pending && r.CreatedDate < threshold
-                        && !(r.SourceType == WorkflowRunSourceTypes.ChildWorkflow && _db.WorkflowRun.Any(p => p.Id == r.ParentRunId && TerminalRunStatuses.Contains(p.Status))))
+        var stuckIds = await RunsWithNoFinishedParent.AsNoTracking()
+            .Where(r => r.Status == WorkflowRunStatus.Pending && r.CreatedDate < threshold)
             .OrderBy(r => r.CreatedDate)
             .Take(BatchSize)
             .Select(r => r.Id)
@@ -236,7 +242,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         // (or has no ledger at all). The outer join via a sub-select keeps this to a single
         // round-trip; the resulting IDs are the candidates we mark.
         var candidates = await (
-            from run in _db.WorkflowRun.AsNoTracking()
+            from run in RunsWithNoFinishedParent.AsNoTracking()   // an orphaned child is cancelled with its teardown by CancelUnwaitedChildRunsAsync, not failed bare
             where run.Status == WorkflowRunStatus.Running && run.StartedAt < runningThreshold
             let mostRecentLedger = _db.WorkflowRunRecord.AsNoTracking()
                 .Where(rec => rec.RunId == run.Id)
@@ -308,10 +314,9 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
     /// concurrent resume that already drove the run (its flip won) leaves us with 0 rows → we skip,
     /// no double-dispatch. The resolved waits rehydrate as the suspended nodes' ResumePayloads on the
     /// re-walk, so the run continues from where it stranded.</para>
-    /// <para>Never a sub-workflow child whose parent has finished — one whose cancel failed during its parent's stop and whose
-    /// waits were then closed, say. Revived, it would run under the finished parent toward a wait that parent no longer holds
-    /// open; no one is waiting for it. It is left as it is and counted in the log, so it does not linger unseen. The guard is
-    /// by source type, as the Pending sweep's is, because <c>ParentRunId</c> is also a rerun's lineage, finished by definition.</para>
+    /// <para>Never a sub-workflow child whose parent has finished (<see cref="RunsWithNoFinishedParent"/>) — one whose cancel
+    /// failed during its parent's stop and whose waits were then closed, say. No one is waiting for it;
+    /// <see cref="CancelUnwaitedChildRunsAsync"/> cancels it.</para>
     /// </summary>
     private async Task<int> RedispatchStrandedSuspendedAsync(CancellationToken cancellationToken)
     {
@@ -347,28 +352,22 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
 
     /// <summary>
     /// The stranded Suspended runs to revive this tick, oldest first, at most <see cref="BatchSize"/> — leaving out each
-    /// sub-workflow child whose parent has finished, and saying in the log how many it left. The exclusion is in the query,
-    /// not the loop: a child left alone stays Suspended, so one that took a place in the batch would take it every tick and
-    /// crowd out the runs that are wanted.
+    /// sub-workflow child whose parent has finished. The exclusion is in the query, not the loop: a child left out that took a
+    /// place in the batch would take it every tick its cancel failed and crowd out the runs that are wanted.
     /// </summary>
     private async Task<List<Guid>> FindStrandedSuspendedIdsAsync(CancellationToken cancellationToken)
     {
         var threshold = DateTimeOffset.UtcNow - SuspendedStrandedAfter;
 
-        var stranded = _db.WorkflowRun.AsNoTracking()
+        return await RunsWithNoFinishedParent.AsNoTracking()
             .Where(r => r.Status == WorkflowRunStatus.Suspended
                         && r.LastModifiedDate < threshold
                         && r.CompletionParkedAt == null
                         && !_db.WorkflowRunWait.Any(w => w.RunId == r.Id && w.Status == WorkflowWaitStatuses.Pending))
-            .Select(r => new { r.Id, r.LastModifiedDate, ParentFinished = r.SourceType == WorkflowRunSourceTypes.ChildWorkflow && _db.WorkflowRun.Any(p => p.Id == r.ParentRunId && TerminalRunStatuses.Contains(p.Status)) });
-
-        var strandedIds = await stranded.Where(r => !r.ParentFinished).OrderBy(r => r.LastModifiedDate).Take(BatchSize).Select(r => r.Id).ToListAsync(cancellationToken).ConfigureAwait(false);
-
-        var leftAlone = await stranded.CountAsync(r => r.ParentFinished, cancellationToken).ConfigureAwait(false);
-
-        if (leftAlone > 0) _logger.LogInformation("StuckRunReconciler: left {Count} stranded Suspended sub-workflow(s) alone because their parent has finished", leftAlone);
-
-        return strandedIds;
+            .OrderBy(r => r.LastModifiedDate)
+            .Take(BatchSize)
+            .Select(r => r.Id)
+            .ToListAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -407,7 +406,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
             .Where(w => w.WaitKind == WorkflowWaitKinds.SupervisorDecision
                         && w.Status == WorkflowWaitStatuses.Pending
                         && w.CreatedAt < threshold
-                        && _db.WorkflowRun.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
+                        && RunsWithNoFinishedParent.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
             .OrderBy(w => w.CreatedAt)
             .Take(BatchSize)
             .Select(w => new { w.RunId, w.Id })
@@ -452,7 +451,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
                         && w.Status == WorkflowWaitStatuses.Pending
                         && w.WakeAt != null
                         && w.WakeAt < threshold
-                        && _db.WorkflowRun.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
+                        && RunsWithNoFinishedParent.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
             .OrderBy(w => w.WakeAt)
             .Take(BatchSize)
             .Select(w => new { w.RunId, w.Id })
@@ -503,7 +502,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
                         && w.WakeAt != null
                         && w.WakeAt < threshold
                         && w.PayloadJson != null
-                        && _db.WorkflowRun.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
+                        && RunsWithNoFinishedParent.Any(r => r.Id == w.RunId && r.Status == WorkflowRunStatus.Suspended))
             .OrderBy(w => w.WakeAt)
             .Take(BatchSize)
             .Select(w => new { w.Id, w.PayloadJson })
@@ -639,7 +638,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         var livenessThreshold = DateTimeOffset.UtcNow - LedgerLivenessWindow;
 
         return await (
-            from run in _db.WorkflowRun.AsNoTracking()
+            from run in RunsWithNoFinishedParent.AsNoTracking()
             where run.Status == WorkflowRunStatus.Running && run.StartedAt < runningThreshold
             let mostRecentLedger = _db.WorkflowRunRecord.AsNoTracking().Where(rec => rec.RunId == run.Id).Max(rec => (DateTimeOffset?)rec.OccurredAt)
             where mostRecentLedger == null || mostRecentLedger < livenessThreshold
@@ -708,7 +707,7 @@ public sealed class StuckRunReconcilerService : IStuckRunReconcilerService, ISco
         var livenessThreshold = DateTimeOffset.UtcNow - LedgerLivenessWindow;
 
         var candidates = await (
-            from run in _db.WorkflowRun.AsNoTracking()
+            from run in RunsWithNoFinishedParent.AsNoTracking()
             where run.Status == WorkflowRunStatus.Running && run.StartedAt < runningThreshold
             let mostRecentLedger = _db.WorkflowRunRecord.AsNoTracking().Where(rec => rec.RunId == run.Id).Max(rec => (DateTimeOffset?)rec.OccurredAt)
             where mostRecentLedger == null || mostRecentLedger < livenessThreshold
