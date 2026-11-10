@@ -46,7 +46,8 @@ public sealed class ReceiveExternalTriggerCommandHandler(IExternalTriggerIngress
     public async Task<ExternalTriggerDeliveryOutcome> Handle(ReceiveExternalTriggerCommand request, CancellationToken cancellationToken)
     {
         var outcome = await ingress.ReceiveAsync(new ExternalTriggerCall(
-                request.TriggerId, request.PresentedKey, request.IdempotencyKey, string.Empty, request.IdempotencyRejected, request.Body),
+                request.TriggerId, request.PresentedKey, request.IdempotencyKey, string.Empty, request.IdempotencyRejected,
+                request.Body, DedupeKey: request.DedupeKey),
             cancellationToken).ConfigureAwait(false);
 
         return new ExternalTriggerDeliveryOutcome

@@ -22,7 +22,14 @@ public sealed record ExternalTriggerVerification(
     string ActivationSnapshotJson,
     JsonElement InputSchema);
 
-public sealed record ExternalTriggerCall(Guid TriggerId, string? PresentedKey, string? IdempotencyKey, string RawBody, bool IdempotencyRejected, JsonElement? ParsedBody = null);
+public sealed record ExternalTriggerCall(
+    Guid TriggerId,
+    string? PresentedKey,
+    string? IdempotencyKey,
+    string RawBody,
+    bool IdempotencyRejected,
+    JsonElement? ParsedBody = null,
+    string? DedupeKey = null);
 
 public sealed record ExternalTriggerOutcome(ExternalTriggerOutcomeKind Kind, Guid RunId, IReadOnlyList<string> Errors, string? Code = null);
 

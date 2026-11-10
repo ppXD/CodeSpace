@@ -322,6 +322,89 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
         (await RunsAsync(seed)).Length.ShouldBe(2);
     }
 
+    [Theory]
+    [InlineData("same-key", "same-key")]
+    [InlineData("query-key", "header-key")]
+    public async Task A_dedupe_key_and_idempotency_header_are_rejected_together(string dedupeKey, string idempotencyKey)
+    {
+        var seed = await SeedAsync();
+        using var response = await PostAsync(Url(seed) + "?dedupeKey=" + Uri.EscapeDataString(dedupeKey), BODY,
+            apiKey: seed.Key, idempotencyKey: idempotencyKey);
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        payload.GetProperty("errors").EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { "dedupeKey and Idempotency-Key cannot be used together" });
+        await ShouldHaveNoRequestsAsync(seed);
+    }
+
+    [Fact]
+    public async Task An_invalid_dedupe_key_is_400_and_starts_nothing()
+    {
+        var seed = await SeedAsync();
+        foreach (var key in new[] { "bad key", string.Empty, new string('a', 201) })
+        {
+            using var response = await PostAsync(Url(seed) + "?dedupeKey=" + Uri.EscapeDataString(key), BODY, apiKey: seed.Key);
+            response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+            var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+            payload.GetProperty("errors").EnumerateArray().Select(e => e.GetString())
+                .ShouldBe(new[] { "dedupeKey must be at most 200 characters from [A-Za-z0-9._~-]" });
+        }
+        await ShouldHaveNoRequestsAsync(seed);
+    }
+
+    [Fact]
+    public async Task A_dedupe_key_is_not_a_credential()
+    {
+        var seed = await SeedAsync();
+        using var response = await PostAsync(Url(seed) + "?dedupeKey=seq-429-window", BODY, apiKey: "wrong");
+        response.StatusCode.ShouldBe(HttpStatusCode.Unauthorized);
+        await ShouldHaveNoRequestsAsync(seed);
+    }
+
+    [Fact]
+    public async Task The_same_dedupe_key_is_scoped_to_each_trigger()
+    {
+        var firstSeed = await SeedAsync();
+        var secondSeed = await SeedAsync();
+        using var first = await PostAsync(Url(firstSeed) + "?dedupeKey=shared-window", BODY, apiKey: firstSeed.Key);
+        using var second = await PostAsync(Url(secondSeed) + "?dedupeKey=shared-window", BODY, apiKey: secondSeed.Key);
+        first.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+        second.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+        var firstRunId = (await first.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("runId").GetGuid();
+        var secondRunId = (await second.Content.ReadFromJsonAsync<JsonElement>()).GetProperty("runId").GetGuid();
+        firstRunId.ShouldNotBe(secondRunId);
+        (await RunsAsync(firstSeed)).ShouldHaveSingleItem().ShouldBe(firstRunId);
+        (await RunsAsync(secondSeed)).ShouldHaveSingleItem().ShouldBe(secondRunId);
+    }
+
+    [Fact]
+    public async Task Reusing_an_idempotency_header_with_different_body_is_422()
+    {
+        var seed = await SeedAsync();
+        using var first = await PostAsync(Url(seed), BODY, apiKey: seed.Key, idempotencyKey: "evt-conflict");
+        using var second = await PostAsync(Url(seed), """{"service":"different"}""", apiKey: seed.Key, idempotencyKey: "evt-conflict");
+        first.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+        second.StatusCode.ShouldBe(HttpStatusCode.UnprocessableEntity);
+        var payload = await second.Content.ReadFromJsonAsync<JsonElement>();
+        payload.GetProperty("code").GetString().ShouldBe("external_trigger_idempotency_conflict");
+        (await RunsAsync(seed)).ShouldHaveSingleItem();
+    }
+
+    [Fact]
+    public async Task A_dedupe_key_answers_200_with_the_first_run_id_even_when_the_body_changes()
+    {
+        var seed = await SeedAsync();
+        using var first = await PostAsync(Url(seed) + "?dedupeKey=seq-429-window", BODY, apiKey: seed.Key);
+        using var second = await PostAsync(Url(seed) + "?dedupeKey=seq-429-window", """{"service":"different"}""", apiKey: seed.Key);
+        first.StatusCode.ShouldBe(HttpStatusCode.Accepted);
+        second.StatusCode.ShouldBe(HttpStatusCode.OK);
+        var accepted = await first.Content.ReadFromJsonAsync<JsonElement>();
+        var repeated = await second.Content.ReadFromJsonAsync<JsonElement>();
+        repeated.GetProperty("deduplicated").GetBoolean().ShouldBeTrue();
+        repeated.GetProperty("runId").GetGuid().ShouldBe(accepted.GetProperty("runId").GetGuid());
+        (await RunsAsync(seed)).ShouldHaveSingleItem().ShouldBe(accepted.GetProperty("runId").GetGuid());
+    }
+
     [Fact]
     public async Task A_deduplicated_delivery_answers_200_with_the_first_run_id()
     {

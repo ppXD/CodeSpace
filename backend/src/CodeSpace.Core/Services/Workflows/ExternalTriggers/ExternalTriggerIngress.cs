@@ -22,7 +22,7 @@ namespace CodeSpace.Core.Services.Workflows.ExternalTriggers;
 /// Each call resolves the live activation afresh because ReplaceActivationsAsync rebuilds every row on workflow save.
 /// The latest version's node id binds the credential to its original node; replacing a node must not revive its old key.
 /// Its node config also supplies the input contract so identity and validation use the same definition version.
-/// No Idempotency-Key means no deduplication: identical bodies can represent distinct real events, not just retries.
+/// No Idempotency-Key or dedupeKey means no deduplication: identical bodies can represent distinct real events.
 /// </summary>
 public sealed class ExternalTriggerIngress(
     CodeSpaceDbContext db,
@@ -105,6 +105,12 @@ public sealed class ExternalTriggerIngress(
             if (authentication.Kind != ExternalTriggerOutcomeKind.Accepted || ticket is null)
                 return Outcome(ExternalTriggerOutcomeKind.Unauthorized);
         }
+        if (call.DedupeKey is not null && call.IdempotencyKey is not null)
+            return Outcome(ExternalTriggerOutcomeKind.InvalidPayload,
+                errors: ["dedupeKey and Idempotency-Key cannot be used together"]);
+        if (call.DedupeKey is not null && !ExternalTriggerIdempotency.IsWellFormed(call.DedupeKey))
+            return Outcome(ExternalTriggerOutcomeKind.InvalidPayload,
+                errors: [$"dedupeKey must be at most {ExternalTriggerIdempotency.MaxLength} characters from [A-Za-z0-9._~-]"]);
         if (call.IdempotencyRejected)
             return Outcome(ExternalTriggerOutcomeKind.InvalidPayload,
                 errors: [$"Idempotency-Key must be at most {ExternalTriggerIdempotency.MaxLength} characters from [A-Za-z0-9._~-]"]);
@@ -155,8 +161,11 @@ public sealed class ExternalTriggerIngress(
                 .SingleOrDefaultAsync(ct).ConfigureAwait(false);
             if (current != ticket) return Outcome(ExternalTriggerOutcomeKind.Unauthorized);
 
-            var idempotencyKey = call.IdempotencyKey is null ? null : ExternalTriggerIdempotency.KeyFor(call.IdempotencyKey, ticket.TriggerId);
-            var existing = await FindReplayAsync(idempotencyKey, payload, ct).ConfigureAwait(false);
+            var runRequestKey = call.DedupeKey is not null
+                ? ExternalTriggerIdempotency.DedupeKeyFor(call.DedupeKey, ticket.TriggerId)
+                : call.IdempotencyKey is null ? null : ExternalTriggerIdempotency.KeyFor(call.IdempotencyKey, ticket.TriggerId);
+            var bodyMustMatch = call.DedupeKey is null;
+            var existing = await FindReplayAsync(runRequestKey, payload, bodyMustMatch, ct).ConfigureAwait(false);
             if (existing is not null) return existing;
 
             var verification = await ResolveAsync(ticket, ct).ConfigureAwait(false);
@@ -178,7 +187,7 @@ public sealed class ExternalTriggerIngress(
                 ActivationId = verification.ActivationId,
                 ActivationSnapshotJson = verification.ActivationSnapshotJson,
                 NormalizedPayloadJson = payload.GetRawText(),
-                IdempotencyKey = idempotencyKey,
+                IdempotencyKey = runRequestKey,
             };
 
             var reservation = admission.Reserve(verification.TriggerId);
@@ -207,7 +216,7 @@ public sealed class ExternalTriggerIngress(
             if (runId == Guid.Empty)
             {
                 reservation.Release();
-                return await FindReplayAsync(idempotencyKey, payload, ct).ConfigureAwait(false)
+                return await FindReplayAsync(runRequestKey, payload, bodyMustMatch, ct).ConfigureAwait(false)
                     ?? throw new ExternalTriggerIdempotencyIntegrityException("External trigger duplicate has no durable run.");
             }
 
@@ -222,7 +231,7 @@ public sealed class ExternalTriggerIngress(
             return Outcome(ExternalTriggerOutcomeKind.Accepted, runId);
     }
 
-    private async Task<ExternalTriggerOutcome?> FindReplayAsync(string? key, JsonElement payload, CancellationToken ct)
+    private async Task<ExternalTriggerOutcome?> FindReplayAsync(string? key, JsonElement payload, bool bodyMustMatch, CancellationToken ct)
     {
         if (key is null) return null;
         var request = await db.WorkflowRunRequest.AsNoTracking().Where(r => r.IdempotencyKey == key)
@@ -232,7 +241,7 @@ public sealed class ExternalTriggerIngress(
             .Select(r => (Guid?)r.Id).SingleOrDefaultAsync(ct).ConfigureAwait(false)
             ?? throw new ExternalTriggerIdempotencyIntegrityException($"External trigger accepted request {request.Id} has no durable run.");
         using var stored = JsonDocument.Parse(request.NormalizedPayloadJson);
-        return ExternalTriggerJsonEquality.AreEquivalent(payload, stored.RootElement)
+        return !bodyMustMatch || ExternalTriggerJsonEquality.AreEquivalent(payload, stored.RootElement)
             ? Outcome(ExternalTriggerOutcomeKind.Deduplicated, runId)
             : new ExternalTriggerOutcome(ExternalTriggerOutcomeKind.Unprocessable, Guid.Empty, [], CodeSpace.Messages.Failures.FailureCodes.ExternalTriggerIdempotencyConflict);
     }

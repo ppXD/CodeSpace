@@ -267,6 +267,32 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task The_same_dedupe_key_twice_starts_one_run_even_when_the_body_changes()
+    {
+        var seed = await SeedAsync();
+        var first = await ReceiveAsync(seed, dedupeKey: "seq-window");
+        var second = await ReceiveAsync(seed, dedupeKey: "seq-window", body: "{\"service\":\"different\"}");
+        first.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        second.Kind.ShouldBe(ExternalTriggerOutcomeKind.Deduplicated);
+        second.RunId.ShouldBe(first.RunId);
+        (await RunsAsync(seed)).ShouldHaveSingleItem().Id.ShouldBe(first.RunId);
+    }
+
+    [Fact]
+    public async Task The_same_dedupe_key_on_two_triggers_does_not_deduplicate_across_them()
+    {
+        var firstSeed = await SeedAsync();
+        var secondSeed = await SeedAsync();
+        var first = await ReceiveAsync(firstSeed, dedupeKey: "shared-window");
+        var second = await ReceiveAsync(secondSeed, dedupeKey: "shared-window");
+        first.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        second.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        first.RunId.ShouldNotBe(second.RunId);
+        (await RunsAsync(firstSeed)).ShouldHaveSingleItem().Id.ShouldBe(first.RunId);
+        (await RunsAsync(secondSeed)).ShouldHaveSingleItem().Id.ShouldBe(second.RunId);
+    }
+
+    [Fact]
     public async Task Reusing_an_idempotency_key_with_different_content_is_a_conflict()
     {
         var seed = await SeedAsync();
@@ -487,10 +513,12 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         Enabled = true, CreatedBy = seed.UserId, LastModifiedBy = seed.UserId,
     };
 
-    private async Task<ExternalTriggerOutcome> ReceiveAsync(Seed seed, string? presentedKey = "use-seeded-key", string? idempotencyKey = null, string body = "{\"service\": \"api\"}", bool rejected = false)
+    private async Task<ExternalTriggerOutcome> ReceiveAsync(Seed seed, string? presentedKey = "use-seeded-key", string? idempotencyKey = null, string body = "{\"service\": \"api\"}", bool rejected = false, string? dedupeKey = null)
     {
         using var scope = fixture.BeginScope();
-        return await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(seed.TriggerId, presentedKey == "use-seeded-key" ? seed.Key : presentedKey, idempotencyKey, body, rejected), CancellationToken.None);
+        return await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(
+            new(seed.TriggerId, presentedKey == "use-seeded-key" ? seed.Key : presentedKey, idempotencyKey, body, rejected, DedupeKey: dedupeKey),
+            CancellationToken.None);
     }
 
     private async Task<WorkflowRun[]> RunsAsync(Seed seed)

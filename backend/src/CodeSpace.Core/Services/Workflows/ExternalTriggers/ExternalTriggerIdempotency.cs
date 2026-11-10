@@ -1,8 +1,8 @@
 namespace CodeSpace.Core.Services.Workflows.ExternalTriggers;
 
 /// <summary>
-/// No header means no idempotency key: deduplication belongs to the caller. Identical bodies can be retries or
-/// distinct heartbeats and periodic alerts; any server-derived fallback key would silently swallow real events.
+/// No idempotency header and no dedupe query key means no deduplication: identical bodies can be retries or distinct
+/// heartbeats and periodic alerts, so the caller must decide when they represent one event.
 /// </summary>
 public static class ExternalTriggerIdempotency
 {
@@ -17,4 +17,11 @@ public static class ExternalTriggerIdempotency
     /// every workflow save, so an activation-scoped key would stop deduplicating after an ordinary edit.
     /// </summary>
     public static string KeyFor(string value, Guid triggerId) => $"{ExternalTriggerSlug.TypeKey}:{value}:{triggerId:N}";
+
+    /// <summary>
+    /// Event-level merge keys are intentionally not comparable to caller idempotency keys: a dedupe replay returns
+    /// the first run without inspecting the body. The prefix keeps both scopes in one durable unique-key index while
+    /// preventing a caller-supplied idempotency value from ever occupying the dedupe namespace.
+    /// </summary>
+    public static string DedupeKeyFor(string value, Guid triggerId) => $"dedupe:{value}:{triggerId:N}";
 }

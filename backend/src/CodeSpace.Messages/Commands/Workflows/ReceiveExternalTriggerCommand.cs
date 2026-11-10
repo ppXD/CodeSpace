@@ -20,6 +20,9 @@ public sealed record ReceiveExternalTriggerCommand : ICommand<ExternalTriggerDel
     /// <summary>Null when the caller sent no <c>Idempotency-Key</c>, or sent only whitespace — deduplication is then the caller's business.</summary>
     public required string? IdempotencyKey { get; init; }
 
+    /// <summary>Optional event-level merge key supplied as the <c>dedupeKey</c> query parameter.</summary>
+    public string? DedupeKey { get; init; }
+
     /// <summary>True when a key WAS presented but is malformed; the ingress answers 400 without staging anything.</summary>
     public required bool IdempotencyRejected { get; init; }
 

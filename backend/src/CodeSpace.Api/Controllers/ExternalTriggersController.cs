@@ -39,6 +39,14 @@ public class ExternalTriggersController : ControllerBase
         if (verification.Kind is ExternalTriggerDeliveryKind.NotFound or ExternalTriggerDeliveryKind.Unauthorized)
             return Unauthorized(new { code = FailureCodes.Unauthorized, message = "Invalid external trigger credentials." });
 
+        var idempotencyHeader = Request.Headers["Idempotency-Key"].ToString();
+        var idempotencyKey = string.IsNullOrWhiteSpace(idempotencyHeader) ? null : idempotencyHeader;
+        var idempotencyRejected = idempotencyKey != null && !ExternalTriggerIdempotency.IsWellFormed(idempotencyKey);
+        var dedupeKey = Request.Query.TryGetValue("dedupeKey", out var dedupeValues) ? dedupeValues.ToString() : null;
+        if (dedupeKey is not null && idempotencyKey is not null)
+            return BadRequest(new { code = FailureCodes.InvalidRequest, message = "Invalid external trigger input.",
+                errors = new[] { "dedupeKey and Idempotency-Key cannot be used together" } });
+
         JsonDocument document;
         try { document = await BoundedJsonBodyReader.ReadAsync(Request, cancellationToken).ConfigureAwait(false); }
         catch (BoundedJsonBodyReader.BodyTooLargeException)
@@ -47,15 +55,13 @@ public class ExternalTriggersController : ControllerBase
         { return BadRequest(new { code = FailureCodes.InvalidRequest, message = "Invalid external trigger input.", errors = new[] { "$: body must be a JSON object" } }); }
         using var body = document;
 
-        var idempotencyHeader = Request.Headers["Idempotency-Key"].ToString();
-        var idempotencyKey = string.IsNullOrWhiteSpace(idempotencyHeader) ? null : idempotencyHeader;
-        var idempotencyRejected = idempotencyKey != null && !ExternalTriggerIdempotency.IsWellFormed(idempotencyKey);
         var outcome = await _mediator.Send(new ReceiveExternalTriggerCommand
         {
             TriggerId = triggerId,
             PresentedKey = presentedKey,
             IdempotencyKey = idempotencyKey,
             IdempotencyRejected = idempotencyRejected,
+            DedupeKey = dedupeKey,
             Body = body.RootElement,
         }, cancellationToken).ConfigureAwait(false);
 
