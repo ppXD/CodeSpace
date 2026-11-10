@@ -353,6 +353,18 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     }
 
     [Fact]
+    public async Task An_invalid_dedupe_key_is_rejected_before_the_body_is_read()
+    {
+        var seed = await SeedAsync();
+        using var response = await PostAsync(Url(seed) + "?dedupeKey=bad%20key", "not json", apiKey: seed.Key);
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        payload.GetProperty("errors").EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { "dedupeKey must be at most 200 characters from [A-Za-z0-9._~-]" });
+        await ShouldHaveNoRequestsAsync(seed);
+    }
+
+    [Fact]
     public async Task A_dedupe_key_is_not_a_credential()
     {
         var seed = await SeedAsync();

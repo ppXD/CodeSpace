@@ -46,6 +46,9 @@ public class ExternalTriggersController : ControllerBase
         if (dedupeKey is not null && idempotencyKey is not null)
             return BadRequest(new { code = FailureCodes.InvalidRequest, message = "Invalid external trigger input.",
                 errors = new[] { "dedupeKey and Idempotency-Key cannot be used together" } });
+        if (dedupeKey is not null && !ExternalTriggerIdempotency.IsWellFormed(dedupeKey))
+            return BadRequest(new { code = FailureCodes.InvalidRequest, message = "Invalid external trigger input.",
+                errors = new[] { $"dedupeKey must be at most {ExternalTriggerIdempotency.MaxLength} characters from [A-Za-z0-9._~-]" } });
 
         JsonDocument document;
         try { document = await BoundedJsonBodyReader.ReadAsync(Request, cancellationToken).ConfigureAwait(false); }
