@@ -365,6 +365,18 @@ public sealed class ExternalTriggerEndpointE2ETests(WebhookApiFactory factory) :
     }
 
     [Fact]
+    public async Task A_duplicate_dedupe_query_is_400_and_starts_nothing()
+    {
+        var seed = await SeedAsync();
+        using var response = await PostAsync(Url(seed) + "?dedupeKey=first&dedupeKey=second", BODY, apiKey: seed.Key);
+        response.StatusCode.ShouldBe(HttpStatusCode.BadRequest);
+        var payload = await response.Content.ReadFromJsonAsync<JsonElement>();
+        payload.GetProperty("errors").EnumerateArray().Select(e => e.GetString())
+            .ShouldBe(new[] { "dedupeKey must be specified at most once" });
+        await ShouldHaveNoRequestsAsync(seed);
+    }
+
+    [Fact]
     public async Task A_dedupe_key_is_not_a_credential()
     {
         var seed = await SeedAsync();

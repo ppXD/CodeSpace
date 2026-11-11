@@ -84,6 +84,26 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Direct_ingress_rejects_a_dedupe_key_with_an_idempotency_key()
+    {
+        var seed = await SeedAsync();
+        var outcome = await ReceiveAsync(seed, idempotencyKey: "header-key", dedupeKey: "query-key", body: "bad");
+        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.InvalidPayload);
+        outcome.Errors.ShouldBe(new[] { "dedupeKey and Idempotency-Key cannot be used together" });
+        (await RequestsAsync(seed)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Direct_ingress_rejects_an_invalid_dedupe_key_before_body_validation()
+    {
+        var seed = await SeedAsync();
+        var outcome = await ReceiveAsync(seed, dedupeKey: "bad key", body: "bad");
+        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.InvalidPayload);
+        outcome.Errors.ShouldBe(new[] { "dedupeKey must be at most 200 characters from [A-Za-z0-9._~-]" });
+        (await RequestsAsync(seed)).ShouldBeEmpty();
+    }
+
+    [Fact]
     public async Task An_unknown_trigger_is_unauthorized()
     {
         var seed = await SeedAsync();
@@ -349,6 +369,20 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         results.Select(r => r.RunId).Distinct().ShouldHaveSingleItem().ShouldNotBe(Guid.Empty);
         results.Count(r => r.Kind == ExternalTriggerOutcomeKind.Accepted).ShouldBe(1);
         results.Count(r => r.Kind == ExternalTriggerOutcomeKind.Deduplicated).ShouldBe(7);
+    }
+
+    [Fact]
+    public async Task Concurrent_deliveries_of_one_dedupe_key_with_different_bodies_start_exactly_one_run()
+    {
+        var seed = await SeedAsync();
+        var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => ReceiveAsync(seed,
+            dedupeKey: "seq-concurrent", body: $"{{\"service\":\"{i}\"}}")));
+        var accepted = outcomes.Where(o => o.Kind == ExternalTriggerOutcomeKind.Accepted).ShouldHaveSingleItem();
+        accepted.RunId.ShouldNotBe(Guid.Empty);
+        outcomes.Count(o => o.Kind == ExternalTriggerOutcomeKind.Deduplicated).ShouldBe(7);
+        outcomes.ShouldAllBe(o => o.Kind == ExternalTriggerOutcomeKind.Accepted || o.Kind == ExternalTriggerOutcomeKind.Deduplicated);
+        outcomes.ShouldAllBe(o => o.RunId == accepted.RunId);
+        (await RunsAsync(seed)).ShouldHaveSingleItem().Id.ShouldBe(accepted.RunId);
     }
 
     [Fact]

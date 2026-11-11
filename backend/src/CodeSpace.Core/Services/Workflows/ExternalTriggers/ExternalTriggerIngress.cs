@@ -105,12 +105,8 @@ public sealed class ExternalTriggerIngress(
             if (authentication.Kind != ExternalTriggerOutcomeKind.Accepted || ticket is null)
                 return Outcome(ExternalTriggerOutcomeKind.Unauthorized);
         }
-        if (call.DedupeKey is not null && call.IdempotencyKey is not null)
-            return Outcome(ExternalTriggerOutcomeKind.InvalidPayload,
-                errors: ["dedupeKey and Idempotency-Key cannot be used together"]);
-        if (call.DedupeKey is not null && !ExternalTriggerIdempotency.IsWellFormed(call.DedupeKey))
-            return Outcome(ExternalTriggerOutcomeKind.InvalidPayload,
-                errors: [$"dedupeKey must be at most {ExternalTriggerIdempotency.MaxLength} characters from [A-Za-z0-9._~-]"]);
+        if (ExternalTriggerIdempotency.GetDedupeKeyError(call.DedupeKey, call.IdempotencyKey) is { } dedupeKeyError)
+            return Outcome(ExternalTriggerOutcomeKind.InvalidPayload, errors: [dedupeKeyError]);
         if (call.IdempotencyRejected)
             return Outcome(ExternalTriggerOutcomeKind.InvalidPayload,
                 errors: [$"Idempotency-Key must be at most {ExternalTriggerIdempotency.MaxLength} characters from [A-Za-z0-9._~-]"]);

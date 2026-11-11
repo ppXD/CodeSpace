@@ -36,7 +36,7 @@ export function ExternalTriggerInspector({ config, currentTriggerId, onConfigCha
   const error = reveal.error ?? rotate.error;
   const endpoint = currentTriggerId ? `/api/ext/${encodeURIComponent(currentTriggerId)}/run` : null;
   const fullUrl = endpoint ? externalTriggerUrl(endpoint) : "";
-  const curl = key ? `curl -X POST '${fullUrl}' -H 'Authorization: Bearer ${key}' -H 'Content-Type: application/json' -d '{}'` : null;
+  const curl = key ? `curl -X POST '${fullUrl}?dedupeKey=seq-429-2026111114' -H 'Authorization: Bearer ${key}' -H 'Content-Type: application/json' -d '{}'` : null;
 
   const changeFields = (next: WorkflowVariable[]) => {
     const unappliedMetadata: string[] = [];
@@ -94,6 +94,7 @@ export function ExternalTriggerInspector({ config, currentTriggerId, onConfigCha
             <div className="wf-form-row"><span className="wf-form-label">Trigger ID</span><code style={{ overflowWrap: "anywhere" }}>{currentTriggerId}</code></div>
             <code style={{ display: "block", overflowWrap: "anywhere" }}>{endpoint}</code>
             <button type="button" className="btn btn-ghost" title="Copy endpoint" aria-label="Copy endpoint" onClick={() => void copy(fullUrl)}><Ic.Copy size={13} /></button>
+            <p className="wf-retry-hint">After a delivery is accepted for a dedupeKey, later deliveries with the same dedupeKey return that run, even if the run later fails; retrying cannot replace it. To dedupe only within an event window or time bucket, include that window in the key, for example seq-429-2026111114. Do not combine dedupeKey with Idempotency-Key.</p>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
               <button type="button" className="btn" disabled={pending} onClick={requestKey}>Show key</button>
               <button type="button" className="btn" disabled={pending} onClick={() => setConfirming(true)}>Regenerate</button>
