@@ -84,6 +84,26 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task Direct_ingress_rejects_a_dedupe_key_with_an_idempotency_key()
+    {
+        var seed = await SeedAsync();
+        var outcome = await ReceiveAsync(seed, idempotencyKey: "header-key", dedupeKey: "query-key", body: "bad");
+        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.InvalidPayload);
+        outcome.Errors.ShouldBe(new[] { "dedupeKey and Idempotency-Key cannot be used together" });
+        (await RequestsAsync(seed)).ShouldBeEmpty();
+    }
+
+    [Fact]
+    public async Task Direct_ingress_rejects_an_invalid_dedupe_key_before_body_validation()
+    {
+        var seed = await SeedAsync();
+        var outcome = await ReceiveAsync(seed, dedupeKey: "bad key", body: "bad");
+        outcome.Kind.ShouldBe(ExternalTriggerOutcomeKind.InvalidPayload);
+        outcome.Errors.ShouldBe(new[] { "dedupeKey must be at most 200 characters from [A-Za-z0-9._~-]" });
+        (await RequestsAsync(seed)).ShouldBeEmpty();
+    }
+
+    [Fact]
     public async Task An_unknown_trigger_is_unauthorized()
     {
         var seed = await SeedAsync();
@@ -267,6 +287,32 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
     }
 
     [Fact]
+    public async Task The_same_dedupe_key_twice_starts_one_run_even_when_the_body_changes()
+    {
+        var seed = await SeedAsync();
+        var first = await ReceiveAsync(seed, dedupeKey: "seq-window");
+        var second = await ReceiveAsync(seed, dedupeKey: "seq-window", body: "{\"service\":\"different\"}");
+        first.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        second.Kind.ShouldBe(ExternalTriggerOutcomeKind.Deduplicated);
+        second.RunId.ShouldBe(first.RunId);
+        (await RunsAsync(seed)).ShouldHaveSingleItem().Id.ShouldBe(first.RunId);
+    }
+
+    [Fact]
+    public async Task The_same_dedupe_key_on_two_triggers_does_not_deduplicate_across_them()
+    {
+        var firstSeed = await SeedAsync();
+        var secondSeed = await SeedAsync();
+        var first = await ReceiveAsync(firstSeed, dedupeKey: "shared-window");
+        var second = await ReceiveAsync(secondSeed, dedupeKey: "shared-window");
+        first.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        second.Kind.ShouldBe(ExternalTriggerOutcomeKind.Accepted);
+        first.RunId.ShouldNotBe(second.RunId);
+        (await RunsAsync(firstSeed)).ShouldHaveSingleItem().Id.ShouldBe(first.RunId);
+        (await RunsAsync(secondSeed)).ShouldHaveSingleItem().Id.ShouldBe(second.RunId);
+    }
+
+    [Fact]
     public async Task Reusing_an_idempotency_key_with_different_content_is_a_conflict()
     {
         var seed = await SeedAsync();
@@ -323,6 +369,20 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         results.Select(r => r.RunId).Distinct().ShouldHaveSingleItem().ShouldNotBe(Guid.Empty);
         results.Count(r => r.Kind == ExternalTriggerOutcomeKind.Accepted).ShouldBe(1);
         results.Count(r => r.Kind == ExternalTriggerOutcomeKind.Deduplicated).ShouldBe(7);
+    }
+
+    [Fact]
+    public async Task Concurrent_deliveries_of_one_dedupe_key_with_different_bodies_start_exactly_one_run()
+    {
+        var seed = await SeedAsync();
+        var outcomes = await Task.WhenAll(Enumerable.Range(0, 8).Select(i => ReceiveAsync(seed,
+            dedupeKey: "seq-concurrent", body: $"{{\"service\":\"{i}\"}}")));
+        var accepted = outcomes.Where(o => o.Kind == ExternalTriggerOutcomeKind.Accepted).ShouldHaveSingleItem();
+        accepted.RunId.ShouldNotBe(Guid.Empty);
+        outcomes.Count(o => o.Kind == ExternalTriggerOutcomeKind.Deduplicated).ShouldBe(7);
+        outcomes.ShouldAllBe(o => o.Kind == ExternalTriggerOutcomeKind.Accepted || o.Kind == ExternalTriggerOutcomeKind.Deduplicated);
+        outcomes.ShouldAllBe(o => o.RunId == accepted.RunId);
+        (await RunsAsync(seed)).ShouldHaveSingleItem().Id.ShouldBe(accepted.RunId);
     }
 
     [Fact]
@@ -487,10 +547,12 @@ public class ExternalTriggerIngressFlowTests(PostgresFixture fixture)
         Enabled = true, CreatedBy = seed.UserId, LastModifiedBy = seed.UserId,
     };
 
-    private async Task<ExternalTriggerOutcome> ReceiveAsync(Seed seed, string? presentedKey = "use-seeded-key", string? idempotencyKey = null, string body = "{\"service\": \"api\"}", bool rejected = false)
+    private async Task<ExternalTriggerOutcome> ReceiveAsync(Seed seed, string? presentedKey = "use-seeded-key", string? idempotencyKey = null, string body = "{\"service\": \"api\"}", bool rejected = false, string? dedupeKey = null)
     {
         using var scope = fixture.BeginScope();
-        return await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(new(seed.TriggerId, presentedKey == "use-seeded-key" ? seed.Key : presentedKey, idempotencyKey, body, rejected), CancellationToken.None);
+        return await scope.Resolve<IExternalTriggerIngress>().ReceiveAsync(
+            new(seed.TriggerId, presentedKey == "use-seeded-key" ? seed.Key : presentedKey, idempotencyKey, body, rejected, DedupeKey: dedupeKey),
+            CancellationToken.None);
     }
 
     private async Task<WorkflowRun[]> RunsAsync(Seed seed)

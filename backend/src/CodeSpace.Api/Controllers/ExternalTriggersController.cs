@@ -26,6 +26,16 @@ public class ExternalTriggersController : ControllerBase
 
     public ExternalTriggersController(IMediator mediator) { _mediator = mediator; }
 
+    /// <summary>
+    /// Receives one anonymous external-trigger delivery after authenticating the trigger key.
+    /// </summary>
+    /// <remarks>
+    /// <c>dedupeKey</c> must be specified at most once and cannot be empty. Once a delivery is accepted for a
+    /// <c>dedupeKey</c>, later deliveries with the same key return that run even if the run later fails; repeating
+    /// the delivery cannot replace it. Callers that need event-window scoping must encode the window or time bucket
+    /// in the key itself. A blank <c>Idempotency-Key</c> is treated as absent. <c>dedupeKey</c> cannot be combined
+    /// with a non-blank <c>Idempotency-Key</c>.
+    /// </remarks>
     [HttpPost("{triggerId:guid}/run")]
     [RequestSizeLimit(BoundedJsonBodyReader.MaxBytes + 1)]
     public async Task<IActionResult> Run([FromRoute] Guid triggerId, CancellationToken cancellationToken)
@@ -39,6 +49,15 @@ public class ExternalTriggersController : ControllerBase
         if (verification.Kind is ExternalTriggerDeliveryKind.NotFound or ExternalTriggerDeliveryKind.Unauthorized)
             return Unauthorized(new { code = FailureCodes.Unauthorized, message = "Invalid external trigger credentials." });
 
+        var idempotencyHeader = Request.Headers["Idempotency-Key"].ToString();
+        var idempotencyKey = string.IsNullOrWhiteSpace(idempotencyHeader) ? null : idempotencyHeader;
+        var idempotencyRejected = idempotencyKey != null && !ExternalTriggerIdempotency.IsWellFormed(idempotencyKey);
+        var dedupeSpecified = Request.Query.TryGetValue("dedupeKey", out var dedupeValues);
+        var dedupeKey = dedupeSpecified ? dedupeValues.ToString() : null;
+        var dedupeKeyError = ExternalTriggerIdempotency.GetDedupeKeyError(dedupeKey, idempotencyKey, dedupeValues.Count > 1);
+        if (dedupeKeyError is not null)
+            return BadRequest(new { code = FailureCodes.InvalidRequest, message = "Invalid external trigger input.", errors = new[] { dedupeKeyError } });
+
         JsonDocument document;
         try { document = await BoundedJsonBodyReader.ReadAsync(Request, cancellationToken).ConfigureAwait(false); }
         catch (BoundedJsonBodyReader.BodyTooLargeException)
@@ -47,15 +66,13 @@ public class ExternalTriggersController : ControllerBase
         { return BadRequest(new { code = FailureCodes.InvalidRequest, message = "Invalid external trigger input.", errors = new[] { "$: body must be a JSON object" } }); }
         using var body = document;
 
-        var idempotencyHeader = Request.Headers["Idempotency-Key"].ToString();
-        var idempotencyKey = string.IsNullOrWhiteSpace(idempotencyHeader) ? null : idempotencyHeader;
-        var idempotencyRejected = idempotencyKey != null && !ExternalTriggerIdempotency.IsWellFormed(idempotencyKey);
         var outcome = await _mediator.Send(new ReceiveExternalTriggerCommand
         {
             TriggerId = triggerId,
             PresentedKey = presentedKey,
             IdempotencyKey = idempotencyKey,
             IdempotencyRejected = idempotencyRejected,
+            DedupeKey = dedupeKey,
             Body = body.RootElement,
         }, cancellationToken).ConfigureAwait(false);
 

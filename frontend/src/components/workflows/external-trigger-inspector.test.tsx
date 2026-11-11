@@ -52,11 +52,13 @@ describe("ExternalTriggerInspector", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(/blocked.*label.*default.*could not be applied.*constraint.*preserved/i);
   });
 
-  it("shows the keyless canonical endpoint and only copies a key-bearing curl after reveal", async () => {
+  it("shows the keyless canonical endpoint, permanent dedupe guidance, and only copies a key-bearing curl after reveal", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText } });
     renderInspector();
     expect(screen.getByText("/api/ext/56da5193-d2a0-4309-9ed7-eef395d72124/run")).toBeInTheDocument();
+    expect(screen.getByText(/after a delivery is accepted.*same dedupeKey.*returns? that run.*even if.*fails/i)).toBeInTheDocument();
+    expect(screen.getByText(/seq-429-2026111114/)).toBeInTheDocument();
     expect(REQUESTS).not.toHaveBeenCalled();
     expect(screen.queryByDisplayValue(/^ext_/)).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: /show key/i }));
@@ -68,6 +70,7 @@ describe("ExternalTriggerInspector", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/api/ext/56da5193-d2a0-4309-9ed7-eef395d72124/run")));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("curl -X POST"));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Authorization: Bearer ext_secret"));
+    expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("?dedupeKey="));
     expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("?key="));
   });
 
