@@ -70,7 +70,7 @@ describe("ExternalTriggerInspector", () => {
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(expect.stringContaining("/api/ext/56da5193-d2a0-4309-9ed7-eef395d72124/run")));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("curl -X POST"));
     expect(writeText).toHaveBeenCalledWith(expect.stringContaining("Authorization: Bearer ext_secret"));
-    expect(writeText).toHaveBeenCalledWith(expect.stringContaining("?dedupeKey=seq-429-2026111114"));
+    expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("?dedupeKey="));
     expect(writeText).not.toHaveBeenCalledWith(expect.stringContaining("?key="));
   });
 

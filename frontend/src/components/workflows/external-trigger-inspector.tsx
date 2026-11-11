@@ -36,7 +36,7 @@ export function ExternalTriggerInspector({ config, currentTriggerId, onConfigCha
   const error = reveal.error ?? rotate.error;
   const endpoint = currentTriggerId ? `/api/ext/${encodeURIComponent(currentTriggerId)}/run` : null;
   const fullUrl = endpoint ? externalTriggerUrl(endpoint) : "";
-  const curl = key ? `curl -X POST '${fullUrl}?dedupeKey=seq-429-2026111114' -H 'Authorization: Bearer ${key}' -H 'Content-Type: application/json' -d '{}'` : null;
+  const curl = key ? `curl -X POST '${fullUrl}' -H 'Authorization: Bearer ${key}' -H 'Content-Type: application/json' -d '{}'` : null;
 
   const changeFields = (next: WorkflowVariable[]) => {
     const unappliedMetadata: string[] = [];
