@@ -63,6 +63,7 @@ public class FailureTaxonomyTests
         FailureCodes.Forbidden.ShouldBe("forbidden");
         FailureCodes.Unauthorized.ShouldBe("unauthorized");
         FailureCodes.InvalidCredentials.ShouldBe("invalid_credentials");
+        FailureCodes.SignInNameAmbiguous.ShouldBe("sign_in_name_ambiguous");
         FailureCodes.PasswordRotationRequired.ShouldBe("password_rotation_required");
         FailureCodes.ActorIdentityRequired.ShouldBe("actor_identity_required");
         FailureCodes.ActorRepoPermissionDenied.ShouldBe("actor_repo_permission_denied");
