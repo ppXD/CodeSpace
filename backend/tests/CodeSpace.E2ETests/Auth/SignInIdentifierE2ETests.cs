@@ -88,8 +88,15 @@ public sealed class SignInIdentifierE2ETests : IClassFixture<TaskLaunchApiFactor
         await _tenants.AccountAsync(email: firstEmail, name: shared, password: VictimPassword);
         await _tenants.AccountAsync(name: shared, password: AttackerPassword);
 
-        (await SignInAsync(shared, VictimPassword)).StatusCode.ShouldBe(HttpStatusCode.Unauthorized, "an ambiguous name names nobody");
-        (await SignInAsync(shared, AttackerPassword)).StatusCode.ShouldBe(HttpStatusCode.Unauthorized, "an ambiguous name names nobody");
+        var first = await SignInAsync(shared, VictimPassword);
+        var second = await SignInAsync(shared, AttackerPassword);
+
+        first.StatusCode.ShouldBe(HttpStatusCode.Unauthorized, "an ambiguous name names nobody");
+        var firstBody = JsonDocument.Parse(await first.Content.ReadAsStringAsync()).RootElement;
+        firstBody.GetProperty("code").GetString().ShouldBe("sign_in_name_ambiguous");
+        firstBody.GetProperty("message").GetString().ShouldContain("email");
+        (await CodeOfAsync(second)).ShouldBe("sign_in_name_ambiguous");
+        (await CodeOfAsync(await SignInAsync(shared, "not-either-password"))).ShouldBe("invalid_credentials", "a wrong password must not reveal that the name is shared");
         (await SignInAsync(firstEmail, VictimPassword)).StatusCode.ShouldBe(HttpStatusCode.OK, "the address still signs its owner in");
     }
 

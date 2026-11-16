@@ -148,6 +148,17 @@ public class GlobalExceptionFilterTests
         body.GetProperty("message").GetString().ShouldNotBeNullOrWhiteSpace();
     }
 
+    [Fact]
+    public void An_ambiguous_sign_in_name_maps_to_401_with_a_way_to_recover()
+    {
+        var result = Run(new SignInNameAmbiguousException());
+        var body = Body(result);
+
+        result.StatusCode.ShouldBe(StatusCodes.Status401Unauthorized);
+        body.GetProperty("code").GetString().ShouldBe("sign_in_name_ambiguous");
+        body.GetProperty("message").GetString()!.ShouldContain("email");
+    }
+
     private static ObjectResult Run(Exception exception)
     {
         var filter = new GlobalExceptionFilter(NullLogger<GlobalExceptionFilter>.Instance);

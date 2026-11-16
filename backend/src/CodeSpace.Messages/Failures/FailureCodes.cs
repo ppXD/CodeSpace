@@ -25,6 +25,8 @@ public static class FailureCodes
     // ── Identity and access ────────────────────────────────────────────────────────
     public const string Unauthorized = "unauthorized";
     public const string InvalidCredentials = "invalid_credentials";
+    /// <summary>A display name names more than one live account, so sign-in cannot tell which person is asking. Remedy: sign in with the account's email instead; retrying the same name cannot help while the collision exists.</summary>
+    public const string SignInNameAmbiguous = "sign_in_name_ambiguous";
     public const string Forbidden = "forbidden";
     public const string PasswordRotationRequired = "password_rotation_required";
     public const string ActorIdentityRequired = "actor_identity_required";

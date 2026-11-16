@@ -31,7 +31,19 @@ public sealed class UserService : IUserService, IScopedDependency
 
     public async Task<SignInResponse> SignInAsync(string nameOrEmail, string password, CancellationToken cancellationToken)
     {
-        var user = await LookupUserAsync(nameOrEmail, cancellationToken).ConfigureAwait(false);
+        var lookup = await LookupUserAsync(nameOrEmail, cancellationToken).ConfigureAwait(false);
+
+        // A duplicate display name still signs nobody in. Only after the password matches one of its
+        // carriers is it safe to name the remedy — otherwise an attacker could learn that a name is
+        // shared without knowing any credential, turning sign-in into an account-enumeration oracle.
+        if (lookup.NameCarriers.Count > 1)
+        {
+            var matchesCarrier = lookup.NameCarriers.Any(u => !string.IsNullOrEmpty(u.PasswordHash) && _hasher.Verify(password, u.PasswordHash));
+
+            throw matchesCarrier ? new SignInNameAmbiguousException() : new InvalidCredentialsException();
+        }
+
+        var user = lookup.User;
 
         if (user == null || string.IsNullOrEmpty(user.PasswordHash) || !_hasher.Verify(password, user.PasswordHash))
             throw new InvalidCredentialsException();
@@ -138,23 +150,28 @@ public sealed class UserService : IUserService, IScopedDependency
     /// address, so one can never take a name's sign-in away from its holder.</item>
     /// </list>
     ///
-    /// <para>Anything ambiguous signs in nobody: "invalid credentials", the same answer as a wrong password.</para>
+    /// <para>Anything ambiguous signs in nobody. A display-name collision says so and points at the account's email,
+    /// because that is the identifier still available to the caller; an address collision stays "invalid credentials".</para>
     /// </summary>
-    private async Task<User?> LookupUserAsync(string identifier, CancellationToken cancellationToken)
+    private async Task<SignInLookup> LookupUserAsync(string identifier, CancellationToken cancellationToken)
     {
         var trimmed = identifier.Trim();
 
-        if (SignInIdentifier.LooksLikeEmail(trimmed)) return await AccountAddress.ResolveAsync(_db.User, trimmed, cancellationToken).ConfigureAwait(false);
+        if (SignInIdentifier.LooksLikeEmail(trimmed))
+            return new SignInLookup(await AccountAddress.ResolveAsync(_db.User, trimmed, cancellationToken).ConfigureAwait(false), Array.Empty<User>());
 
         var carriers = await FindNameCarriersAsync(trimmed, cancellationToken).ConfigureAwait(false);
 
         return carriers.Count switch
         {
-            1 => carriers[0],
-            0 => await AccountAddress.ResolveAsync(_db.User, trimmed, cancellationToken).ConfigureAwait(false),
-            _ => null,
+            1 => new SignInLookup(carriers[0], Array.Empty<User>()),
+            0 => new SignInLookup(await AccountAddress.ResolveAsync(_db.User, trimmed, cancellationToken).ConfigureAwait(false), Array.Empty<User>()),
+            _ => new SignInLookup(null, carriers),
         };
     }
+
+    /// <summary>The account a unique identifier names, or every carrier of an ambiguous display name.</summary>
+    private sealed record SignInLookup(User? User, IReadOnlyList<User> NameCarriers);
 
     /// <summary>Up to two live accounts carrying this display name — enough to tell "one" from "ambiguous".</summary>
     private async Task<List<User>> FindNameCarriersAsync(string name, CancellationToken cancellationToken)

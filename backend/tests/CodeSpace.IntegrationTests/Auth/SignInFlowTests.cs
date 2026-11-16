@@ -194,7 +194,8 @@ public class SignInFlowTests
     public async Task A_display_name_two_live_accounts_carry_signs_in_neither()
     {
         // Ambiguity resolves to nobody rather than to whichever id sorts first — so a duplicate can take a name away
-        // from its holder, but can never hand the holder's sign-in to someone else.
+        // from its holder, but can never hand the holder's sign-in to someone else. The refusal names the way out:
+        // each account's own address still signs it in.
         var name = $"Shared {Guid.NewGuid():N}";
         var first = await SeedAccountAsync(email: $"first-{Guid.NewGuid():N}@corp.test", name, "first-password-1").ConfigureAwait(false);
         await SeedAccountAsync(email: $"second-{Guid.NewGuid():N}@corp.test", name, "second-password-1").ConfigureAwait(false);
@@ -205,9 +206,35 @@ public class SignInFlowTests
         var byFirst = async () => await mediator.Send(new SignInCommand { Name = name, Password = "first-password-1" }).ConfigureAwait(false);
         var bySecond = async () => await mediator.Send(new SignInCommand { Name = name, Password = "second-password-1" }).ConfigureAwait(false);
 
-        await byFirst.ShouldThrowAsync<InvalidCredentialsException>().ConfigureAwait(false);
-        await bySecond.ShouldThrowAsync<InvalidCredentialsException>().ConfigureAwait(false);
+        (await byFirst.ShouldThrowAsync<SignInNameAmbiguousException>().ConfigureAwait(false)).ClientMessage.ShouldContain("email");
+        await bySecond.ShouldThrowAsync<SignInNameAmbiguousException>().ConfigureAwait(false);
         (await mediator.Send(new SignInCommand { Name = first.Email, Password = "first-password-1" }).ConfigureAwait(false)).User.Id.ShouldBe(first.Id);
+    }
+
+    [Fact]
+    public async Task An_unknown_display_name_still_reads_as_invalid_credentials()
+    {
+        using var scope = _fixture.BeginScope();
+        var mediator = scope.Resolve<IMediator>();
+
+        var act = async () => await mediator.Send(new SignInCommand { Name = $"unknown-{Guid.NewGuid():N}", Password = "anything" }).ConfigureAwait(false);
+
+        await act.ShouldThrowAsync<InvalidCredentialsException>().ConfigureAwait(false);
+    }
+
+    [Fact]
+    public async Task A_wrong_password_on_an_ambiguous_display_name_does_not_reveal_the_collision()
+    {
+        var name = $"Shared {Guid.NewGuid():N}";
+        await SeedAccountAsync(email: $"first-{Guid.NewGuid():N}@corp.test", name, "first-password-1").ConfigureAwait(false);
+        await SeedAccountAsync(email: $"second-{Guid.NewGuid():N}@corp.test", name, "second-password-1").ConfigureAwait(false);
+
+        using var scope = _fixture.BeginScope();
+        var mediator = scope.Resolve<IMediator>();
+
+        var act = async () => await mediator.Send(new SignInCommand { Name = name, Password = "not-either-password" }).ConfigureAwait(false);
+
+        await act.ShouldThrowAsync<InvalidCredentialsException>().ConfigureAwait(false);
     }
 
     [Fact]
